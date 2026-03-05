@@ -1,30 +1,33 @@
-import { PageConfig } from '@jupyterlab/coreutils';
+// Copyright (c) Jupyter Development Team.
+// Distributed under the terms of the Modified BSD License.
 
 import type { KernelMessage } from '@jupyterlab/services';
 
 import { BaseKernel, type IKernel } from '@jupyterlite/services';
 
-import { PromiseDelegate } from '@lumino/coreutils';
-
-import { wrap } from 'comlink';
-
-import { IRemoteJavaScriptWorkerKernel } from './tokens';
+import type { JavaScriptExecutor } from './executor';
+import { normalizeError as normalizeUnknownError } from './errors';
+import {
+  IFrameRuntimeBackend,
+  IRuntimeBackend,
+  WorkerRuntimeBackend
+} from './runtime_backends';
+import type { RuntimeMode, RuntimeOutputMessage } from './runtime_protocol';
 
 /**
- * A kernel that executes code in an IFrame.
+ * A kernel that executes JavaScript code in browser runtimes.
  */
 export class JavaScriptKernel extends BaseKernel implements IKernel {
   /**
-   * Instantiate a new JavaScriptKernel
+   * Instantiate a new JavaScriptKernel.
    *
-   * @param options The instantiation options for a new JavaScriptKernel
+   * @param options - The instantiation options for a new JavaScriptKernel.
    */
   constructor(options: JavaScriptKernel.IOptions) {
     super(options);
-    this._worker = this.initWorker(options);
-    this._worker.onmessage = e => this._processWorkerMessage(e.data);
-    this.remoteKernel = this.initRemote(options);
-    this._ready.resolve();
+    this._runtimeMode = options.runtime ?? 'iframe';
+    this._executorFactory = options.executorFactory;
+    this._backend = this.createBackend(this._runtimeMode);
   }
 
   /**
@@ -34,22 +37,32 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
     if (this.isDisposed) {
       return;
     }
-    this._worker.terminate();
-    (this._worker as any) = null;
+
+    this._backend.dispose();
     super.dispose();
   }
 
   /**
-   * A promise that is fulfilled when the kernel is ready.
+   * A promise that is fulfilled when the kernel runtime is ready.
    */
   get ready(): Promise<void> {
-    return this._ready.promise;
+    return this._backend.ready;
   }
 
   /**
-   * Handle a kernel_info_request message
+   * The active runtime backend.
+   */
+  protected get runtimeBackend(): IRuntimeBackend {
+    return this._backend;
+  }
+
+  /**
+   * Handle a kernel_info_request message.
    */
   async kernelInfoRequest(): Promise<KernelMessage.IInfoReplyMsg['content']> {
+    const runtimeName =
+      this._runtimeMode === 'worker' ? 'Web Worker' : 'IFrame';
+
     const content: KernelMessage.IInfoReply = {
       implementation: 'JavaScript',
       implementation_version: '0.1.0',
@@ -66,7 +79,7 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
       },
       protocol_version: '5.3',
       status: 'ok',
-      banner: 'A JavaScript kernel running in the browser',
+      banner: `A JavaScript kernel running in the browser (${runtimeName})`,
       help_links: [
         {
           text: 'JavaScript Kernel',
@@ -74,215 +87,339 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
         }
       ]
     };
+
     return content;
   }
 
   /**
-   * Handle an `execute_request` message
-   *
-   * @param msg The parent message.
+   * Handle an `execute_request` message.
    */
   async executeRequest(
     content: KernelMessage.IExecuteRequestMsg['content']
   ): Promise<KernelMessage.IExecuteReplyMsg['content']> {
-    const result = await this.remoteKernel.execute(content, this.parent);
-    result.execution_count = this.executionCount;
-    return result;
+    try {
+      await this.ready;
+      return await this._backend.execute(content.code, this.executionCount);
+    } catch (error) {
+      const normalized = this.normalizeError(error);
+      const traceback = [
+        normalized.stack || normalized.message || String(error)
+      ];
+
+      this.publishExecuteError({
+        ename: normalized.name || 'RuntimeError',
+        evalue: normalized.message || '',
+        traceback
+      });
+
+      return {
+        status: 'error',
+        execution_count: this.executionCount,
+        ename: normalized.name || 'RuntimeError',
+        evalue: normalized.message || '',
+        traceback
+      };
+    }
   }
 
   /**
-   * Handle an complete_request message
-   *
-   * @param msg The parent message.
+   * Handle a `complete_request` message.
    */
   async completeRequest(
     content: KernelMessage.ICompleteRequestMsg['content']
   ): Promise<KernelMessage.ICompleteReplyMsg['content']> {
-    return await this.remoteKernel.complete(content, this.parent);
+    try {
+      await this.ready;
+      return await this._backend.complete(content.code, content.cursor_pos);
+    } catch {
+      return {
+        matches: [],
+        cursor_start: content.cursor_pos,
+        cursor_end: content.cursor_pos,
+        metadata: {},
+        status: 'ok'
+      };
+    }
   }
 
   /**
    * Handle an `inspect_request` message.
-   *
-   * @param content - The content of the request.
-   *
-   * @returns A promise that resolves with the response message.
    */
   async inspectRequest(
     content: KernelMessage.IInspectRequestMsg['content']
   ): Promise<KernelMessage.IInspectReplyMsg['content']> {
-    throw new Error('Not implemented');
+    try {
+      await this.ready;
+      return await this._backend.inspect(
+        content.code,
+        content.cursor_pos,
+        content.detail_level
+      );
+    } catch {
+      return {
+        status: 'ok',
+        found: false,
+        data: {},
+        metadata: {}
+      };
+    }
   }
 
   /**
    * Handle an `is_complete_request` message.
-   *
-   * @param content - The content of the request.
-   *
-   * @returns A promise that resolves with the response message.
    */
   async isCompleteRequest(
     content: KernelMessage.IIsCompleteRequestMsg['content']
   ): Promise<KernelMessage.IIsCompleteReplyMsg['content']> {
-    throw new Error('Not implemented');
+    try {
+      await this.ready;
+      return await this._backend.isComplete(content.code);
+    } catch {
+      return {
+        status: 'unknown'
+      };
+    }
   }
 
   /**
    * Handle a `comm_info_request` message.
-   *
-   * @param content - The content of the request.
-   *
-   * @returns A promise that resolves with the response message.
    */
   async commInfoRequest(
     content: KernelMessage.ICommInfoRequestMsg['content']
   ): Promise<KernelMessage.ICommInfoReplyMsg['content']> {
-    throw new Error('Not implemented');
+    return {
+      status: 'ok',
+      comms: {}
+    };
   }
 
   /**
    * Send an `input_reply` message.
-   *
-   * @param content - The content of the reply.
    */
   inputReply(content: KernelMessage.IInputReplyMsg['content']): void {
-    throw new Error('Not implemented');
+    this._logUnsupportedControlMessage('input_reply');
   }
 
   /**
    * Send an `comm_open` message.
-   *
-   * @param msg - The comm_open message.
    */
   async commOpen(msg: KernelMessage.ICommOpenMsg): Promise<void> {
-    throw new Error('Not implemented');
+    this._logUnsupportedControlMessage('comm_open', msg.content.target_name);
   }
 
   /**
    * Send an `comm_msg` message.
-   *
-   * @param msg - The comm_msg message.
    */
   async commMsg(msg: KernelMessage.ICommMsgMsg): Promise<void> {
-    throw new Error('Not implemented');
+    this._logUnsupportedControlMessage('comm_msg');
   }
 
   /**
    * Send an `comm_close` message.
-   *
-   * @param close - The comm_close message.
    */
   async commClose(msg: KernelMessage.ICommCloseMsg): Promise<void> {
-    throw new Error('Not implemented');
+    this._logUnsupportedControlMessage('comm_close');
   }
 
   /**
-   * Load the worker.
-   *
-   * ### Note
-   *
-   * Subclasses must implement this typographically almost _exactly_ for
-   * webpack to find it.
+   * Called once a runtime backend is initialized, before `ready` resolves.
    */
-  protected initWorker(options: JavaScriptKernel.IOptions): Worker {
-    return new Worker(new URL('./comlink.worker.js', import.meta.url), {
-      type: 'module'
+  protected async onRuntimeReady(
+    _context: JavaScriptKernel.IRuntimeReadyContext
+  ): Promise<void> {
+    return Promise.resolve();
+  }
+
+  /**
+   * Create a runtime backend for the selected mode.
+   */
+  protected createBackend(runtimeMode: RuntimeMode): IRuntimeBackend {
+    const options = {
+      onOutput: (message: RuntimeOutputMessage) => {
+        this.processRuntimeMessage(message);
+      }
+    };
+
+    if (runtimeMode === 'worker') {
+      return new WorkerRuntimeBackend({
+        ...options,
+        onReady: async context => {
+          await this.onRuntimeReady({
+            runtime: 'worker',
+            execute: async code => {
+              const reply = await context.execute(code);
+              if (reply.status === 'error') {
+                throw this._createRuntimeInitializationError(reply);
+              }
+              return reply;
+            }
+          });
+        }
+      });
+    }
+
+    return new IFrameRuntimeBackend({
+      ...options,
+      executorFactory: this._executorFactory,
+      onReady: async context => {
+        await this.onRuntimeReady({
+          runtime: 'iframe',
+          globalScope: context.globalScope,
+          executor: context.executor,
+          execute: async code => {
+            const reply = await context.execute(code);
+            if (reply.status === 'error') {
+              throw this._createRuntimeInitializationError(reply);
+            }
+            return reply;
+          }
+        });
+      }
     });
   }
 
   /**
-   * Initialize the remote kernel.
-   *
-   * @param options The options for the remote kernel.
-   * @returns The initialized remote kernel.
+   * Route runtime output messages to Jupyter kernel channels.
    */
-  protected initRemote(
-    options: JavaScriptKernel.IOptions
-  ): IRemoteJavaScriptWorkerKernel {
-    const remote: IRemoteJavaScriptWorkerKernel = wrap(this._worker);
-    remote.initialize({ baseUrl: PageConfig.getBaseUrl() });
-    return remote;
+  protected processRuntimeMessage(message: RuntimeOutputMessage): void {
+    const parentHeader = this.parentHeader;
+
+    switch (message.type) {
+      case 'stream':
+        this.stream(message.bundle, parentHeader);
+        break;
+      case 'input_request':
+        this.inputRequest(message.content, parentHeader);
+        break;
+      case 'display_data':
+        this.displayData(message.bundle, parentHeader);
+        break;
+      case 'update_display_data':
+        this.updateDisplayData(message.bundle, parentHeader);
+        break;
+      case 'clear_output':
+        this.clearOutput(message.bundle, parentHeader);
+        break;
+      case 'execute_result':
+        this.publishExecuteResult(message.bundle, parentHeader);
+        break;
+      case 'execute_error':
+        this.publishExecuteError(message.bundle, parentHeader);
+        break;
+      default:
+        break;
+    }
   }
 
   /**
-   * Process a message coming from the JavaScript web worker.
-   *
-   * @param msg The worker message to process.
+   * Normalize unknown thrown values into Error instances.
    */
-  private _processWorkerMessage(msg: any): void {
-    if (!msg.type) {
+  protected normalizeError(error: unknown): Error {
+    return normalizeUnknownError(error, 'RuntimeError');
+  }
+
+  /**
+   * Normalize an execute reply error into an Error instance.
+   */
+  private _createRuntimeInitializationError(
+    reply: KernelMessage.IExecuteReplyMsg['content']
+  ): Error {
+    const ename =
+      'ename' in reply && typeof reply.ename === 'string'
+        ? reply.ename
+        : 'RuntimeError';
+    const evalue =
+      'evalue' in reply && typeof reply.evalue === 'string'
+        ? reply.evalue
+        : 'Runtime initialization failed';
+    const error = new Error(evalue);
+    error.name = ename;
+
+    const traceback =
+      'traceback' in reply && Array.isArray(reply.traceback)
+        ? reply.traceback
+        : [];
+    if (traceback.length > 0) {
+      error.stack = traceback.join('\n');
+    }
+
+    return error;
+  }
+
+  /**
+   * Warn once per unsupported control message type to avoid noisy consoles.
+   */
+  private _logUnsupportedControlMessage(
+    type: 'input_reply' | 'comm_open' | 'comm_msg' | 'comm_close',
+    detail?: string
+  ): void {
+    if (this._unsupportedControlMessages.has(type)) {
       return;
     }
 
-    const parentHeader = msg.parentHeader || this.parentHeader;
+    this._unsupportedControlMessages.add(type);
+    const suffix = detail ? ` (${detail})` : '';
 
-    switch (msg.type) {
-      case 'stream': {
-        const bundle = msg.bundle ?? { name: 'stdout', text: '' };
-        this.stream(bundle, parentHeader);
-        break;
-      }
-      case 'input_request': {
-        const bundle = msg.content ?? { prompt: '', password: false };
-        this.inputRequest(bundle, parentHeader);
-        break;
-      }
-      case 'display_data': {
-        const bundle = msg.bundle ?? { data: {}, metadata: {}, transient: {} };
-        this.displayData(bundle, parentHeader);
-        break;
-      }
-      case 'update_display_data': {
-        const bundle = msg.bundle ?? { data: {}, metadata: {}, transient: {} };
-        this.updateDisplayData(bundle, parentHeader);
-        break;
-      }
-      case 'clear_output': {
-        const bundle = msg.bundle ?? { wait: false };
-        this.clearOutput(bundle, parentHeader);
-        break;
-      }
-      case 'execute_result': {
-        const bundle = msg.bundle ?? {
-          execution_count: 0,
-          data: {},
-          metadata: {}
-        };
-        this.publishExecuteResult(bundle, parentHeader);
-        break;
-      }
-      case 'execute_error': {
-        const bundle = msg.bundle ?? { ename: '', evalue: '', traceback: [] };
-        this.publishExecuteError(bundle, parentHeader);
-        break;
-      }
-      case 'comm_msg':
-      case 'comm_open':
-      case 'comm_close': {
-        this.handleComm(
-          msg.type,
-          msg.content,
-          msg.metadata,
-          msg.buffers,
-          msg.parentHeader
-        );
-        break;
-      }
-    }
+    console.warn(
+      `[javascript-kernel] Ignoring unsupported ${type} message${suffix}.`
+    );
   }
 
-  protected remoteKernel: IRemoteJavaScriptWorkerKernel;
-
-  private _worker: Worker;
-  private _ready = new PromiseDelegate<void>();
+  private _unsupportedControlMessages = new Set<
+    'input_reply' | 'comm_open' | 'comm_msg' | 'comm_close'
+  >();
+  private _backend: IRuntimeBackend;
+  private _executorFactory?: JavaScriptKernel.IExecutorFactory;
+  private _runtimeMode: RuntimeMode;
 }
 
 /**
- * A namespace for JavaScriptKernel statics
+ * A namespace for JavaScriptKernel statics.
  */
-namespace JavaScriptKernel {
+export namespace JavaScriptKernel {
+  /**
+   * Runtime context shared by all backend initialization hooks.
+   */
+  export interface IRuntimeReadyContextBase {
+    runtime: RuntimeMode;
+    execute: (code: string) => Promise<unknown>;
+  }
+
+  /**
+   * Runtime context for iframe backend initialization.
+   */
+  export interface IIFrameRuntimeReadyContext extends IRuntimeReadyContextBase {
+    runtime: 'iframe';
+    globalScope: Record<string, any>;
+    executor: JavaScriptExecutor;
+  }
+
+  /**
+   * Runtime context for worker backend initialization.
+   */
+  export interface IWorkerRuntimeReadyContext extends IRuntimeReadyContextBase {
+    runtime: 'worker';
+  }
+
+  /**
+   * Runtime context available from `onRuntimeReady`.
+   */
+  export type IRuntimeReadyContext =
+    | IIFrameRuntimeReadyContext
+    | IWorkerRuntimeReadyContext;
+
+  /**
+   * Factory used to customize iframe runtime evaluation behavior.
+   */
+  export type IExecutorFactory = (
+    globalScope: Record<string, any>
+  ) => JavaScriptExecutor;
+
   /**
    * The instantiation options for a JavaScript kernel.
    */
-  export interface IOptions extends IKernel.IOptions {}
+  export interface IOptions extends IKernel.IOptions {
+    runtime?: RuntimeMode;
+    executorFactory?: IExecutorFactory;
+  }
 }
