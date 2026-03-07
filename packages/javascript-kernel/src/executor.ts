@@ -10,6 +10,9 @@ import type { IMimeBundle } from '@jupyterlab/nbformat';
 
 export { IDisplayData, IDisplayCallbacks, DisplayHelper } from './display';
 
+/** Matches the word "eval" in a stack frame (user eval code). */
+const RE_EVAL = /\beval\b/;
+
 /**
  * Configuration for magic imports.
  */
@@ -768,23 +771,42 @@ export class JavaScriptExecutor {
    * @returns The cleaned stack trace string.
    */
   cleanStackTrace(error: Error): string {
-    const errStackStr = error.stack || '';
-    const errStackLines = errStackStr.split('\n');
-    const usedLines: string[] = [];
+    const header = `${error.name}: ${error.message}`;
+    const stack = error.stack || '';
+    const lines = stack.split('\n');
+    const userFrames: string[] = [];
 
-    for (const line of errStackLines) {
-      // Stop at internal implementation details
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        continue;
+      }
+
+      // Some browsers repeat `Name: message` as the first stack line.
+      if (trimmed.startsWith(`${error.name}:`)) {
+        continue;
+      }
+
+      // Stop once we reach internal executor frames.
       if (
-        line.includes('makeAsyncFromCode') ||
-        line.includes('new Function') ||
-        line.includes('asyncFunction')
+        trimmed.includes('makeAsyncFromCode') ||
+        trimmed.includes('new Function') ||
+        trimmed.includes('asyncFunction')
       ) {
         break;
       }
-      usedLines.push(line);
+
+      // Only keep lines that reference user eval code.
+      if (RE_EVAL.test(trimmed) || trimmed.includes('<anonymous>')) {
+        userFrames.push(line);
+      }
     }
 
-    return usedLines.join('\n');
+    if (userFrames.length > 0) {
+      return `${header}\n${userFrames.join('\n')}`;
+    }
+
+    return header;
   }
 
   /**
