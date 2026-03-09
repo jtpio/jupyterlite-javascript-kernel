@@ -3646,7 +3646,7 @@ __metadata:
   dependencies:
     "@jupyterlab/application": ^4.5.5
     "@jupyterlab/builder": ^4.5.5
-    "@jupyterlite/javascript-kernel": ^0.4.0-alpha.2
+    "@jupyterlite/javascript-kernel": ^0.4.0-alpha.3
     "@jupyterlite/services": ^0.7.0
     npm-run-all2: ^7.0.1
     rimraf: ~5.0.1
@@ -3672,7 +3672,7 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"@jupyterlite/javascript-kernel@^0.4.0-alpha.2, @jupyterlite/javascript-kernel@workspace:packages/javascript-kernel":
+"@jupyterlite/javascript-kernel@^0.4.0-alpha.3, @jupyterlite/javascript-kernel@workspace:packages/javascript-kernel":
   version: 0.0.0-use.local
   resolution: "@jupyterlite/javascript-kernel@workspace:packages/javascript-kernel"
   dependencies:
