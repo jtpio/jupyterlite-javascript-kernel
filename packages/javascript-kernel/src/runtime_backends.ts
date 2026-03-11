@@ -34,7 +34,8 @@ export interface IRuntimeBackend {
   dispose(): void;
   execute(
     code: string,
-    executionCount: number
+    executionCount: number,
+    parentMessageId?: string
   ): Promise<KernelMessage.IExecuteReplyMsg['content']>;
   complete(
     code: string,
@@ -52,17 +53,20 @@ export interface IRuntimeBackend {
     commId: string,
     targetName: string,
     data: Record<string, unknown>,
-    buffers?: ArrayBuffer[]
+    buffers?: ArrayBuffer[],
+    parentMessageId?: string
   ): Promise<void>;
   handleCommMsg(
     commId: string,
     data: Record<string, unknown>,
-    buffers?: ArrayBuffer[]
+    buffers?: ArrayBuffer[],
+    parentMessageId?: string
   ): Promise<void>;
   handleCommClose(
     commId: string,
     data: Record<string, unknown>,
-    buffers?: ArrayBuffer[]
+    buffers?: ArrayBuffer[],
+    parentMessageId?: string
   ): Promise<void>;
 }
 
@@ -87,10 +91,11 @@ abstract class AbstractRuntimeBackend implements IRuntimeBackend {
    */
   async execute(
     code: string,
-    executionCount: number
+    executionCount: number,
+    parentMessageId?: string
   ): Promise<KernelMessage.IExecuteReplyMsg['content']> {
     await this.ready;
-    return this._getRemote().execute(code, executionCount);
+    return this._getRemote().execute(code, executionCount, parentMessageId);
   }
 
   /**
@@ -133,11 +138,18 @@ abstract class AbstractRuntimeBackend implements IRuntimeBackend {
     commId: string,
     targetName: string,
     data: Record<string, unknown>,
-    buffers?: ArrayBuffer[]
+    buffers?: ArrayBuffer[],
+    parentMessageId?: string
   ): Promise<void> {
     await this.ready;
     if (this._remote) {
-      await this._remote.handleCommOpen(commId, targetName, data, buffers);
+      await this._remote.handleCommOpen(
+        commId,
+        targetName,
+        data,
+        buffers,
+        parentMessageId
+      );
     }
   }
 
@@ -147,11 +159,12 @@ abstract class AbstractRuntimeBackend implements IRuntimeBackend {
   async handleCommMsg(
     commId: string,
     data: Record<string, unknown>,
-    buffers?: ArrayBuffer[]
+    buffers?: ArrayBuffer[],
+    parentMessageId?: string
   ): Promise<void> {
     await this.ready;
     if (this._remote) {
-      await this._remote.handleCommMsg(commId, data, buffers);
+      await this._remote.handleCommMsg(commId, data, buffers, parentMessageId);
     }
   }
 
@@ -161,11 +174,17 @@ abstract class AbstractRuntimeBackend implements IRuntimeBackend {
   async handleCommClose(
     commId: string,
     data: Record<string, unknown>,
-    buffers?: ArrayBuffer[]
+    buffers?: ArrayBuffer[],
+    parentMessageId?: string
   ): Promise<void> {
     await this.ready;
     if (this._remote) {
-      await this._remote.handleCommClose(commId, data, buffers);
+      await this._remote.handleCommClose(
+        commId,
+        data,
+        buffers,
+        parentMessageId
+      );
     }
   }
 

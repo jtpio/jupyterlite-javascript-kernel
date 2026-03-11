@@ -100,7 +100,11 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
   ): Promise<KernelMessage.IExecuteReplyMsg['content']> {
     try {
       await this.ready;
-      return await this._backend.execute(content.code, this.executionCount);
+      return await this._backend.execute(
+        content.code,
+        this.executionCount,
+        this.parentHeader?.msg_id
+      );
     } catch (error) {
       const normalized = this.normalizeError(error);
       const traceback = [
@@ -218,7 +222,8 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
       comm_id,
       target_name,
       data as Record<string, unknown>,
-      buffers
+      buffers,
+      msg.header.msg_id
     );
   }
 
@@ -231,7 +236,8 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
     await this._backend.handleCommMsg(
       comm_id,
       data as Record<string, unknown>,
-      buffers
+      buffers,
+      msg.header.msg_id
     );
   }
 
@@ -245,7 +251,8 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
     await this._backend.handleCommClose(
       comm_id,
       data as Record<string, unknown>,
-      buffers
+      buffers,
+      msg.header.msg_id
     );
   }
 

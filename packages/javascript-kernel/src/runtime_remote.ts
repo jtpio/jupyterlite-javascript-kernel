@@ -51,8 +51,12 @@ export function createRemoteRuntimeApi(
       });
     },
 
-    async execute(code: string, executionCount: number) {
-      return ensureEvaluator().execute(code, executionCount);
+    async execute(
+      code: string,
+      executionCount: number,
+      parentMessageId?: string
+    ) {
+      return ensureEvaluator().execute(code, executionCount, parentMessageId);
     },
 
     async complete(code: string, cursorPos: number) {
@@ -75,25 +79,34 @@ export function createRemoteRuntimeApi(
       commId: string,
       targetName: string,
       data: Record<string, unknown>,
-      buffers?: ArrayBuffer[]
+      buffers?: ArrayBuffer[],
+      parentMessageId?: string
     ): Promise<void> {
-      ensureEvaluator().handleCommOpen(commId, targetName, data, buffers);
+      ensureEvaluator().handleCommOpen(
+        commId,
+        targetName,
+        data,
+        buffers,
+        parentMessageId
+      );
     },
 
     async handleCommMsg(
       commId: string,
       data: Record<string, unknown>,
-      buffers?: ArrayBuffer[]
+      buffers?: ArrayBuffer[],
+      parentMessageId?: string
     ): Promise<void> {
-      ensureEvaluator().handleCommMsg(commId, data, buffers);
+      ensureEvaluator().handleCommMsg(commId, data, buffers, parentMessageId);
     },
 
     async handleCommClose(
       commId: string,
       data: Record<string, unknown>,
-      buffers?: ArrayBuffer[]
+      buffers?: ArrayBuffer[],
+      parentMessageId?: string
     ): Promise<void> {
-      ensureEvaluator().handleCommClose(commId, data, buffers);
+      ensureEvaluator().handleCommClose(commId, data, buffers, parentMessageId);
     },
 
     async dispose(): Promise<void> {

@@ -98,6 +98,20 @@ export class CommManager {
   }
 
   /**
+   * Track the active parent message ID for output capture helpers.
+   */
+  setCurrentMessageId(messageId: string | null): void {
+    this._currentMessageId = messageId;
+  }
+
+  /**
+   * The active parent message ID, if any.
+   */
+  getCurrentMessageId(): string | null {
+    return this._currentMessageId;
+  }
+
+  /**
    * Handle a comm_open message from the frontend.
    */
   handleCommOpen(
@@ -227,4 +241,5 @@ export class CommManager {
   private _comms = new Map<string, IComm>();
   private _targets = new Map<string, CommTargetHandler>();
   private _widgets = new Map<string, unknown>();
+  private _currentMessageId: string | null = null;
 }

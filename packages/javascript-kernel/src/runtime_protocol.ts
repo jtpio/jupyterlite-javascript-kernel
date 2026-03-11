@@ -93,7 +93,8 @@ export interface IRemoteRuntimeApi {
   ): Promise<void>;
   execute(
     code: string,
-    executionCount: number
+    executionCount: number,
+    parentMessageId?: string
   ): Promise<KernelMessage.IExecuteReplyMsg['content']>;
   complete(
     code: string,
@@ -111,17 +112,20 @@ export interface IRemoteRuntimeApi {
     commId: string,
     targetName: string,
     data: Record<string, unknown>,
-    buffers?: ArrayBuffer[]
+    buffers?: ArrayBuffer[],
+    parentMessageId?: string
   ): Promise<void>;
   handleCommMsg(
     commId: string,
     data: Record<string, unknown>,
-    buffers?: ArrayBuffer[]
+    buffers?: ArrayBuffer[],
+    parentMessageId?: string
   ): Promise<void>;
   handleCommClose(
     commId: string,
     data: Record<string, unknown>,
-    buffers?: ArrayBuffer[]
+    buffers?: ArrayBuffer[],
+    parentMessageId?: string
   ): Promise<void>;
   dispose(): Promise<void>;
 }

@@ -59,55 +59,58 @@ export class JavaScriptRuntimeEvaluator {
    */
   async execute(
     code: string,
-    executionCount: number
+    executionCount: number,
+    parentMessageId?: string
   ): Promise<KernelMessage.IExecuteReplyMsg['content']> {
-    // Parse-time errors are syntax errors, so show only `Name: message`.
-    let asyncFunction: () => Promise<any>;
-    let withReturn: boolean;
-    try {
-      const parsed = this._executor.makeAsyncFromCode(code);
-      asyncFunction = parsed.asyncFunction;
-      withReturn = parsed.withReturn;
-    } catch (error) {
-      const normalized = normalizeError(error);
-      return this._emitError(executionCount, normalized, false);
-    }
-
-    // Runtime errors may include useful eval frames from user code.
-    try {
-      const resultPromise = this._evalFunc(asyncFunction);
-
-      if (withReturn) {
-        const result = await resultPromise;
-
-        if (result !== undefined) {
-          if (result instanceof Widget) {
-            this._commManager.displayWidget(result.commId);
-          } else {
-            const data = this._executor.getMimeBundle(result);
-            this._onOutput({
-              type: 'execute_result',
-              bundle: {
-                execution_count: executionCount,
-                data,
-                metadata: {}
-              }
-            });
-          }
-        }
-      } else {
-        await resultPromise;
+    return this._withParentMessageId(parentMessageId, async () => {
+      // Parse-time errors are syntax errors, so show only `Name: message`.
+      let asyncFunction: () => Promise<any>;
+      let withReturn: boolean;
+      try {
+        const parsed = this._executor.makeAsyncFromCode(code);
+        asyncFunction = parsed.asyncFunction;
+        withReturn = parsed.withReturn;
+      } catch (error) {
+        const normalized = normalizeError(error);
+        return this._emitError(executionCount, normalized, false);
       }
 
-      return {
-        status: 'ok',
-        execution_count: executionCount,
-        user_expressions: {}
-      };
-    } catch (error) {
-      const normalized = normalizeError(error);
-      return this._emitError(executionCount, normalized, true);
-    }
+      // Runtime errors may include useful eval frames from user code.
+      try {
+        const resultPromise = this._evalFunc(asyncFunction);
+
+        if (withReturn) {
+          const result = await resultPromise;
+
+          if (result !== undefined) {
+            if (result instanceof Widget) {
+              this._commManager.displayWidget(result.commId);
+            } else {
+              const data = this._executor.getMimeBundle(result);
+              this._onOutput({
+                type: 'execute_result',
+                bundle: {
+                  execution_count: executionCount,
+                  data,
+                  metadata: {}
+                }
+              });
+            }
+          }
+        } else {
+          await resultPromise;
+        }
+
+        return {
+          status: 'ok',
+          execution_count: executionCount,
+          user_expressions: {}
+        };
+      } catch (error) {
+        const normalized = normalizeError(error);
+        return this._emitError(executionCount, normalized, true);
+      }
+    });
   }
 
   /**
@@ -160,9 +163,12 @@ export class JavaScriptRuntimeEvaluator {
     commId: string,
     targetName: string,
     data: Record<string, unknown>,
-    buffers?: ArrayBuffer[]
+    buffers?: ArrayBuffer[],
+    parentMessageId?: string
   ): void {
-    this._commManager.handleCommOpen(commId, targetName, data, buffers);
+    void this._withParentMessageId(parentMessageId, async () => {
+      this._commManager.handleCommOpen(commId, targetName, data, buffers);
+    });
   }
 
   /**
@@ -171,9 +177,12 @@ export class JavaScriptRuntimeEvaluator {
   handleCommMsg(
     commId: string,
     data: Record<string, unknown>,
-    buffers?: ArrayBuffer[]
+    buffers?: ArrayBuffer[],
+    parentMessageId?: string
   ): void {
-    this._commManager.handleCommMsg(commId, data, buffers);
+    void this._withParentMessageId(parentMessageId, async () => {
+      this._commManager.handleCommMsg(commId, data, buffers);
+    });
   }
 
   /**
@@ -182,9 +191,12 @@ export class JavaScriptRuntimeEvaluator {
   handleCommClose(
     commId: string,
     data: Record<string, unknown>,
-    buffers?: ArrayBuffer[]
+    buffers?: ArrayBuffer[],
+    parentMessageId?: string
   ): void {
-    this._commManager.handleCommClose(commId, data, buffers);
+    void this._withParentMessageId(parentMessageId, async () => {
+      this._commManager.handleCommClose(commId, data, buffers);
+    });
   }
 
   /**
@@ -192,6 +204,22 @@ export class JavaScriptRuntimeEvaluator {
    */
   private _evalFunc(asyncFunc: () => Promise<any>): Promise<any> {
     return asyncFunc.call(this._globalScope);
+  }
+
+  /**
+   * Set the active parent message ID while invoking runtime code.
+   */
+  private async _withParentMessageId<T>(
+    parentMessageId: string | undefined,
+    callback: () => Promise<T> | T
+  ): Promise<T> {
+    const previousMessageId = this._commManager.getCurrentMessageId();
+    this._commManager.setCurrentMessageId(parentMessageId ?? null);
+    try {
+      return await callback();
+    } finally {
+      this._commManager.setCurrentMessageId(previousMessageId);
+    }
   }
 
   /**
@@ -412,7 +440,7 @@ export class JavaScriptRuntimeEvaluator {
   private _onOutput: RuntimeOutputHandler;
   private _executor: JavaScriptExecutor;
   private _commManager: CommManager;
-  private _widgetClasses: Record<string, typeof Widget> | null = null;
+  private _widgetClasses: Record<string, unknown> | null = null;
   private _previousJupyter: any;
   private _previousDisplay: any;
   private _originalOnError: any;

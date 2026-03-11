@@ -107,10 +107,10 @@ Limits of automatic cleanup:
 
 ## Jupyter Widgets
 
-The kernel provides built-in support for [Jupyter Widgets](https://ipywidgets.readthedocs.io/) (`ipywidgets`-compatible). Widget classes are available under `Jupyter.widgets`; destructure the ones you need before using them:
+The kernel provides built-in support for [Jupyter Widgets](https://ipywidgets.readthedocs.io/) (`ipywidgets`-compatible). Widget classes and helpers are available under `Jupyter.widgets`; destructure the ones you need before using them:
 
 ```javascript
-const { IntSlider } = Jupyter.widgets;
+const { IntSlider, IntProgress, jslink } = Jupyter.widgets;
 
 const slider = new IntSlider({
   value: 50,
@@ -118,27 +118,38 @@ const slider = new IntSlider({
   max: 100,
   description: 'My Slider'
 });
-display(slider);
-
-slider.on('change:value', newVal => {
-  console.log('Slider value:', newVal);
+const progress = new IntProgress({
+  value: 50,
+  min: 0,
+  max: 100,
+  description: 'Mirror'
 });
+display(slider);
+display(progress);
+
+slider.observe(({ new: value }) => {
+  console.log('Slider value:', value);
+}, 'value');
+
+jslink([slider, 'value'], [progress, 'value']);
 ```
 
 Widgets auto-display when they are the last expression in a cell. Use the global `display()` function to display a widget explicitly, for example when assigning to a variable.
 
 ### Available widgets
 
-- **Numeric**: `IntSlider`, `FloatSlider`, `IntProgress`, `FloatProgress`, `IntText`, `FloatText`, `BoundedIntText`, `BoundedFloatText`
+- **Numeric**: `IntSlider`, `FloatSlider`, `FloatLogSlider`, `IntRangeSlider`, `FloatRangeSlider`, `Play`, `IntProgress`, `FloatProgress`, `IntText`, `FloatText`, `BoundedIntText`, `BoundedFloatText`
 - **Boolean**: `Checkbox`, `ToggleButton`, `Valid`
-- **Selection**: `Dropdown`, `RadioButtons`, `Select`, `ToggleButtons`, `SelectionSlider`
+- **Selection**: `Dropdown`, `RadioButtons`, `Select`, `SelectMultiple`, `ToggleButtons`, `SelectionSlider`, `SelectionRangeSlider`
 - **String**: `Text`, `Textarea`, `Password`, `Combobox`
-- **Display**: `Label`, `HTML`, `HTMLMath`
+- **Display**: `Label`, `HTML`, `HTMLMath`, `Output`
 - **Button**: `Button` (with `.onClick()` handler)
 - **Color**: `ColorPicker`
+- **Layout / Style**: `Layout`, `DescriptionStyle`, `SliderStyle`, `ProgressStyle`, `ButtonStyle`, `CheckboxStyle`, `ToggleButtonStyle`, `ToggleButtonsStyle`, `TextStyle`, `HTMLStyle`, `HTMLMathStyle`, `LabelStyle`
 - **Containers**: `Box`, `HBox`, `VBox`, `GridBox`, `Accordion`, `Tab`, `Stack`
+- **Helpers**: `jslink`, `jsdlink`
 
-> **Note:** `jupyterlab-widgets` and `@jupyter-widgets/controls` must be available in the JupyterLite deployment for widgets to render.
+> **Note:** `jupyterlab-widgets`, `@jupyter-widgets/controls`, and `@jupyter-widgets/output` must be available in the JupyterLite deployment for the full widget set to render.
 
 See the [example notebook](examples/widgets.ipynb) for more usage examples.
 
