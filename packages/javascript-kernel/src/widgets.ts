@@ -19,24 +19,25 @@ export class Widget {
   static modelName = '';
   static viewName = '';
 
-  private static _defaultManager: CommManager | null = null;
+  protected static _defaultManager: CommManager | null = null;
 
   /**
    * Set the default CommManager used by all Widget instances.
    */
   static setDefaultManager(manager: CommManager | null): void {
-    Widget._defaultManager = manager;
+    this._defaultManager = manager;
   }
 
   constructor(state?: Record<string, unknown>) {
-    const manager = Widget._defaultManager;
+    const ctor = this.constructor as typeof Widget;
+    const manager = ctor._defaultManager;
     if (!manager) {
       throw new Error(
         'Widget manager not initialized. Widgets can only be created inside the kernel runtime.'
       );
     }
 
-    const ctor = this.constructor as typeof Widget;
+    this._manager = manager;
     this._state = {
       ...this._defaults(),
       ...state,
@@ -59,8 +60,10 @@ export class Widget {
       this._handleMsg(data, buffers);
     };
     this._comm.onClose = data => {
+      this._manager.unregisterWidget(this.commId);
       this._trigger('close', data);
     };
+    this._manager.registerWidget(this.commId, this);
   }
 
   /**
@@ -199,6 +202,7 @@ export class Widget {
   }
 
   protected _comm: IComm;
+  protected _manager: CommManager;
   protected _state: Record<string, unknown>;
   private _listeners: Map<string, Set<WidgetEventCallback>>;
 }
@@ -880,6 +884,20 @@ export class Box extends Widget {
   set box_style(v: string) {
     this.set('box_style', v);
   }
+
+  protected override _handleMsg(
+    data: Record<string, unknown>,
+    buffers?: ArrayBuffer[]
+  ): void {
+    super._handleMsg(data, buffers);
+
+    if (data.method === 'update' && data.state) {
+      const state = data.state as Record<string, unknown>;
+      if (Object.prototype.hasOwnProperty.call(state, 'children')) {
+        this._children = _deserializeChildren(this._manager, state.children);
+      }
+    }
+  }
 }
 
 export class HBox extends Box {
@@ -1032,3 +1050,44 @@ export const widgetClasses: Record<string, typeof Widget> = {
   Tab,
   Stack
 };
+
+/**
+ * Create runtime-local widget classes bound to a specific comm manager.
+ */
+export function createWidgetClasses(
+  manager: CommManager
+): Record<string, typeof Widget> {
+  const classes: Record<string, typeof Widget> = {};
+
+  for (const [name, cls] of Object.entries(widgetClasses)) {
+    const BoundWidgetClass = class extends cls {};
+    Object.defineProperty(BoundWidgetClass, 'name', { value: name });
+    BoundWidgetClass.setDefaultManager(manager);
+    classes[name] = BoundWidgetClass;
+  }
+
+  return classes;
+}
+
+/**
+ * Resolve serialized `IPY_MODEL_<id>` references back to known widget instances.
+ */
+function _deserializeChildren(
+  manager: CommManager,
+  children: unknown
+): Widget[] {
+  if (!Array.isArray(children)) {
+    return [];
+  }
+
+  return children
+    .map(child => {
+      if (typeof child !== 'string' || !child.startsWith('IPY_MODEL_')) {
+        return null;
+      }
+      return (
+        manager.getWidget<Widget>(child.slice('IPY_MODEL_'.length)) ?? null
+      );
+    })
+    .filter((child): child is Widget => child instanceof Widget);
+}

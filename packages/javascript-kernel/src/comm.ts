@@ -77,6 +77,27 @@ export class CommManager {
   }
 
   /**
+   * Register a widget instance by comm ID.
+   */
+  registerWidget<T>(commId: string, widget: T): void {
+    this._widgets.set(commId, widget);
+  }
+
+  /**
+   * Look up a widget instance by comm ID.
+   */
+  getWidget<T>(commId: string): T | undefined {
+    return this._widgets.get(commId) as T | undefined;
+  }
+
+  /**
+   * Remove a widget registration.
+   */
+  unregisterWidget(commId: string): void {
+    this._widgets.delete(commId);
+  }
+
+  /**
    * Handle a comm_open message from the frontend.
    */
   handleCommOpen(
@@ -120,6 +141,7 @@ export class CommManager {
     const comm = this._comms.get(commId);
     if (comm) {
       comm.onClose?.(data, buffers);
+      this._widgets.delete(commId);
       this._comms.delete(commId);
     }
   }
@@ -149,6 +171,7 @@ export class CommManager {
    * Dispose all comms and clear state.
    */
   dispose(): void {
+    this._widgets.clear();
     this._comms.clear();
     this._targets.clear();
   }
@@ -187,6 +210,8 @@ export class CommManager {
             data
           }
         });
+        comm.onClose?.(data);
+        this._widgets.delete(commId);
         this._comms.delete(commId);
       },
       display: (): void => {
@@ -201,4 +226,5 @@ export class CommManager {
   private _onOutput: RuntimeOutputHandler;
   private _comms = new Map<string, IComm>();
   private _targets = new Map<string, CommTargetHandler>();
+  private _widgets = new Map<string, unknown>();
 }

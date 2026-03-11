@@ -107,9 +107,11 @@ Limits of automatic cleanup:
 
 ## Jupyter Widgets
 
-The kernel provides built-in support for [Jupyter Widgets](https://ipywidgets.readthedocs.io/) (`ipywidgets`-compatible). Widget classes are available as globals in the kernel runtime — just instantiate and call `.display()`:
+The kernel provides built-in support for [Jupyter Widgets](https://ipywidgets.readthedocs.io/) (`ipywidgets`-compatible). Widget classes are available under `Jupyter.widgets`; destructure the ones you need before using them:
 
 ```javascript
+const { IntSlider } = Jupyter.widgets;
+
 const slider = new IntSlider({
   value: 50,
   min: 0,

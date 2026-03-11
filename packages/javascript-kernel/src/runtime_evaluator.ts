@@ -7,7 +7,7 @@ import { JavaScriptExecutor } from './executor';
 import { normalizeError } from './errors';
 import { CommManager } from './comm';
 import type { RuntimeOutputHandler } from './runtime_protocol';
-import { Widget, widgetClasses } from './widgets';
+import { Widget, createWidgetClasses } from './widgets';
 
 /**
  * Shared execution logic for iframe and worker runtime backends.
@@ -23,8 +23,8 @@ export class JavaScriptRuntimeEvaluator {
       options.executor ?? new JavaScriptExecutor(options.globalScope);
 
     this._commManager = new CommManager(options.onOutput);
-    this._setupJupyterGlobal();
     this._setupWidgets();
+    this._setupJupyterGlobal();
     this._setupDisplay();
     this._setupConsoleOverrides();
   }
@@ -367,34 +367,17 @@ export class JavaScriptRuntimeEvaluator {
   }
 
   /**
-   * Install widget classes in the runtime global scope.
+   * Create runtime-local widget classes.
    */
   private _setupWidgets(): void {
-    Widget.setDefaultManager(this._commManager);
-
-    this._previousWidgetGlobals = {};
-    for (const [name, cls] of Object.entries(widgetClasses)) {
-      this._previousWidgetGlobals[name] = this._globalScope[name];
-      this._globalScope[name] = cls;
-    }
+    this._widgetClasses = createWidgetClasses(this._commManager);
   }
 
   /**
-   * Remove widget classes from the global scope and reset the manager.
+   * Clear runtime-local widget classes.
    */
   private _restoreWidgets(): void {
-    Widget.setDefaultManager(null);
-
-    if (this._previousWidgetGlobals) {
-      for (const [name, prev] of Object.entries(this._previousWidgetGlobals)) {
-        if (prev === undefined) {
-          delete this._globalScope[name];
-        } else {
-          this._globalScope[name] = prev;
-        }
-      }
-      this._previousWidgetGlobals = null;
-    }
+    this._widgetClasses = null;
   }
 
   /**
@@ -402,9 +385,15 @@ export class JavaScriptRuntimeEvaluator {
    */
   private _setupJupyterGlobal(): void {
     this._previousJupyter = this._globalScope.Jupyter;
+    const previousJupyter =
+      typeof this._previousJupyter === 'object' &&
+      this._previousJupyter !== null
+        ? this._previousJupyter
+        : {};
     this._globalScope.Jupyter = {
+      ...previousJupyter,
       comm: this._commManager,
-      widgets: widgetClasses
+      widgets: this._widgetClasses ?? {}
     };
   }
 
@@ -423,7 +412,7 @@ export class JavaScriptRuntimeEvaluator {
   private _onOutput: RuntimeOutputHandler;
   private _executor: JavaScriptExecutor;
   private _commManager: CommManager;
-  private _previousWidgetGlobals: Record<string, any> | null = null;
+  private _widgetClasses: Record<string, typeof Widget> | null = null;
   private _previousJupyter: any;
   private _previousDisplay: any;
   private _originalOnError: any;
