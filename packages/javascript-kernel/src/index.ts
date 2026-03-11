@@ -7,3 +7,5 @@ export * from './display';
 export * from './runtime_protocol';
 export * from './runtime_backends';
 export * from './runtime_evaluator';
+export * from './comm';
+export * from './widgets';

@@ -5,7 +5,9 @@ import type { KernelMessage } from '@jupyterlab/services';
 
 import { JavaScriptExecutor } from './executor';
 import { normalizeError } from './errors';
+import { CommManager } from './comm';
 import type { RuntimeOutputHandler } from './runtime_protocol';
+import { Widget, widgetClasses } from './widgets';
 
 /**
  * Shared execution logic for iframe and worker runtime backends.
@@ -20,6 +22,9 @@ export class JavaScriptRuntimeEvaluator {
     this._executor =
       options.executor ?? new JavaScriptExecutor(options.globalScope);
 
+    this._commManager = new CommManager(options.onOutput);
+    this._setupJupyterGlobal();
+    this._setupWidgets();
     this._setupDisplay();
     this._setupConsoleOverrides();
   }
@@ -30,6 +35,9 @@ export class JavaScriptRuntimeEvaluator {
   dispose(): void {
     this._restoreConsoleOverrides();
     this._restoreDisplay();
+    this._restoreWidgets();
+    this._restoreJupyterGlobal();
+    this._commManager.dispose();
   }
 
   /**
@@ -73,15 +81,19 @@ export class JavaScriptRuntimeEvaluator {
         const result = await resultPromise;
 
         if (result !== undefined) {
-          const data = this._executor.getMimeBundle(result);
-          this._onOutput({
-            type: 'execute_result',
-            bundle: {
-              execution_count: executionCount,
-              data,
-              metadata: {}
-            }
-          });
+          if (result instanceof Widget) {
+            this._commManager.displayWidget(result.commId);
+          } else {
+            const data = this._executor.getMimeBundle(result);
+            this._onOutput({
+              type: 'execute_result',
+              bundle: {
+                execution_count: executionCount,
+                data,
+                metadata: {}
+              }
+            });
+          }
         }
       } else {
         await resultPromise;
@@ -132,6 +144,47 @@ export class JavaScriptRuntimeEvaluator {
    */
   isComplete(code: string): KernelMessage.IIsCompleteReplyMsg['content'] {
     return this._executor.isComplete(code);
+  }
+
+  /**
+   * The comm manager instance.
+   */
+  get commManager(): CommManager {
+    return this._commManager;
+  }
+
+  /**
+   * Handle a comm_open message from the frontend.
+   */
+  handleCommOpen(
+    commId: string,
+    targetName: string,
+    data: Record<string, unknown>,
+    buffers?: ArrayBuffer[]
+  ): void {
+    this._commManager.handleCommOpen(commId, targetName, data, buffers);
+  }
+
+  /**
+   * Handle a comm_msg message from the frontend.
+   */
+  handleCommMsg(
+    commId: string,
+    data: Record<string, unknown>,
+    buffers?: ArrayBuffer[]
+  ): void {
+    this._commManager.handleCommMsg(commId, data, buffers);
+  }
+
+  /**
+   * Handle a comm_close message from the frontend.
+   */
+  handleCommClose(
+    commId: string,
+    data: Record<string, unknown>,
+    buffers?: ArrayBuffer[]
+  ): void {
+    this._commManager.handleCommClose(commId, data, buffers);
   }
 
   /**
@@ -283,6 +336,11 @@ export class JavaScriptRuntimeEvaluator {
     this._previousDisplay = this._globalScope.display;
 
     this._globalScope.display = (obj: any, metadata?: Record<string, any>) => {
+      if (obj instanceof Widget) {
+        this._commManager.displayWidget(obj.commId);
+        return;
+      }
+
       const data = this._executor.getMimeBundle(obj);
 
       this._onOutput({
@@ -308,9 +366,65 @@ export class JavaScriptRuntimeEvaluator {
     this._globalScope.display = this._previousDisplay;
   }
 
+  /**
+   * Install widget classes in the runtime global scope.
+   */
+  private _setupWidgets(): void {
+    Widget.setDefaultManager(this._commManager);
+
+    this._previousWidgetGlobals = {};
+    for (const [name, cls] of Object.entries(widgetClasses)) {
+      this._previousWidgetGlobals[name] = this._globalScope[name];
+      this._globalScope[name] = cls;
+    }
+  }
+
+  /**
+   * Remove widget classes from the global scope and reset the manager.
+   */
+  private _restoreWidgets(): void {
+    Widget.setDefaultManager(null);
+
+    if (this._previousWidgetGlobals) {
+      for (const [name, prev] of Object.entries(this._previousWidgetGlobals)) {
+        if (prev === undefined) {
+          delete this._globalScope[name];
+        } else {
+          this._globalScope[name] = prev;
+        }
+      }
+      this._previousWidgetGlobals = null;
+    }
+  }
+
+  /**
+   * Install Jupyter.comm in runtime scope.
+   */
+  private _setupJupyterGlobal(): void {
+    this._previousJupyter = this._globalScope.Jupyter;
+    this._globalScope.Jupyter = {
+      comm: this._commManager,
+      widgets: widgetClasses
+    };
+  }
+
+  /**
+   * Restore previous Jupyter binding.
+   */
+  private _restoreJupyterGlobal(): void {
+    if (this._previousJupyter === undefined) {
+      delete this._globalScope.Jupyter;
+      return;
+    }
+    this._globalScope.Jupyter = this._previousJupyter;
+  }
+
   private _globalScope: Record<string, any>;
   private _onOutput: RuntimeOutputHandler;
   private _executor: JavaScriptExecutor;
+  private _commManager: CommManager;
+  private _previousWidgetGlobals: Record<string, any> | null = null;
+  private _previousJupyter: any;
   private _previousDisplay: any;
   private _originalOnError: any;
   private _originalConsole: {

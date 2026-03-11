@@ -105,6 +105,41 @@ Limits of automatic cleanup:
 - It will not automatically remove all event listeners or timers.
 - It cannot safely revert all stateful third-party module internals.
 
+## Jupyter Widgets
+
+The kernel provides built-in support for [Jupyter Widgets](https://ipywidgets.readthedocs.io/) (`ipywidgets`-compatible). Widget classes are available as globals in the kernel runtime — just instantiate and call `.display()`:
+
+```javascript
+const slider = new IntSlider({
+    value: 50,
+    min: 0,
+    max: 100,
+    description: 'My Slider'
+});
+display(slider);
+
+slider.on('change:value', (newVal) => {
+    console.log('Slider value:', newVal);
+});
+```
+
+Widgets auto-display when they are the last expression in a cell. Use the global `display()` function to display a widget explicitly, for example when assigning to a variable.
+
+### Available widgets
+
+- **Numeric**: `IntSlider`, `FloatSlider`, `IntProgress`, `FloatProgress`, `IntText`, `FloatText`, `BoundedIntText`, `BoundedFloatText`
+- **Boolean**: `Checkbox`, `ToggleButton`, `Valid`
+- **Selection**: `Dropdown`, `RadioButtons`, `Select`, `ToggleButtons`, `SelectionSlider`
+- **String**: `Text`, `Textarea`, `Password`, `Combobox`
+- **Display**: `Label`, `HTML`, `HTMLMath`
+- **Button**: `Button` (with `.onClick()` handler)
+- **Color**: `ColorPicker`
+- **Containers**: `Box`, `HBox`, `VBox`, `GridBox`, `Accordion`, `Tab`, `Stack`
+
+> **Note:** `jupyterlab-widgets` and `@jupyter-widgets/controls` must be available in the JupyterLite deployment for widgets to render.
+
+See the [example notebook](examples/widgets.ipynb) for more usage examples.
+
 ### Enable or disable specific modes
 
 The two runtime modes are registered by separate plugins:

@@ -40,6 +40,35 @@ export type RuntimeOutputMessage =
   | {
       type: 'execute_error';
       bundle: KernelMessage.IReplyErrorContent;
+    }
+  | {
+      type: 'comm_open';
+      content: {
+        comm_id: string;
+        target_name: string;
+        data: Record<string, unknown>;
+        target_module?: string;
+      };
+      metadata?: Record<string, unknown>;
+      buffers?: ArrayBuffer[];
+    }
+  | {
+      type: 'comm_msg';
+      content: {
+        comm_id: string;
+        data: Record<string, unknown>;
+      };
+      metadata?: Record<string, unknown>;
+      buffers?: ArrayBuffer[];
+    }
+  | {
+      type: 'comm_close';
+      content: {
+        comm_id: string;
+        data: Record<string, unknown>;
+      };
+      metadata?: Record<string, unknown>;
+      buffers?: ArrayBuffer[];
     };
 
 /**
@@ -78,5 +107,21 @@ export interface IRemoteRuntimeApi {
   isComplete(
     code: string
   ): Promise<KernelMessage.IIsCompleteReplyMsg['content']>;
+  handleCommOpen(
+    commId: string,
+    targetName: string,
+    data: Record<string, unknown>,
+    buffers?: ArrayBuffer[]
+  ): Promise<void>;
+  handleCommMsg(
+    commId: string,
+    data: Record<string, unknown>,
+    buffers?: ArrayBuffer[]
+  ): Promise<void>;
+  handleCommClose(
+    commId: string,
+    data: Record<string, unknown>,
+    buffers?: ArrayBuffer[]
+  ): Promise<void>;
   dispose(): Promise<void>;
 }

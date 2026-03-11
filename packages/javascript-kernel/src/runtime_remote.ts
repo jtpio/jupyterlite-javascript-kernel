@@ -71,6 +71,31 @@ export function createRemoteRuntimeApi(
       return ensureEvaluator().isComplete(code);
     },
 
+    async handleCommOpen(
+      commId: string,
+      targetName: string,
+      data: Record<string, unknown>,
+      buffers?: ArrayBuffer[]
+    ): Promise<void> {
+      ensureEvaluator().handleCommOpen(commId, targetName, data, buffers);
+    },
+
+    async handleCommMsg(
+      commId: string,
+      data: Record<string, unknown>,
+      buffers?: ArrayBuffer[]
+    ): Promise<void> {
+      ensureEvaluator().handleCommMsg(commId, data, buffers);
+    },
+
+    async handleCommClose(
+      commId: string,
+      data: Record<string, unknown>,
+      buffers?: ArrayBuffer[]
+    ): Promise<void> {
+      ensureEvaluator().handleCommClose(commId, data, buffers);
+    },
+
     async dispose(): Promise<void> {
       evaluator?.dispose();
       evaluator = null;
@@ -118,6 +143,10 @@ function sanitize(value: any, seen: WeakSet<object>, depth: number): any {
   }
   if (valueType === 'symbol' || valueType === 'function') {
     return String(value);
+  }
+
+  if (value instanceof ArrayBuffer) {
+    return value;
   }
 
   if (value instanceof Error) {

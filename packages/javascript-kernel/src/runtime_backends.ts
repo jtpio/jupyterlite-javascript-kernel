@@ -48,6 +48,22 @@ export interface IRuntimeBackend {
   isComplete(
     code: string
   ): Promise<KernelMessage.IIsCompleteReplyMsg['content']>;
+  handleCommOpen(
+    commId: string,
+    targetName: string,
+    data: Record<string, unknown>,
+    buffers?: ArrayBuffer[]
+  ): Promise<void>;
+  handleCommMsg(
+    commId: string,
+    data: Record<string, unknown>,
+    buffers?: ArrayBuffer[]
+  ): Promise<void>;
+  handleCommClose(
+    commId: string,
+    data: Record<string, unknown>,
+    buffers?: ArrayBuffer[]
+  ): Promise<void>;
 }
 
 /**
@@ -108,6 +124,49 @@ abstract class AbstractRuntimeBackend implements IRuntimeBackend {
   ): Promise<KernelMessage.IIsCompleteReplyMsg['content']> {
     await this.ready;
     return this._getRemote().isComplete(code);
+  }
+
+  /**
+   * Forward comm_open to the remote runtime.
+   */
+  async handleCommOpen(
+    commId: string,
+    targetName: string,
+    data: Record<string, unknown>,
+    buffers?: ArrayBuffer[]
+  ): Promise<void> {
+    await this.ready;
+    if (this._remote) {
+      await this._remote.handleCommOpen(commId, targetName, data, buffers);
+    }
+  }
+
+  /**
+   * Forward comm_msg to the remote runtime.
+   */
+  async handleCommMsg(
+    commId: string,
+    data: Record<string, unknown>,
+    buffers?: ArrayBuffer[]
+  ): Promise<void> {
+    await this.ready;
+    if (this._remote) {
+      await this._remote.handleCommMsg(commId, data, buffers);
+    }
+  }
+
+  /**
+   * Forward comm_close to the remote runtime.
+   */
+  async handleCommClose(
+    commId: string,
+    data: Record<string, unknown>,
+    buffers?: ArrayBuffer[]
+  ): Promise<void> {
+    await this.ready;
+    if (this._remote) {
+      await this._remote.handleCommClose(commId, data, buffers);
+    }
   }
 
   /**
