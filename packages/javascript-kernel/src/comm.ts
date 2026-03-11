@@ -157,7 +157,6 @@ export class CommManager {
    * Create an IComm instance bound to this manager.
    */
   private _createComm(commId: string, targetName: string): IComm {
-    const manager = this;
     const comm: IComm = {
       get commId() {
         return commId;
@@ -165,12 +164,12 @@ export class CommManager {
       get targetName() {
         return targetName;
       },
-      send(
+      send: (
         data: Record<string, unknown>,
         metadata?: Record<string, unknown>,
         buffers?: ArrayBuffer[]
-      ): void {
-        manager._onOutput({
+      ): void => {
+        this._onOutput({
           type: 'comm_msg',
           content: {
             comm_id: commId,
@@ -180,18 +179,18 @@ export class CommManager {
           buffers
         });
       },
-      close(data: Record<string, unknown> = {}): void {
-        manager._onOutput({
+      close: (data: Record<string, unknown> = {}): void => {
+        this._onOutput({
           type: 'comm_close',
           content: {
             comm_id: commId,
             data
           }
         });
-        manager._comms.delete(commId);
+        this._comms.delete(commId);
       },
-      display(): void {
-        manager.displayWidget(commId);
+      display: (): void => {
+        this.displayWidget(commId);
       },
       onMsg: null,
       onClose: null

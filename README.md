@@ -111,15 +111,15 @@ The kernel provides built-in support for [Jupyter Widgets](https://ipywidgets.re
 
 ```javascript
 const slider = new IntSlider({
-    value: 50,
-    min: 0,
-    max: 100,
-    description: 'My Slider'
+  value: 50,
+  min: 0,
+  max: 100,
+  description: 'My Slider'
 });
 display(slider);
 
-slider.on('change:value', (newVal) => {
-    console.log('Slider value:', newVal);
+slider.on('change:value', newVal => {
+  console.log('Slider value:', newVal);
 });
 ```
 

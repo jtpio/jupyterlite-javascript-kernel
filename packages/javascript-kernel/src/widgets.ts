@@ -84,9 +84,7 @@ export class Widget {
   set(state: Record<string, unknown>): void;
   set(nameOrState: string | Record<string, unknown>, value?: unknown): void {
     const updates: Record<string, unknown> =
-      typeof nameOrState === 'string'
-        ? { [nameOrState]: value }
-        : nameOrState;
+      typeof nameOrState === 'string' ? { [nameOrState]: value } : nameOrState;
 
     const changes: Array<[string, unknown, unknown]> = [];
     for (const [key, val] of Object.entries(updates)) {
@@ -270,7 +268,12 @@ export class FloatSlider extends _SliderBase {
   static override viewName = 'FloatSliderView';
 
   protected override _defaults() {
-    return { ...super._defaults(), max: 10.0, step: 0.1, readout_format: '.2f' };
+    return {
+      ...super._defaults(),
+      max: 10.0,
+      step: 0.1,
+      readout_format: '.2f'
+    };
   }
 
   get readout_format(): string {
@@ -407,7 +410,13 @@ export class BoundedFloatText extends _NumericTextBase {
   static override viewName = 'FloatTextView';
 
   protected override _defaults() {
-    return { ...super._defaults(), value: 0.0, step: 0.1, min: 0.0, max: 100.0 };
+    return {
+      ...super._defaults(),
+      value: 0.0,
+      step: 0.1,
+      min: 0.0,
+      max: 100.0
+    };
   }
 
   get min(): number {
@@ -522,8 +531,7 @@ class _SelectionBase extends Widget {
     if (options !== undefined) {
       (rest as Record<string, unknown>)._options_labels = options;
       if (rest.index === undefined) {
-        (rest as Record<string, unknown>).index =
-          options.length > 0 ? 0 : null;
+        (rest as Record<string, unknown>).index = options.length > 0 ? 0 : null;
       }
     }
     super(rest as Record<string, unknown>);
@@ -971,7 +979,9 @@ export class Tab extends _SelectionContainer {
     if (children.length > 0 && s.selected_index === undefined) {
       s.selected_index = 0;
     }
-    super(s as Record<string, unknown> & { children?: Widget[]; titles?: string[] });
+    super(
+      s as Record<string, unknown> & { children?: Widget[]; titles?: string[] }
+    );
   }
 }
 

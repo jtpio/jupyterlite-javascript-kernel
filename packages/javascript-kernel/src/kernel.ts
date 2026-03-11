@@ -416,7 +416,10 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
     }
     return buffers.map(buf => {
       if (ArrayBuffer.isView(buf)) {
-        return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+        return buf.buffer.slice(
+          buf.byteOffset,
+          buf.byteOffset + buf.byteLength
+        );
       }
       return buf;
     });
