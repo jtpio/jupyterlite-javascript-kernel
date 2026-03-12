@@ -149,6 +149,27 @@ Widgets auto-display when they are the last expression in a cell. Use the global
 - **Containers**: `Box`, `HBox`, `VBox`, `GridBox`, `Accordion`, `Tab`, `Stack`
 - **Helpers**: `jslink`, `jsdlink`
 
+### Ported widget modules
+
+The widget runtime is split into files that roughly follow the upstream `ipywidgets` package structure so it is easier to track what has been ported.
+
+| Upstream `ipywidgets` file                           | Local file                                                            | Status  | Notes                                                                |
+| ---------------------------------------------------- | --------------------------------------------------------------------- | ------- | -------------------------------------------------------------------- |
+| `packages/base/src/widget.ts`                        | `packages/javascript-kernel/src/widgets/widget.ts`                    | Ported  | Kernel-side `Widget` and `DOMWidget` equivalents                     |
+| `packages/base/src/widget_layout.ts`                 | `packages/javascript-kernel/src/widgets/widget_layout.ts`             | Ported  | Layout models                                                        |
+| `packages/base/src/widget_style.ts`                  | `packages/javascript-kernel/src/widgets/widget_style.ts`              | Ported  | Shared style models, plus control-specific styles gathered here      |
+| `packages/controls/src/widget_int.ts`                | `packages/javascript-kernel/src/widgets/widget_int.ts`                | Ported  | Integer widgets, play, progress, and text inputs                     |
+| `packages/controls/src/widget_float.ts`              | `packages/javascript-kernel/src/widgets/widget_float.ts`              | Ported  | Float widgets                                                        |
+| `packages/controls/src/widget_bool.ts`               | `packages/javascript-kernel/src/widgets/widget_bool.ts`               | Ported  | Boolean widgets; related styles live in `widget_style.ts`            |
+| `packages/controls/src/widget_selection.ts`          | `packages/javascript-kernel/src/widgets/widget_selection.ts`          | Partial | Selection semantics still differ from `ipywidgets` in some cases     |
+| `packages/controls/src/widget_string.ts`             | `packages/javascript-kernel/src/widgets/widget_string.ts`             | Ported  | String and display widgets; related styles live in `widget_style.ts` |
+| `packages/output/src/output.ts`                      | `packages/javascript-kernel/src/widgets/widget_output.ts`             | Partial | Output capture is supported but not feature-complete                 |
+| `packages/controls/src/widget_button.ts`             | `packages/javascript-kernel/src/widgets/widget_button.ts`             | Partial | Button widget is present, but callback behavior differs slightly     |
+| `packages/controls/src/widget_color.ts`              | `packages/javascript-kernel/src/widgets/widget_color.ts`              | Ported  | Color picker                                                         |
+| `packages/controls/src/widget_box.ts`                | `packages/javascript-kernel/src/widgets/widget_box.ts`                | Ported  | Box, HBox, VBox, GridBox                                             |
+| `packages/controls/src/widget_selectioncontainer.ts` | `packages/javascript-kernel/src/widgets/widget_selectioncontainer.ts` | Ported  | Accordion, Tab, Stack                                                |
+| `packages/controls/src/widget_link.ts`               | `packages/javascript-kernel/src/widgets/widget_link.ts`               | Ported  | `jslink`, `jsdlink`, `Link`, and `DirectionalLink`                   |
+
 > **Note:** `jupyterlab-widgets`, `@jupyter-widgets/controls`, and `@jupyter-widgets/output` must be available in the JupyterLite deployment for the full widget set to render.
 
 See the [example notebook](examples/widgets.ipynb) for more usage examples.
