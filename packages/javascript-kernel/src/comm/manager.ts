@@ -1,7 +1,7 @@
 // Copyright (c) Jupyter Development Team.
 // Distributed under the terms of the Modified BSD License.
 
-import type { RuntimeOutputHandler } from './runtime_protocol';
+import type { RuntimeOutputHandler } from '../runtime_protocol';
 
 /**
  * Represents an open comm channel.
