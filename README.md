@@ -44,6 +44,29 @@ Pick either kernel from the notebook kernel selector in JupyterLite.
 
 Web Workers do not expose DOM APIs. In `JavaScript (Web Worker)`, APIs such as `document`, direct element access, and other main-thread-only browser APIs are unavailable.
 
+## JupyterLite contents API
+
+Both runtime modes expose an async `jupyterlite.contents` helper inside executed cells. It is backed by JupyterLite's contents manager rather than a Node, Deno, or Bun filesystem API, so it stays browser-native and works in both the iframe and worker kernels.
+
+```javascript
+await jupyterlite.contents.writeJSON('data/example.json', { answer: 42 });
+
+const data = await jupyterlite.contents.readJSON('data/example.json');
+const files = await jupyterlite.contents.listdir('.');
+
+console.log(jupyterlite.contents.cwd(), data.answer, files);
+```
+
+Available methods:
+
+- `cwd()`, `chdir(path)`, `resolve(path)`
+- `exists(path)`, `stat(path)`, `listdir(path)`
+- `readFile(path)`, `readText(path)`, `readJSON(path)`, `readBytes(path)`
+- `writeFile(path, value)`, `writeText(path, text)`, `writeJSON(path, value)`, `writeBytes(path, bytes)`
+- `mkdir(path, { recursive })`, `remove(path)`, `rename(path, newPath)`
+
+Relative paths are resolved against the notebook directory.
+
 ### Import side effects in iframe mode
 
 In `JavaScript (IFrame)`, user code and imports execute in the runtime iframe scope.

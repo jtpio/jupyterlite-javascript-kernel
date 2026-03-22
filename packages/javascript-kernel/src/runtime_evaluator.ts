@@ -3,6 +3,11 @@
 
 import type { KernelMessage } from '@jupyterlab/services';
 
+import {
+  installJupyterLiteBrowserAPI,
+  type IInstalledJupyterLiteBrowserAPI,
+  type IJupyterLiteBrowserAPIOptions
+} from './contents';
 import { JavaScriptExecutor } from './executor';
 import { normalizeError } from './errors';
 import type { RuntimeOutputHandler } from './runtime_protocol';
@@ -21,6 +26,7 @@ export class JavaScriptRuntimeEvaluator {
       options.executor ?? new JavaScriptExecutor(options.globalScope);
 
     this._setupDisplay();
+    this._setupJupyterLiteBrowserAPI(options.contents);
     this._setupConsoleOverrides();
   }
 
@@ -29,6 +35,7 @@ export class JavaScriptRuntimeEvaluator {
    */
   dispose(): void {
     this._restoreConsoleOverrides();
+    this._restoreJupyterLiteBrowserAPI();
     this._restoreDisplay();
   }
 
@@ -308,10 +315,36 @@ export class JavaScriptRuntimeEvaluator {
     this._globalScope.display = this._previousDisplay;
   }
 
+  /**
+   * Install the browser-oriented JupyterLite helper API.
+   */
+  private _setupJupyterLiteBrowserAPI(
+    contents?: IJupyterLiteBrowserAPIOptions
+  ): void {
+    if (!contents) {
+      return;
+    }
+
+    this._jupyterLiteBrowserAPI = installJupyterLiteBrowserAPI(
+      this._globalScope,
+      contents
+    );
+  }
+
+  /**
+   * Restore any previous `globalThis.jupyterlite` binding.
+   */
+  private _restoreJupyterLiteBrowserAPI(): void {
+    this._jupyterLiteBrowserAPI?.dispose();
+    this._jupyterLiteBrowserAPI = null;
+  }
+
   private _globalScope: Record<string, any>;
   private _onOutput: RuntimeOutputHandler;
   private _executor: JavaScriptExecutor;
   private _previousDisplay: any;
+  private _jupyterLiteBrowserAPI: IInstalledJupyterLiteBrowserAPI | null =
+    null;
   private _originalOnError: any;
   private _originalConsole: {
     log: Console['log'];
@@ -336,5 +369,6 @@ export namespace JavaScriptRuntimeEvaluator {
     globalScope: Record<string, any>;
     onOutput: RuntimeOutputHandler;
     executor?: JavaScriptExecutor;
+    contents?: IJupyterLiteBrowserAPIOptions;
   }
 }

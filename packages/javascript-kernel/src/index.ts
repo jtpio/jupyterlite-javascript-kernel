@@ -4,6 +4,7 @@
 export * from './kernel';
 export * from './executor';
 export * from './display';
+export * from './contents';
 export * from './runtime_protocol';
 export * from './runtime_backends';
 export * from './runtime_evaluator';

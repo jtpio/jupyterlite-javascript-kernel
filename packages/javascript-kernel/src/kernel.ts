@@ -1,9 +1,16 @@
 // Copyright (c) Jupyter Development Team.
 // Distributed under the terms of the Modified BSD License.
 
-import type { KernelMessage } from '@jupyterlab/services';
+import type { Contents, KernelMessage } from '@jupyterlab/services';
 
-import { BaseKernel, type IKernel } from '@jupyterlite/services';
+import {
+  BaseKernel,
+  DriveContentsProcessor,
+  type IKernel,
+  type TDriveMethod,
+  type TDriveRequest,
+  type TDriveResponse
+} from '@jupyterlite/services';
 
 import type { JavaScriptExecutor } from './executor';
 import { normalizeError as normalizeUnknownError } from './errors';
@@ -27,6 +34,7 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
     super(options);
     this._runtimeMode = options.runtime ?? 'iframe';
     this._executorFactory = options.executorFactory;
+    this._contentsManager = options.contentsManager;
     this._backend = this.createBackend(this._runtimeMode);
   }
 
@@ -237,7 +245,12 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
     const options = {
       onOutput: (message: RuntimeOutputMessage) => {
         this.processRuntimeMessage(message);
-      }
+      },
+      location: this.location,
+      onContentsRequest: this._contentsManager
+        ? <T extends TDriveMethod>(request: TDriveRequest<T>) =>
+            this.processDriveRequest(request)
+        : undefined
     };
 
     if (runtimeMode === 'worker') {
@@ -319,6 +332,23 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
   }
 
   /**
+   * Proxy a drive request through the host JupyterLite contents manager.
+   */
+  protected async processDriveRequest<T extends TDriveMethod>(
+    request: TDriveRequest<T>
+  ): Promise<TDriveResponse<T>> {
+    if (!this._contentsManager) {
+      throw new Error('JupyterLite contents are not available');
+    }
+
+    this._contentsProcessor ??= new DriveContentsProcessor({
+      contentsManager: this._contentsManager
+    });
+
+    return this._contentsProcessor.processDriveRequest(request);
+  }
+
+  /**
    * Normalize an execute reply error into an Error instance.
    */
   private _createRuntimeInitializationError(
@@ -369,6 +399,8 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
     'input_reply' | 'comm_open' | 'comm_msg' | 'comm_close'
   >();
   private _backend: IRuntimeBackend;
+  private _contentsManager?: Contents.IManager;
+  private _contentsProcessor?: DriveContentsProcessor;
   private _executorFactory?: JavaScriptKernel.IExecutorFactory;
   private _runtimeMode: RuntimeMode;
 }
@@ -419,6 +451,7 @@ export namespace JavaScriptKernel {
    * The instantiation options for a JavaScript kernel.
    */
   export interface IOptions extends IKernel.IOptions {
+    contentsManager?: Contents.IManager;
     runtime?: RuntimeMode;
     executorFactory?: IExecutorFactory;
   }

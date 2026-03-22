@@ -8,6 +8,7 @@ import { PromiseDelegate } from '@lumino/coreutils';
 
 import * as Comlink from 'comlink';
 
+import type { DriveRequestHandler } from './contents';
 import { JavaScriptExecutor } from './executor';
 import { normalizeError } from './errors';
 import { createRemoteRuntimeApi } from './runtime_remote';
@@ -24,6 +25,8 @@ import type {
 export interface IRuntimeBackendOptions {
   onOutput: RuntimeOutputHandler;
   baseUrl?: string;
+  location?: string;
+  onContentsRequest?: DriveRequestHandler;
 }
 
 /**
@@ -167,6 +170,7 @@ export class IFrameRuntimeBackend extends AbstractRuntimeBackend {
     }
 
     this._outputProxy = null;
+    this._contentsRequestProxy = null;
     this._globalScope = null;
     this._executor = null;
   }
@@ -256,9 +260,13 @@ export class IFrameRuntimeBackend extends AbstractRuntimeBackend {
       const outputProxy = Comlink.proxy((message: RuntimeOutputMessage) => {
         this._options.onOutput(message);
       });
+      const contentsRequestProxy = createContentsRequestProxy(
+        this._options.onContentsRequest
+      );
 
       this._remote = remote;
       this._outputProxy = outputProxy;
+      this._contentsRequestProxy = contentsRequestProxy ?? null;
       const activeOutputProxy = this._outputProxy;
       if (!activeOutputProxy) {
         throw new Error('IFrame runtime output handler is not initialized');
@@ -267,9 +275,11 @@ export class IFrameRuntimeBackend extends AbstractRuntimeBackend {
       await withTimeout(
         remote.initialize(
           {
-            baseUrl: resolveBaseUrl(this._options.baseUrl)
+            baseUrl: resolveBaseUrl(this._options.baseUrl),
+            location: this._options.location ?? ''
           },
-          activeOutputProxy
+          activeOutputProxy,
+          this._contentsRequestProxy ?? undefined
         ),
         IFrameRuntimeBackend.STARTUP_TIMEOUT_MS,
         'IFrame runtime failed to initialize'
@@ -300,6 +310,7 @@ export class IFrameRuntimeBackend extends AbstractRuntimeBackend {
       }
 
       this._outputProxy = null;
+      this._contentsRequestProxy = null;
       this._globalScope = null;
       this._executor = null;
       this._ready.reject(error);
@@ -312,6 +323,7 @@ export class IFrameRuntimeBackend extends AbstractRuntimeBackend {
   private _iframe: HTMLIFrameElement | null = null;
   private _container: HTMLDivElement | null = null;
   private _outputProxy: RuntimeOutputCallback | null = null;
+  private _contentsRequestProxy: DriveRequestHandler | null = null;
   private _globalScope: Record<string, any> | null = null;
   private _executor: JavaScriptExecutor | null = null;
 
@@ -385,6 +397,8 @@ export class WorkerRuntimeBackend extends AbstractRuntimeBackend {
     this._outputProxy = Comlink.proxy((message: RuntimeOutputMessage) => {
       this._options.onOutput(message);
     });
+    this._contentsRequestProxy =
+      createContentsRequestProxy(this._options.onContentsRequest) ?? null;
 
     void this._init();
   }
@@ -404,6 +418,7 @@ export class WorkerRuntimeBackend extends AbstractRuntimeBackend {
     this._worker?.terminate();
     this._worker = null;
     this._outputProxy = null;
+    this._contentsRequestProxy = null;
   }
 
   /**
@@ -422,9 +437,11 @@ export class WorkerRuntimeBackend extends AbstractRuntimeBackend {
       await withTimeout(
         remote.initialize(
           {
-            baseUrl: resolveBaseUrl(this._options.baseUrl)
+            baseUrl: resolveBaseUrl(this._options.baseUrl),
+            location: this._options.location ?? ''
           },
-          outputProxy
+          outputProxy,
+          this._contentsRequestProxy ?? undefined
         ),
         WorkerRuntimeBackend.STARTUP_TIMEOUT_MS,
         'Worker runtime failed to initialize'
@@ -453,6 +470,7 @@ export class WorkerRuntimeBackend extends AbstractRuntimeBackend {
     this._worker?.terminate();
     this._worker = null;
     this._outputProxy = null;
+    this._contentsRequestProxy = null;
     this._ready.reject(error);
   }
 
@@ -461,6 +479,7 @@ export class WorkerRuntimeBackend extends AbstractRuntimeBackend {
   private _options: WorkerRuntimeBackend.IOptions;
   private _worker: Worker | null = null;
   private _outputProxy: RuntimeOutputCallback | null = null;
+  private _contentsRequestProxy: DriveRequestHandler | null = null;
 
   static readonly STARTUP_TIMEOUT_MS = 10000;
 }
@@ -526,4 +545,18 @@ function resolveBaseUrl(baseUrl?: string): string {
   } catch {
     return '/';
   }
+}
+
+/**
+ * Wrap a host callback so Comlink treats it as a live proxy instead of trying
+ * to clone it.
+ */
+function createContentsRequestProxy(
+  handler?: DriveRequestHandler
+): DriveRequestHandler | undefined {
+  if (!handler) {
+    return undefined;
+  }
+
+  return Comlink.proxy((request: any) => handler(request)) as DriveRequestHandler;
 }

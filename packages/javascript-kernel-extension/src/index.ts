@@ -6,6 +6,8 @@ import {
   JupyterFrontEndPlugin
 } from '@jupyterlab/application';
 
+import type { Contents } from '@jupyterlab/services';
+
 import type { IKernel } from '@jupyterlite/services';
 
 import { IKernelSpecs } from '@jupyterlite/services';
@@ -24,13 +26,14 @@ interface IRegisterKernelOptions {
   name: string;
   displayName: string;
   runtime: RuntimeMode;
+  contentsManager: Contents.IManager;
 }
 
 const registerKernel = (
   kernelspecs: IKernelSpecs,
   options: IRegisterKernelOptions
 ) => {
-  const { name, displayName, runtime } = options;
+  const { name, displayName, runtime, contentsManager } = options;
 
   kernelspecs.register({
     spec: {
@@ -56,6 +59,7 @@ const registerKernel = (
     create: async (options: IKernel.IOptions): Promise<IKernel> => {
       return new JavaScriptKernel({
         ...options,
+        contentsManager,
         runtime
       } as JavaScriptKernel.IOptions);
     }
@@ -70,10 +74,13 @@ const kernelIFrame: JupyterFrontEndPlugin<void> = {
   autoStart: true,
   requires: [IKernelSpecs],
   activate: (app: JupyterFrontEnd, kernelspecs: IKernelSpecs) => {
+    const { contents: contentsManager } = app.serviceManager;
+
     registerKernel(kernelspecs, {
       name: 'javascript',
       displayName: 'JavaScript (IFrame)',
-      runtime: 'iframe'
+      runtime: 'iframe',
+      contentsManager
     });
   }
 };
@@ -86,10 +93,13 @@ const kernelWorker: JupyterFrontEndPlugin<void> = {
   autoStart: true,
   requires: [IKernelSpecs],
   activate: (app: JupyterFrontEnd, kernelspecs: IKernelSpecs) => {
+    const { contents: contentsManager } = app.serviceManager;
+
     registerKernel(kernelspecs, {
       name: 'javascript-worker',
       displayName: 'JavaScript (Web Worker)',
-      runtime: 'worker'
+      runtime: 'worker',
+      contentsManager
     });
   }
 };

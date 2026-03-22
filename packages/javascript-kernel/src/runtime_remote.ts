@@ -36,7 +36,8 @@ export function createRemoteRuntimeApi(
   return {
     async initialize(
       options: Parameters<IRemoteRuntimeApi['initialize']>[0],
-      onOutput: Parameters<IRemoteRuntimeApi['initialize']>[1]
+      onOutput: Parameters<IRemoteRuntimeApi['initialize']>[1],
+      onContentsRequest?: Parameters<IRemoteRuntimeApi['initialize']>[2]
     ): Promise<void> {
       if (typeof options.baseUrl !== 'string') {
         throw new Error('Runtime baseUrl is required');
@@ -47,7 +48,13 @@ export function createRemoteRuntimeApi(
         executor,
         onOutput: message => {
           emitOutput(onOutput, message);
-        }
+        },
+        contents: onContentsRequest
+          ? {
+              location: options.location,
+              request: onContentsRequest
+            }
+          : undefined
       });
     },
 

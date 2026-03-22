@@ -4,6 +4,8 @@
 import type { KernelMessage } from '@jupyterlab/services';
 import type { IWorkerKernel } from '@jupyterlite/services';
 
+import type { DriveRequestHandler } from './contents';
+
 /**
  * Supported runtime backends for the JavaScript kernel.
  */
@@ -55,12 +57,20 @@ export type RuntimeOutputCallback = (
 ) => void | Promise<void>;
 
 /**
+ * Runtime initialization options shared across backends.
+ */
+export interface IRuntimeInitializeOptions extends IWorkerKernel.IOptions {
+  location: string;
+}
+
+/**
  * Runtime API exposed from iframe and worker contexts over Comlink.
  */
 export interface IRemoteRuntimeApi {
   initialize(
-    options: IWorkerKernel.IOptions,
-    onOutput: RuntimeOutputCallback
+    options: IRuntimeInitializeOptions,
+    onOutput: RuntimeOutputCallback,
+    onContentsRequest?: DriveRequestHandler
   ): Promise<void>;
   execute(
     code: string,
