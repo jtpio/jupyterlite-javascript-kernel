@@ -48,6 +48,8 @@ Web Workers do not expose DOM APIs. In `JavaScript (Web Worker)`, APIs such as `
 
 Both runtime modes expose an async `jupyterlite.contents` helper inside executed cells. It is backed by JupyterLite's contents manager rather than a Node, Deno, or Bun filesystem API, so it stays browser-native and works in both the iframe and worker kernels.
 
+For a complete walkthrough, see `examples/contents-api.ipynb`.
+
 ```javascript
 await jupyterlite.contents.writeJSON('data/example.json', { answer: 42 });
 

@@ -1133,6 +1133,7 @@ export class JavaScriptExecutor {
       lastNode.type === 'ExpressionStatement' &&
       lastNode.expression.type !== 'AssignmentExpression'
     ) {
+      const lastNodeStart = lastNode.start;
       const lastNodeExprStart = lastNode.expression.start;
       const lastNodeExprEnd = lastNode.expression.end;
       const lastNodeRestEnd = lastNode.end;
@@ -1147,10 +1148,10 @@ export class JavaScriptExecutor {
       }
 
       if (!semicolonFound) {
-        // Remove the last node from the code
+        // Remove the entire statement so wrappers like `({ ... })` do not leave
+        // behind orphan punctuation in the user code.
         const modifiedUserCode =
-          code.substring(0, lastNodeExprStart) +
-          code.substring(lastNodeExprEnd);
+          code.substring(0, lastNodeStart) + code.substring(lastNodeRestEnd);
         const codeOfLastNode = code.substring(
           lastNodeExprStart,
           lastNodeExprEnd
