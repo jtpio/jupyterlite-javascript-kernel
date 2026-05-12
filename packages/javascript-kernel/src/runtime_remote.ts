@@ -51,8 +51,12 @@ export function createRemoteRuntimeApi(
       });
     },
 
-    async execute(code: string, executionCount: number) {
-      return ensureEvaluator().execute(code, executionCount);
+    async execute(
+      code: string,
+      executionCount: number,
+      parentMessageId?: string
+    ) {
+      return ensureEvaluator().execute(code, executionCount, parentMessageId);
     },
 
     async complete(code: string, cursorPos: number) {
@@ -69,6 +73,40 @@ export function createRemoteRuntimeApi(
 
     async isComplete(code: string) {
       return ensureEvaluator().isComplete(code);
+    },
+
+    async handleCommOpen(
+      commId: string,
+      targetName: string,
+      data: Record<string, unknown>,
+      buffers?: ArrayBuffer[],
+      parentMessageId?: string
+    ): Promise<void> {
+      ensureEvaluator().handleCommOpen(
+        commId,
+        targetName,
+        data,
+        buffers,
+        parentMessageId
+      );
+    },
+
+    async handleCommMsg(
+      commId: string,
+      data: Record<string, unknown>,
+      buffers?: ArrayBuffer[],
+      parentMessageId?: string
+    ): Promise<void> {
+      ensureEvaluator().handleCommMsg(commId, data, buffers, parentMessageId);
+    },
+
+    async handleCommClose(
+      commId: string,
+      data: Record<string, unknown>,
+      buffers?: ArrayBuffer[],
+      parentMessageId?: string
+    ): Promise<void> {
+      ensureEvaluator().handleCommClose(commId, data, buffers, parentMessageId);
     },
 
     async dispose(): Promise<void> {
@@ -118,6 +156,10 @@ function sanitize(value: any, seen: WeakSet<object>, depth: number): any {
   }
   if (valueType === 'symbol' || valueType === 'function') {
     return String(value);
+  }
+
+  if (value instanceof ArrayBuffer) {
+    return value;
   }
 
   if (value instanceof Error) {

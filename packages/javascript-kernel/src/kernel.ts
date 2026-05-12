@@ -38,6 +38,7 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
       return;
     }
 
+    this._comms.clear();
     this._backend.dispose();
     super.dispose();
   }
@@ -99,7 +100,11 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
   ): Promise<KernelMessage.IExecuteReplyMsg['content']> {
     try {
       await this.ready;
-      return await this._backend.execute(content.code, this.executionCount);
+      return await this._backend.execute(
+        content.code,
+        this.executionCount,
+        this.parentHeader?.msg_id
+      );
     } catch (error) {
       const normalized = this.normalizeError(error);
       const traceback = [
@@ -187,9 +192,15 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
   async commInfoRequest(
     content: KernelMessage.ICommInfoRequestMsg['content']
   ): Promise<KernelMessage.ICommInfoReplyMsg['content']> {
+    const comms: Record<string, { target_name: string }> = {};
+    for (const [commId, info] of this._comms) {
+      if (!content.target_name || info.target_name === content.target_name) {
+        comms[commId] = { target_name: info.target_name };
+      }
+    }
     return {
       status: 'ok',
-      comms: {}
+      comms
     };
   }
 
@@ -204,21 +215,45 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
    * Send an `comm_open` message.
    */
   async commOpen(msg: KernelMessage.ICommOpenMsg): Promise<void> {
-    this._logUnsupportedControlMessage('comm_open', msg.content.target_name);
+    const { comm_id, target_name, data } = msg.content;
+    this._comms.set(comm_id, { target_name });
+    const buffers = this._toArrayBuffers(msg.buffers);
+    await this._backend.handleCommOpen(
+      comm_id,
+      target_name,
+      data as Record<string, unknown>,
+      buffers,
+      msg.header.msg_id
+    );
   }
 
   /**
    * Send an `comm_msg` message.
    */
   async commMsg(msg: KernelMessage.ICommMsgMsg): Promise<void> {
-    this._logUnsupportedControlMessage('comm_msg');
+    const { comm_id, data } = msg.content;
+    const buffers = this._toArrayBuffers(msg.buffers);
+    await this._backend.handleCommMsg(
+      comm_id,
+      data as Record<string, unknown>,
+      buffers,
+      msg.header.msg_id
+    );
   }
 
   /**
    * Send an `comm_close` message.
    */
   async commClose(msg: KernelMessage.ICommCloseMsg): Promise<void> {
-    this._logUnsupportedControlMessage('comm_close');
+    const { comm_id, data } = msg.content;
+    this._comms.delete(comm_id);
+    const buffers = this._toArrayBuffers(msg.buffers);
+    await this._backend.handleCommClose(
+      comm_id,
+      data as Record<string, unknown>,
+      buffers,
+      msg.header.msg_id
+    );
   }
 
   /**
@@ -306,6 +341,37 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
       case 'execute_error':
         this.publishExecuteError(message.bundle, parentHeader);
         break;
+      case 'comm_open':
+        this._comms.set(message.content.comm_id, {
+          target_name: message.content.target_name
+        });
+        this.handleComm(
+          'comm_open',
+          message.content as any,
+          (message.metadata ?? {}) as any,
+          message.buffers as any,
+          parentHeader
+        );
+        break;
+      case 'comm_msg':
+        this.handleComm(
+          'comm_msg',
+          message.content as any,
+          (message.metadata ?? {}) as any,
+          message.buffers as any,
+          parentHeader
+        );
+        break;
+      case 'comm_close':
+        this._comms.delete(message.content.comm_id);
+        this.handleComm(
+          'comm_close',
+          message.content as any,
+          (message.metadata ?? {}) as any,
+          message.buffers as any,
+          parentHeader
+        );
+        break;
       default:
         break;
     }
@@ -347,10 +413,30 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
   }
 
   /**
+   * Convert incoming message buffers to ArrayBuffer for Comlink transport.
+   */
+  private _toArrayBuffers(
+    buffers?: (ArrayBuffer | ArrayBufferView)[]
+  ): ArrayBuffer[] | undefined {
+    if (!buffers || buffers.length === 0) {
+      return undefined;
+    }
+    return buffers.map(buf => {
+      if (ArrayBuffer.isView(buf)) {
+        return buf.buffer.slice(
+          buf.byteOffset,
+          buf.byteOffset + buf.byteLength
+        );
+      }
+      return buf;
+    });
+  }
+
+  /**
    * Warn once per unsupported control message type to avoid noisy consoles.
    */
   private _logUnsupportedControlMessage(
-    type: 'input_reply' | 'comm_open' | 'comm_msg' | 'comm_close',
+    type: 'input_reply',
     detail?: string
   ): void {
     if (this._unsupportedControlMessages.has(type)) {
@@ -365,9 +451,8 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
     );
   }
 
-  private _unsupportedControlMessages = new Set<
-    'input_reply' | 'comm_open' | 'comm_msg' | 'comm_close'
-  >();
+  private _unsupportedControlMessages = new Set<'input_reply'>();
+  private _comms = new Map<string, { target_name: string }>();
   private _backend: IRuntimeBackend;
   private _executorFactory?: JavaScriptKernel.IExecutorFactory;
   private _runtimeMode: RuntimeMode;

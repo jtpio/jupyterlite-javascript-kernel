@@ -5,7 +5,9 @@ import type { KernelMessage } from '@jupyterlab/services';
 
 import { JavaScriptExecutor } from './executor';
 import { normalizeError } from './errors';
+import { CommManager } from './comm';
 import type { RuntimeOutputHandler } from './runtime_protocol';
+import { Widget, createWidgetClasses } from './widgets';
 
 /**
  * Shared execution logic for iframe and worker runtime backends.
@@ -20,6 +22,9 @@ export class JavaScriptRuntimeEvaluator {
     this._executor =
       options.executor ?? new JavaScriptExecutor(options.globalScope);
 
+    this._commManager = new CommManager(options.onOutput);
+    this._setupWidgets();
+    this._setupJupyterGlobal();
     this._setupDisplay();
     this._setupConsoleOverrides();
   }
@@ -30,6 +35,9 @@ export class JavaScriptRuntimeEvaluator {
   dispose(): void {
     this._restoreConsoleOverrides();
     this._restoreDisplay();
+    this._restoreWidgets();
+    this._restoreJupyterGlobal();
+    this._commManager.dispose();
   }
 
   /**
@@ -51,51 +59,58 @@ export class JavaScriptRuntimeEvaluator {
    */
   async execute(
     code: string,
-    executionCount: number
+    executionCount: number,
+    parentMessageId?: string
   ): Promise<KernelMessage.IExecuteReplyMsg['content']> {
-    // Parse-time errors are syntax errors, so show only `Name: message`.
-    let asyncFunction: () => Promise<any>;
-    let withReturn: boolean;
-    try {
-      const parsed = this._executor.makeAsyncFromCode(code);
-      asyncFunction = parsed.asyncFunction;
-      withReturn = parsed.withReturn;
-    } catch (error) {
-      const normalized = normalizeError(error);
-      return this._emitError(executionCount, normalized, false);
-    }
-
-    // Runtime errors may include useful eval frames from user code.
-    try {
-      const resultPromise = this._evalFunc(asyncFunction);
-
-      if (withReturn) {
-        const result = await resultPromise;
-
-        if (result !== undefined) {
-          const data = this._executor.getMimeBundle(result);
-          this._onOutput({
-            type: 'execute_result',
-            bundle: {
-              execution_count: executionCount,
-              data,
-              metadata: {}
-            }
-          });
-        }
-      } else {
-        await resultPromise;
+    return this._withParentMessageId(parentMessageId, async () => {
+      // Parse-time errors are syntax errors, so show only `Name: message`.
+      let asyncFunction: () => Promise<any>;
+      let withReturn: boolean;
+      try {
+        const parsed = this._executor.makeAsyncFromCode(code);
+        asyncFunction = parsed.asyncFunction;
+        withReturn = parsed.withReturn;
+      } catch (error) {
+        const normalized = normalizeError(error);
+        return this._emitError(executionCount, normalized, false);
       }
 
-      return {
-        status: 'ok',
-        execution_count: executionCount,
-        user_expressions: {}
-      };
-    } catch (error) {
-      const normalized = normalizeError(error);
-      return this._emitError(executionCount, normalized, true);
-    }
+      // Runtime errors may include useful eval frames from user code.
+      try {
+        const resultPromise = this._evalFunc(asyncFunction);
+
+        if (withReturn) {
+          const result = await resultPromise;
+
+          if (result !== undefined) {
+            if (result instanceof Widget) {
+              this._commManager.displayWidget(result.commId);
+            } else {
+              const data = this._executor.getMimeBundle(result);
+              this._onOutput({
+                type: 'execute_result',
+                bundle: {
+                  execution_count: executionCount,
+                  data,
+                  metadata: {}
+                }
+              });
+            }
+          }
+        } else {
+          await resultPromise;
+        }
+
+        return {
+          status: 'ok',
+          execution_count: executionCount,
+          user_expressions: {}
+        };
+      } catch (error) {
+        const normalized = normalizeError(error);
+        return this._emitError(executionCount, normalized, true);
+      }
+    });
   }
 
   /**
@@ -135,10 +150,76 @@ export class JavaScriptRuntimeEvaluator {
   }
 
   /**
+   * The comm manager instance.
+   */
+  get commManager(): CommManager {
+    return this._commManager;
+  }
+
+  /**
+   * Handle a comm_open message from the frontend.
+   */
+  handleCommOpen(
+    commId: string,
+    targetName: string,
+    data: Record<string, unknown>,
+    buffers?: ArrayBuffer[],
+    parentMessageId?: string
+  ): void {
+    void this._withParentMessageId(parentMessageId, async () => {
+      this._commManager.handleCommOpen(commId, targetName, data, buffers);
+    });
+  }
+
+  /**
+   * Handle a comm_msg message from the frontend.
+   */
+  handleCommMsg(
+    commId: string,
+    data: Record<string, unknown>,
+    buffers?: ArrayBuffer[],
+    parentMessageId?: string
+  ): void {
+    void this._withParentMessageId(parentMessageId, async () => {
+      this._commManager.handleCommMsg(commId, data, buffers);
+    });
+  }
+
+  /**
+   * Handle a comm_close message from the frontend.
+   */
+  handleCommClose(
+    commId: string,
+    data: Record<string, unknown>,
+    buffers?: ArrayBuffer[],
+    parentMessageId?: string
+  ): void {
+    void this._withParentMessageId(parentMessageId, async () => {
+      this._commManager.handleCommClose(commId, data, buffers);
+    });
+  }
+
+  /**
    * Evaluate an async function within the configured global scope.
    */
   private _evalFunc(asyncFunc: () => Promise<any>): Promise<any> {
     return asyncFunc.call(this._globalScope);
+  }
+
+  /**
+   * Set the active parent message ID while invoking runtime code.
+   */
+  private async _withParentMessageId<T>(
+    parentMessageId: string | undefined,
+    callback: () => Promise<T> | T
+  ): Promise<T> {
+    const previousMessageId = this._commManager.getCurrentMessageId();
+    this._commManager.setCurrentMessageId(parentMessageId ?? null);
+    try {
+      return await callback();
+    } finally {
+      this._commManager.setCurrentMessageId(previousMessageId);
+    }
   }
 
   /**
@@ -283,6 +364,11 @@ export class JavaScriptRuntimeEvaluator {
     this._previousDisplay = this._globalScope.display;
 
     this._globalScope.display = (obj: any, metadata?: Record<string, any>) => {
+      if (obj instanceof Widget) {
+        this._commManager.displayWidget(obj.commId);
+        return;
+      }
+
       const data = this._executor.getMimeBundle(obj);
 
       this._onOutput({
@@ -308,9 +394,54 @@ export class JavaScriptRuntimeEvaluator {
     this._globalScope.display = this._previousDisplay;
   }
 
+  /**
+   * Create runtime-local widget classes.
+   */
+  private _setupWidgets(): void {
+    this._widgetClasses = createWidgetClasses(this._commManager);
+  }
+
+  /**
+   * Clear runtime-local widget classes.
+   */
+  private _restoreWidgets(): void {
+    this._widgetClasses = null;
+  }
+
+  /**
+   * Install Jupyter.comm in runtime scope.
+   */
+  private _setupJupyterGlobal(): void {
+    this._previousJupyter = this._globalScope.Jupyter;
+    const previousJupyter =
+      typeof this._previousJupyter === 'object' &&
+      this._previousJupyter !== null
+        ? this._previousJupyter
+        : {};
+    this._globalScope.Jupyter = {
+      ...previousJupyter,
+      comm: this._commManager,
+      widgets: this._widgetClasses ?? {}
+    };
+  }
+
+  /**
+   * Restore previous Jupyter binding.
+   */
+  private _restoreJupyterGlobal(): void {
+    if (this._previousJupyter === undefined) {
+      delete this._globalScope.Jupyter;
+      return;
+    }
+    this._globalScope.Jupyter = this._previousJupyter;
+  }
+
   private _globalScope: Record<string, any>;
   private _onOutput: RuntimeOutputHandler;
   private _executor: JavaScriptExecutor;
+  private _commManager: CommManager;
+  private _widgetClasses: Record<string, unknown> | null = null;
+  private _previousJupyter: any;
   private _previousDisplay: any;
   private _originalOnError: any;
   private _originalConsole: {
