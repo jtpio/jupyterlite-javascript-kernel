@@ -85,6 +85,52 @@ jobs:
         # python -m jupyterlab.browser_check --no-browser-test
 
 
+  ui_tests:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Base Setup
+        uses: jupyterlab/maintainer-tools/.github/actions/base-setup@v1
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: extension-artifacts
+
+      - name: Install the extension
+        run: |
+          set -eux
+          python -m pip install "jupyterlab>=4.6.0,<5" jupyterlite-core jupyterlab-widgets jupyter-server jupyterlite_javascript_kernel*.whl
+
+      - name: Install dependencies
+        working-directory: ui-tests
+        env:
+          YARN_ENABLE_IMMUTABLE_INSTALLS: 0
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
+        run: |
+          jlpm install
+          jlpm build
+
+      - name: Install browser
+        working-directory: ui-tests
+        run: jlpm playwright install chromium --with-deps
+
+      - name: Run the UI tests
+        working-directory: ui-tests
+        run: jlpm test
+
+      - name: Upload Playwright Test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: javascript-kernel-playwright-tests
+          path: |
+            ui-tests/test-results
+            ui-tests/playwright-report
+
   check_links:
     name: Check Links
     runs-on: ubuntu-latest

@@ -1,0 +1,46 @@
+{
+  "name": "@jupyterlite/javascript-kernel-runtime",
+  "version": "0.4.0-alpha.5",
+  "description": "JupyterLite - JavaScript Kernel Runtime",
+  "homepage": "https://github.com/jupyterlite/javascript-kernel",
+  "bugs": {
+    "url": "https://github.com/jupyterlite/javascript-kernel/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jupyterlite/javascript-kernel.git"
+  },
+  "license": "BSD-3-Clause",
+  "author": "JupyterLite Contributors",
+  "sideEffects": false,
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "directories": {
+    "lib": "lib/"
+  },
+  "files": [
+    "lib/**/*.d.ts",
+    "lib/**/*.js.map",
+    "lib/**/*.js",
+    "src/**/*.{ts,tsx}"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "rimraf lib && rimraf tsconfig.tsbuildinfo",
+    "prepublishOnly": "npm run build",
+    "watch": "tsc -b --watch"
+  },
+  "dependencies": {
+    "@jupyterlab/nbformat": "^4.6.0",
+    "@jupyterlab/services": "^7.6.0",
+    "acorn": "^8.19.0",
+    "astring": "^1.9.0"
+  },
+  "devDependencies": {
+    "rimraf": "~5.0.1",
+    "typescript": "~5.0.2"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

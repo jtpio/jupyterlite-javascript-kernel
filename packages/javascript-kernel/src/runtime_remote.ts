@@ -1,12 +1,13 @@
 // Copyright (c) Jupyter Development Team.
 // Distributed under the terms of the Modified BSD License.
 
-import { JavaScriptRuntimeEvaluator } from './runtime_evaluator';
-import type { JavaScriptExecutor } from './executor';
-import type {
-  IRemoteRuntimeApi,
-  RuntimeOutputMessage
-} from './runtime_protocol';
+import {
+  JavaScriptRuntimeEvaluator,
+  type JavaScriptExecutor,
+  type RuntimeOutputMessage
+} from '@jupyterlite/javascript-kernel-runtime';
+
+import type { IRemoteRuntimeApi } from './runtime_protocol';
 
 /**
  * Create a Comlink runtime API bound to the provided global scope.

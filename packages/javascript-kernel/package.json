@@ -32,34 +32,21 @@
   ],
   "scripts": {
     "build": "tsc -b",
-    "build:test": "tsc --build tsconfig.test.json",
     "clean": "rimraf lib && rimraf tsconfig.tsbuildinfo",
     "docs": "typedoc src",
     "prepublishOnly": "npm run build",
-    "test": "jest",
-    "test:cov": "jest --collect-coverage",
-    "test:debug": "node --inspect-brk node_modules/.bin/jest --runInBand",
-    "test:debug:watch": "node --inspect-brk node_modules/.bin/jest --runInBand --watch",
     "watch": "tsc -b --watch"
   },
   "dependencies": {
     "@jupyterlab/coreutils": "^6.6.0",
-    "@jupyterlab/nbformat": "^4.6.0",
+    "@jupyterlite/javascript-kernel-runtime": "^0.4.0-alpha.5",
     "@jupyterlite/services": "^0.8.0",
     "@lumino/coreutils": "^2.2.2",
     "@lumino/disposable": "^2.1.5",
-    "astring": "^1.9.0",
-    "comlink": "^4.3.1",
-    "meriyah": "^4.3.9"
+    "comlink": "^4.3.1"
   },
   "devDependencies": {
-    "@babel/core": "^7.11.6",
-    "@babel/preset-env": "^7.12.1",
-    "@jupyterlab/testutils": "~4.6.0",
-    "@types/jest": "^26.0.10",
-    "jest": "^26.4.2",
     "rimraf": "~5.0.1",
-    "ts-jest": "^26.3.0",
     "typescript": "~5.0.2"
   },
   "publishConfig": {

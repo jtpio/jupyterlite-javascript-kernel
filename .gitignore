@@ -123,3 +123,7 @@ dmypy.json
 # JupyterLite generated files
 .jupyterlite.doit.db
 _output
+
+# Integration tests
+ui-tests/test-results/
+ui-tests/playwright-report/

@@ -7,7 +7,7 @@ import { JavaScriptExecutor } from './executor';
 import { normalizeError } from './errors';
 import { CommManager } from './comm';
 import type { CommTargetHandler } from './comm';
-import type { RuntimeOutputHandler } from './runtime_protocol';
+import type { RuntimeOutputHandler } from './protocol';
 import { Widget, createWidgetClasses } from './widgets';
 
 /**

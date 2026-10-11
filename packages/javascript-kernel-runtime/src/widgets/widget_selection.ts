@@ -3,6 +3,32 @@
 
 import { DOMWidget } from './widget';
 
+/**
+ * Trigger the changes of the value and the label of a selection widget.
+ *
+ * The frontend only syncs the index of the selection, so like ipywidgets,
+ * the value and the label are derived from it, and their observers are
+ * called when the index or the options change.
+ */
+function deriveValueChanges(
+  widget: DOMWidget,
+  getValue: () => unknown,
+  trigger: (event: string, value: unknown, old: unknown) => void
+): void {
+  let current = getValue();
+  const update = () => {
+    const value = getValue();
+    if (JSON.stringify(value) !== JSON.stringify(current)) {
+      const old = current;
+      current = value;
+      trigger('change:value', value, old);
+      trigger('change:label', value, old);
+    }
+  };
+  widget.on('change:index', update);
+  widget.on('change:_options_labels', update);
+}
+
 class _SelectionBase extends DOMWidget {
   constructor(state?: Record<string, unknown> & { options?: string[] }) {
     const { options, ...rest } = state ?? {};
@@ -13,6 +39,11 @@ class _SelectionBase extends DOMWidget {
       }
     }
     super(rest as Record<string, unknown>);
+    deriveValueChanges(
+      this,
+      () => this.selectedLabel,
+      (event, value, old) => this._trigger(event, value, old)
+    );
   }
 
   protected override _defaults(): Record<string, unknown> {
@@ -71,6 +102,11 @@ class _MultipleSelectionBase extends DOMWidget {
       }
     }
     super(rest as Record<string, unknown>);
+    deriveValueChanges(
+      this,
+      () => this.selectedLabels,
+      (event, value, old) => this._trigger(event, value, old)
+    );
   }
 
   protected override _defaults(): Record<string, unknown> {

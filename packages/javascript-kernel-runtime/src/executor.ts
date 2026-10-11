@@ -3,7 +3,7 @@
 
 import type { KernelMessage } from '@jupyterlab/services';
 
-import { parseScript } from 'meriyah';
+import { parse } from 'acorn';
 import { generate } from 'astring';
 
 import type { IMimeBundle } from '@jupyterlab/nbformat';
@@ -12,6 +12,14 @@ export { IDisplayData, IDisplayCallbacks, DisplayHelper } from './display';
 
 /** Matches the word "eval" in a stack frame (user eval code). */
 const RE_EVAL = /\beval\b/;
+
+/**
+ * Parse the code of a cell. Cells are parsed as modules, so that they can
+ * use import declarations and top-level await.
+ */
+function parseCode(code: string): any {
+  return parse(code, { ecmaVersion: 'latest', sourceType: 'module' });
+}
 
 /**
  * Configuration for magic imports.
@@ -139,10 +147,7 @@ export class JavaScriptExecutor {
       };
     }
 
-    const ast = parseScript(code, {
-      ranges: true,
-      module: true
-    });
+    const ast = parseCode(code);
 
     // Handle last statement / add return if needed
     const { withReturn, modifiedUserCode, extraReturnCode } =
@@ -189,10 +194,7 @@ export class JavaScriptExecutor {
     }
 
     try {
-      const ast = parseScript(code, {
-        ranges: true,
-        module: true
-      });
+      const ast = parseCode(code);
 
       const imports: IImportInfo[] = [];
 
@@ -330,10 +332,7 @@ export class JavaScriptExecutor {
     }
 
     try {
-      const ast = parseScript(code, {
-        ranges: true,
-        module: true
-      });
+      const ast = parseCode(code);
 
       for (const node of ast.body) {
         switch (node.type) {
@@ -428,6 +427,8 @@ export class JavaScriptExecutor {
     // Add variables first (they might be used by functions)
     const seenDestructuringDecls = new Set<string>();
     for (const [name, node] of registry.variables) {
+      globalAssignments.push(`globalThis["${name}"] = ${name};`);
+
       // For destructuring, only add once per actual declaration
       if (node._destructuredName) {
         const declKey = generate(node.declarations[0]);
@@ -442,7 +443,6 @@ export class JavaScriptExecutor {
       } else {
         programBody.push(node);
       }
-      globalAssignments.push(`globalThis["${name}"] = ${name};`);
     }
 
     // Add classes
@@ -834,36 +834,26 @@ export class JavaScriptExecutor {
     }
 
     try {
-      parseScript(code, {
-        ranges: true,
-        module: true
-      });
+      parseCode(code);
       return { status: 'complete' };
     } catch (e: any) {
-      const message = e.message || '';
+      // The code is incomplete when the parser reaches its end too early,
+      // or when it ends in the middle of a string, template or comment.
+      const incomplete =
+        e.pos >= code.length ||
+        /^Unterminated (string constant|template|comment)/.test(e.message);
 
-      // Common patterns indicating incomplete code
-      const incompletePatterns = [
-        /unexpected end of input/i,
-        /unterminated string/i,
-        /unterminated template/i,
-        /unexpected token.*eof/i,
-        /expected.*but.*end/i
-      ];
+      if (incomplete) {
+        // Determine indentation for next line
+        const lines = code.split('\n');
+        const lastLine = lines[lines.length - 1];
+        const currentIndent = lastLine.match(/^(\s*)/)?.[1] || '';
 
-      for (const pattern of incompletePatterns) {
-        if (pattern.test(message)) {
-          // Determine indentation for next line
-          const lines = code.split('\n');
-          const lastLine = lines[lines.length - 1];
-          const currentIndent = lastLine.match(/^(\s*)/)?.[1] || '';
+        // Add more indent if we're opening a block
+        const opensBlock = /[{([]$/.test(lastLine.trim());
+        const indent = opensBlock ? currentIndent + '  ' : currentIndent;
 
-          // Add more indent if we're opening a block
-          const opensBlock = /[{([]$/.test(lastLine.trim());
-          const indent = opensBlock ? currentIndent + '  ' : currentIndent;
-
-          return { status: 'incomplete', indent };
-        }
+        return { status: 'incomplete', indent };
       }
 
       // Syntax error that's not about incompleteness
@@ -1151,7 +1141,7 @@ export class JavaScriptExecutor {
       lastNode.type === 'ExpressionStatement' &&
       lastNode.expression.type !== 'AssignmentExpression'
     ) {
-      const lastNodeExprStart = lastNode.expression.start;
+      const lastNodeStart = lastNode.start;
       const lastNodeExprEnd = lastNode.expression.end;
       const lastNodeRestEnd = lastNode.end;
 
@@ -1165,14 +1155,11 @@ export class JavaScriptExecutor {
       }
 
       if (!semicolonFound) {
-        // Remove the last node from the code
+        // Remove the last node from the code, with the parentheses around
+        // the expression, as in `({ a: 1 })`
         const modifiedUserCode =
-          code.substring(0, lastNodeExprStart) +
-          code.substring(lastNodeExprEnd);
-        const codeOfLastNode = code.substring(
-          lastNodeExprStart,
-          lastNodeExprEnd
-        );
+          code.substring(0, lastNodeStart) + code.substring(lastNodeRestEnd);
+        const codeOfLastNode = code.substring(lastNodeStart, lastNodeRestEnd);
         const extraReturnCode = `return ${codeOfLastNode};`;
 
         return {
@@ -1706,19 +1693,22 @@ export class JavaScriptExecutor {
     const seen = new Set<string>();
     const matches: string[] = [];
     const lowerPrefix = prefix.toLowerCase();
+    // The depth in the prototype chain where each match is defined
+    const depths = new Map<string, number>();
 
     // Helper to add matching properties
-    const addMatching = (props: string[]) => {
+    const addMatching = (props: string[], depth: number) => {
       for (const prop of props) {
         if (!seen.has(prop) && prop.startsWith(prefix)) {
           seen.add(prop);
           matches.push(prop);
+          depths.set(prop, depth);
         }
       }
     };
 
     // Helper to add case-insensitive matches (lower priority)
-    const addCaseInsensitive = (props: string[]) => {
+    const addCaseInsensitive = (props: string[], depth: number) => {
       for (const prop of props) {
         if (
           !seen.has(prop) &&
@@ -1727,6 +1717,7 @@ export class JavaScriptExecutor {
         ) {
           seen.add(prop);
           matches.push(prop);
+          depths.set(prop, depth);
         }
       }
     };
@@ -1734,17 +1725,19 @@ export class JavaScriptExecutor {
     try {
       // Walk up the prototype chain
       let current = obj;
+      let depth = 0;
       while (current !== null && current !== undefined) {
         try {
           // Get own property names (includes non-enumerable)
           const ownProps = Object.getOwnPropertyNames(current);
-          addMatching(ownProps);
+          addMatching(ownProps, depth);
 
           // Also get enumerable properties from for...in
           for (const key in current) {
             if (!seen.has(key) && key.startsWith(prefix)) {
               seen.add(key);
               matches.push(key);
+              depths.set(key, depth);
             }
           }
         } catch {
@@ -1754,6 +1747,7 @@ export class JavaScriptExecutor {
         // Move up prototype chain
         try {
           current = Object.getPrototypeOf(current);
+          depth++;
         } catch {
           break;
         }
@@ -1761,15 +1755,17 @@ export class JavaScriptExecutor {
 
       // Add case-insensitive matches as secondary results
       current = obj;
+      depth = 0;
       while (current !== null && current !== undefined) {
         try {
           const ownProps = Object.getOwnPropertyNames(current);
-          addCaseInsensitive(ownProps);
+          addCaseInsensitive(ownProps, depth);
         } catch {
           // Ignore
         }
         try {
           current = Object.getPrototypeOf(current);
+          depth++;
         } catch {
           break;
         }
@@ -1787,7 +1783,8 @@ export class JavaScriptExecutor {
       }
     }
 
-    // Sort matches: exact prefix matches first, then alphabetically
+    // Sort matches: exact prefix matches first, then the own properties
+    // before the inherited ones, then alphabetically
     return matches.sort((a, b) => {
       const aExact = a.startsWith(prefix);
       const bExact = b.startsWith(prefix);
@@ -1796,6 +1793,10 @@ export class JavaScriptExecutor {
       }
       if (!aExact && bExact) {
         return 1;
+      }
+      const depthDifference = (depths.get(a) ?? 0) - (depths.get(b) ?? 0);
+      if (depthDifference !== 0) {
+        return depthDifference;
       }
       return a.localeCompare(b);
     });

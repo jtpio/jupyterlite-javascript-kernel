@@ -26,7 +26,6 @@
   "scripts": {
     "build": "lerna run build",
     "build:prod": "lerna run build:prod",
-    "build:test": "lerna run build:test",
     "bump:js:version": "lerna version --no-push --force-publish --no-git-tag-version --yes",
     "clean": "lerna run clean",
     "clean:all": "lerna run clean && rimraf node_modules",
@@ -39,7 +38,6 @@
     "prettier": "prettier --write \"**/*{.ts,.tsx,.js,.jsx,.css,.json,.md}\"",
     "prettier:check": "prettier --list-different \"**/*{.ts,.tsx,.js,.jsx,.css,.json,.md}\"",
     "publish": "yarn run clean && yarn run build && lerna publish",
-    "test": "lerna run test",
     "watch": "lerna run watch"
   },
   "devDependencies": {

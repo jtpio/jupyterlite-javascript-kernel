@@ -5,14 +5,18 @@ import type { KernelMessage } from '@jupyterlab/services';
 
 import { BaseKernel, type IKernel } from '@jupyterlite/services';
 
-import type { JavaScriptExecutor } from './executor';
-import { normalizeError as normalizeUnknownError } from './errors';
+import {
+  normalizeError as normalizeUnknownError,
+  type JavaScriptExecutor,
+  type RuntimeOutputMessage
+} from '@jupyterlite/javascript-kernel-runtime';
+
 import {
   IFrameRuntimeBackend,
   IRuntimeBackend,
   WorkerRuntimeBackend
 } from './runtime_backends';
-import type { RuntimeMode, RuntimeOutputMessage } from './runtime_protocol';
+import type { RuntimeMode } from './runtime_protocol';
 
 /**
  * A kernel that executes JavaScript code in browser runtimes.

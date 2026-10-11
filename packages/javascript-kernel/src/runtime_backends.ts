@@ -8,14 +8,17 @@ import { PromiseDelegate } from '@lumino/coreutils';
 
 import * as Comlink from 'comlink';
 
-import { JavaScriptExecutor } from './executor';
-import { normalizeError } from './errors';
+import {
+  JavaScriptExecutor,
+  normalizeError,
+  type RuntimeOutputHandler,
+  type RuntimeOutputMessage
+} from '@jupyterlite/javascript-kernel-runtime';
+
 import { createRemoteRuntimeApi } from './runtime_remote';
 import type {
   IRemoteRuntimeApi,
-  RuntimeOutputCallback,
-  RuntimeOutputHandler,
-  RuntimeOutputMessage
+  RuntimeOutputCallback
 } from './runtime_protocol';
 
 /**

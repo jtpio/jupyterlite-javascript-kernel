@@ -201,22 +201,22 @@ Widgets auto-display when they are the last expression in a cell. Use the global
 
 The widget runtime is split into files that roughly follow the upstream `ipywidgets` package structure so it is easier to track what has been ported.
 
-| Upstream `ipywidgets` file                           | Local file                                                            | Status  | Notes                                                                |
-| ---------------------------------------------------- | --------------------------------------------------------------------- | ------- | -------------------------------------------------------------------- |
-| `packages/base/src/widget.ts`                        | `packages/javascript-kernel/src/widgets/widget.ts`                    | Ported  | Kernel-side `Widget` and `DOMWidget` equivalents                     |
-| `packages/base/src/widget_layout.ts`                 | `packages/javascript-kernel/src/widgets/widget_layout.ts`             | Ported  | Layout models                                                        |
-| `packages/base/src/widget_style.ts`                  | `packages/javascript-kernel/src/widgets/widget_style.ts`              | Ported  | Shared style models, plus control-specific styles gathered here      |
-| `packages/controls/src/widget_int.ts`                | `packages/javascript-kernel/src/widgets/widget_int.ts`                | Ported  | Integer widgets, play, progress, and text inputs                     |
-| `packages/controls/src/widget_float.ts`              | `packages/javascript-kernel/src/widgets/widget_float.ts`              | Ported  | Float widgets                                                        |
-| `packages/controls/src/widget_bool.ts`               | `packages/javascript-kernel/src/widgets/widget_bool.ts`               | Ported  | Boolean widgets; related styles live in `widget_style.ts`            |
-| `packages/controls/src/widget_selection.ts`          | `packages/javascript-kernel/src/widgets/widget_selection.ts`          | Partial | Selection semantics still differ from `ipywidgets` in some cases     |
-| `packages/controls/src/widget_string.ts`             | `packages/javascript-kernel/src/widgets/widget_string.ts`             | Ported  | String and display widgets; related styles live in `widget_style.ts` |
-| `packages/output/src/output.ts`                      | `packages/javascript-kernel/src/widgets/widget_output.ts`             | Partial | Output capture is supported but not feature-complete                 |
-| `packages/controls/src/widget_button.ts`             | `packages/javascript-kernel/src/widgets/widget_button.ts`             | Partial | Button widget is present, but callback behavior differs slightly     |
-| `packages/controls/src/widget_color.ts`              | `packages/javascript-kernel/src/widgets/widget_color.ts`              | Ported  | Color picker                                                         |
-| `packages/controls/src/widget_box.ts`                | `packages/javascript-kernel/src/widgets/widget_box.ts`                | Ported  | Box, HBox, VBox, GridBox                                             |
-| `packages/controls/src/widget_selectioncontainer.ts` | `packages/javascript-kernel/src/widgets/widget_selectioncontainer.ts` | Ported  | Accordion, Tab, Stack                                                |
-| `packages/controls/src/widget_link.ts`               | `packages/javascript-kernel/src/widgets/widget_link.ts`               | Ported  | `jslink`, `jsdlink`, `Link`, and `DirectionalLink`                   |
+| Upstream `ipywidgets` file                           | Local file                                                                    | Status  | Notes                                                                |
+| ---------------------------------------------------- | ----------------------------------------------------------------------------- | ------- | -------------------------------------------------------------------- |
+| `packages/base/src/widget.ts`                        | `packages/javascript-kernel-runtime/src/widgets/widget.ts`                    | Ported  | Kernel-side `Widget` and `DOMWidget` equivalents                     |
+| `packages/base/src/widget_layout.ts`                 | `packages/javascript-kernel-runtime/src/widgets/widget_layout.ts`             | Ported  | Layout models                                                        |
+| `packages/base/src/widget_style.ts`                  | `packages/javascript-kernel-runtime/src/widgets/widget_style.ts`              | Ported  | Shared style models, plus control-specific styles gathered here      |
+| `packages/controls/src/widget_int.ts`                | `packages/javascript-kernel-runtime/src/widgets/widget_int.ts`                | Ported  | Integer widgets, play, progress, and text inputs                     |
+| `packages/controls/src/widget_float.ts`              | `packages/javascript-kernel-runtime/src/widgets/widget_float.ts`              | Ported  | Float widgets                                                        |
+| `packages/controls/src/widget_bool.ts`               | `packages/javascript-kernel-runtime/src/widgets/widget_bool.ts`               | Ported  | Boolean widgets; related styles live in `widget_style.ts`            |
+| `packages/controls/src/widget_selection.ts`          | `packages/javascript-kernel-runtime/src/widgets/widget_selection.ts`          | Partial | Selection semantics still differ from `ipywidgets` in some cases     |
+| `packages/controls/src/widget_string.ts`             | `packages/javascript-kernel-runtime/src/widgets/widget_string.ts`             | Ported  | String and display widgets; related styles live in `widget_style.ts` |
+| `packages/output/src/output.ts`                      | `packages/javascript-kernel-runtime/src/widgets/widget_output.ts`             | Partial | Output capture is supported but not feature-complete                 |
+| `packages/controls/src/widget_button.ts`             | `packages/javascript-kernel-runtime/src/widgets/widget_button.ts`             | Partial | Button widget is present, but callback behavior differs slightly     |
+| `packages/controls/src/widget_color.ts`              | `packages/javascript-kernel-runtime/src/widgets/widget_color.ts`              | Ported  | Color picker                                                         |
+| `packages/controls/src/widget_box.ts`                | `packages/javascript-kernel-runtime/src/widgets/widget_box.ts`                | Ported  | Box, HBox, VBox, GridBox                                             |
+| `packages/controls/src/widget_selectioncontainer.ts` | `packages/javascript-kernel-runtime/src/widgets/widget_selectioncontainer.ts` | Ported  | Accordion, Tab, Stack                                                |
+| `packages/controls/src/widget_link.ts`               | `packages/javascript-kernel-runtime/src/widgets/widget_link.ts`               | Ported  | `jslink`, `jsdlink`, `Link`, and `DirectionalLink`                   |
 
 > **Note:** `jupyterlab-widgets`, `@jupyter-widgets/controls`, and `@jupyter-widgets/output` must be available in the JupyterLite deployment for the full widget set to render.
 
@@ -257,6 +257,14 @@ Disable iframe mode:
 
 ## Contributing
 
+### Packages
+
+The repository contains three npm packages:
+
+- `@jupyterlite/javascript-kernel-runtime`: the code running next to the user code, in the iframe or the Web Worker. It executes the cells, formats the outputs, and implements comms and widgets. It does not depend on JupyterLite, so that other JavaScript kernels can reuse it.
+- `@jupyterlite/javascript-kernel`: the JupyterLite kernel, with the iframe and Web Worker runtimes. It also exports everything from `@jupyterlite/javascript-kernel-runtime`.
+- `@jupyterlite/javascript-kernel-extension`: the JupyterLite extension registering the kernels.
+
 ### Development install
 
 Note: You will need NodeJS to build the extension package.
@@ -292,6 +300,10 @@ By default, the `jlpm build` command generates the source maps for this extensio
 ```bash
 jupyter lab build --minimize=False
 ```
+
+### Running the tests
+
+The UI tests in [`ui-tests`](ui-tests) use the kernels in a JupyterLite site with Playwright and Galata. See [`ui-tests/README.md`](ui-tests/README.md) to run them.
 
 ### Development uninstall
 
