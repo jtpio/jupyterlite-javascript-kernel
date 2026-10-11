@@ -38,6 +38,13 @@ export interface IInspectOptions {
    * The maximum number of characters of strings to show.
    */
   maxStringLength?: number;
+
+  /**
+   * Format the lines after `Name: message` of an error: its frames, its
+   * cause and its aggregated errors. Returns null to show the stack of the
+   * error as is. The kernel uses it to show the locations in the cells.
+   */
+  formatStack?: (error: unknown, colors: boolean) => string[] | null;
 }
 
 /**
@@ -97,6 +104,7 @@ interface IContext {
   breakLength: number;
   maxArrayLength: number;
   maxStringLength: number;
+  formatStack?: (error: unknown, colors: boolean) => string[] | null;
   seen: unknown[];
   indentation: number;
 }
@@ -315,12 +323,18 @@ function functionBase(
   return base;
 }
 
-function formatErrorValue(error: any, level: number): string {
+function formatErrorValue(ctx: IContext, error: any, level: number): string {
   const name = safe(() => String(error.name), 'Error');
   const message = safe(() => String(error.message), '');
   const head = message ? `${name}: ${message}` : name;
   if (level > 0) {
     return `[${head}]`;
+  }
+  const lines = ctx.formatStack
+    ? safe(() => ctx.formatStack!(error, ctx.colors), null)
+    : null;
+  if (lines) {
+    return [head, ...lines].join('\n');
   }
   const stack = safe(() => error.stack, '');
   if (typeof stack !== 'string' || stack === '') {
@@ -592,7 +606,7 @@ function formatObject(ctx: IContext, value: any, level: number): string {
       return output;
     };
   } else if (isError(value)) {
-    base = formatErrorValue(value, level);
+    base = formatErrorValue(ctx, value, level);
     keys = keys.filter(key => key !== 'stack' && key !== 'message');
     if (keys.length === 0 && symbols.length === 0) {
       return base;

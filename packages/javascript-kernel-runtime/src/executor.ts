@@ -20,23 +20,36 @@ import {
   isSet
 } from './inspect';
 import { Introspection, type IDeclarationDoc } from './introspection';
-import { escapeHtml, safe } from './utils';
+import { SourceEdits, lineStarts, type PositionMap } from './source_edits';
+import {
+  CellSyntaxError,
+  calibrate,
+  createCellSource,
+  formatError,
+  formatStackLines,
+  type ICalibration,
+  type ICellSource,
+  type IErrorParts,
+  type ITracebackContext
+} from './traceback';
+import { escapeHtml, safe, stripAnsi } from './utils';
 
 /**
- * Matches the stack frames of the code of the cells, which is compiled with
- * the Function constructor: the browsers name its source `eval` or
- * `<anonymous>`, and engines like QuickJS name it `<input>`. A position must
- * follow these names, so that the frames of anonymous functions and of the
- * built-in functions, like `at new Promise (<anonymous>)`, do not match.
+ * The source URL of the probe measuring how the engine reports the
+ * positions of the cells.
  */
-const RE_USER_FRAME = /\beval\b|<anonymous>:\d|<input>:\d/;
+const PROBE_URL = '__jsKernelProbe__';
 
 /**
- * Whether a line of a stack trace is a frame of the code of the cells.
+ * The maximum number of cells kept to show their code in the tracebacks.
  */
-function isUserFrame(line: string): boolean {
-  return RE_USER_FRAME.test(line);
-}
+const MAX_CELLS = 500;
+
+/**
+ * The minimum number of frames of the stack traces: the frames of the kernel
+ * take some, even if they are not shown.
+ */
+const STACK_TRACE_LIMIT = 50;
 
 /**
  * The ECMAScript edition accepted by the kernel.
@@ -106,6 +119,22 @@ export interface IAsyncCodeResult {
    * The documentation of the top-level declarations, from their JSDoc.
    */
   docs: IDeclarationDoc[];
+  /**
+   * The source URL of the code in the stack traces: its name, like In[3],
+   * with a `#2` suffix when the name is already used.
+   */
+  name: string;
+}
+
+/**
+ * Options of makeAsyncFromCode.
+ */
+export interface IMakeAsyncOptions {
+  /**
+   * The name of the code in the tracebacks, like In[3]. Defaults to
+   * `<silent-k>`.
+   */
+  name?: string;
 }
 
 /**
@@ -205,54 +234,104 @@ export class JavaScriptExecutor {
   }
 
   /**
-   * Convert user code to an async function.
+   * Convert user code to an async function, called with the global scope as
+   * `this`.
+   *
+   * The code is registered for the tracebacks, under its name. A syntax
+   * error is thrown as a CellSyntaxError, with its location in the code.
    *
    * @param code - The user code to convert.
+   * @param options - The name of the code in the tracebacks.
    * @returns The async function and whether it has a return value.
    */
-  makeAsyncFromCode(code: string): IAsyncCodeResult {
+  makeAsyncFromCode(
+    code: string,
+    options: IMakeAsyncOptions = {}
+  ): IAsyncCodeResult {
+    this._calibrate();
+    const displayName = options.name ?? `<silent-${++this._silentCount}>`;
+    let name = displayName;
+    for (let k = 2; this._cells.has(name); k++) {
+      name = `${displayName}#${k}`;
+    }
+
     if (code.length === 0) {
       return {
         asyncFunction: async () => {},
         withReturn: false,
-        docs: []
+        docs: [],
+        name
       };
     }
 
     const comments: Comment[] = [];
-    const ast = parseCode(code, comments);
+    let ast: any;
+    try {
+      ast = parseCode(code, comments);
+    } catch (error) {
+      this._registerCell(name, createCellSource({ name: displayName, code }));
+      throw this._toCellSyntaxError(error, name);
+    }
 
-    // Handle last statement / add return if needed
-    const { withReturn, modifiedUserCode, extraReturnCode } =
-      this._handleLastStatement(code, ast);
+    const { edited, map, hoisted, withReturn } = this._rewriteCell(code, ast);
 
-    // Handle import statements and top-level declarations
-    const {
-      modifiedUserCode: finalCode,
-      codeAddToGlobalScope,
-      hoistedCode
-    } = this._rewriteTopLevelStatements(modifiedUserCode, ast);
-
-    // Put the hoisted code on the first line to keep line numbers. The ";"
-    // stops a "use strict" directive, which would break the assignments
-    const combinedCode = `;${hoistedCode}
-      ${finalCode}
-      ${codeAddToGlobalScope}
-      ${extraReturnCode}
-    `;
-
-    const asyncFunctionFactory = this._createScopedFunction(`
-      return async function() {
-        ${combinedCode}
-      };
-    `) as () => () => Promise<any>;
-    const asyncFunction = asyncFunctionFactory.call(this._globalScope);
+    // The hoisted code goes on a line of its own, before the code of the
+    // cell, whose lines are kept. The ";" stops a "use strict" directive,
+    // which would break the assignments. The source URL comes last, on its
+    // own line, so that the code of the cell can not change it.
+    const prefix = `;${hoisted}`;
+    const body = `${prefix}\n${edited}\n//# sourceURL=${name}`;
+    this._registerCell(
+      name,
+      createCellSource({
+        name: displayName,
+        code,
+        body,
+        cellStart: prefix.length + 1,
+        map,
+        editedLength: edited.length
+      })
+    );
 
     return {
-      asyncFunction,
+      asyncFunction: this._compile(body),
       withReturn,
-      docs: this._declarationDocs(code, ast, comments)
+      docs: this._declarationDocs(code, ast, comments),
+      name
     };
+  }
+
+  /**
+   * Format a thrown value for an error reply: its location in the cell,
+   * with a caret, `Name: message` and the frames, without the ones of the
+   * kernel, then its cause and its aggregated errors.
+   *
+   * @param error - The thrown value.
+   * @param options.currentToken - The name of the cell being executed (the
+   * `name` of makeAsyncFromCode), for the errors it throws.
+   * @param options.prefix - Printed before the header, like `Uncaught`.
+   * @param options.colors - Whether to color with ANSI escape codes.
+   */
+  formatError(
+    error: unknown,
+    options: { currentToken?: string; prefix?: string; colors?: boolean } = {}
+  ): IErrorParts {
+    return formatError(error, this._tracebackContext(options.currentToken), {
+      prefix: options.prefix,
+      colors: options.colors
+    });
+  }
+
+  /**
+   * The lines shown after `Name: message` for an error: its frames mapped to
+   * the cells, its cause and its aggregated errors. Returns null for the
+   * values which are not errors, and the stacks which can not be read.
+   *
+   * @param error - The error.
+   * @param colors - Whether to color with ANSI escape codes.
+   */
+  formatStackFrames(error: unknown, colors = true): string[] | null {
+    return formatStackLines(error, this._tracebackContext(), colors);
   }
 
   /**
@@ -569,7 +648,8 @@ export class JavaScriptExecutor {
    * @returns The MIME bundle representation of the value.
    */
   getMimeBundle(value: any): IMimeBundle {
-    const text = () => inspect(value, { colors: true });
+    const text = () =>
+      inspect(value, { colors: true, formatStack: this._formatStack });
 
     if (
       value !== null &&
@@ -662,48 +742,18 @@ export class JavaScriptExecutor {
   }
 
   /**
-   * Clean stack trace to remove internal frames.
+   * The stack trace of an error, as plain text, with the frames mapped to
+   * the cells and without the frames of the kernel.
+   *
+   * @deprecated Use formatError or formatStackFrames.
    *
    * @param error - The error with stack trace to clean.
    * @returns The cleaned stack trace string.
    */
   cleanStackTrace(error: Error): string {
     const header = `${error.name}: ${error.message}`;
-    const stack = error.stack || '';
-    const lines = stack.split('\n');
-    const userFrames: string[] = [];
-
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed) {
-        continue;
-      }
-
-      // Some browsers repeat `Name: message` as the first stack line.
-      if (trimmed.startsWith(`${error.name}:`)) {
-        continue;
-      }
-
-      // Stop once we reach internal executor frames.
-      if (
-        trimmed.includes('makeAsyncFromCode') ||
-        trimmed.includes('new Function') ||
-        trimmed.includes('asyncFunction')
-      ) {
-        break;
-      }
-
-      // Only keep lines that reference user eval code.
-      if (isUserFrame(trimmed)) {
-        userFrames.push(line);
-      }
-    }
-
-    if (userFrames.length > 0) {
-      return `${header}\n${userFrames.join('\n')}`;
-    }
-
-    return header;
+    const lines = this.formatStackFrames(error, false) ?? [];
+    return stripAnsi([header, ...lines].join('\n'));
   }
 
   /**
@@ -839,18 +889,6 @@ export class JavaScriptExecutor {
   }
 
   /**
-   * Replace a section of code with new code.
-   */
-  private _replaceCode(
-    code: string,
-    start: number,
-    end: number,
-    newCode: string
-  ): string {
-    return code.substring(0, start) + newCode + code.substring(end);
-  }
-
-  /**
    * Collect identifiers from a declaration pattern.
    */
   private _collectDeclaredIdentifiers(
@@ -923,68 +961,6 @@ export class JavaScriptExecutor {
       }
       return false;
     });
-  }
-
-  /**
-   * Handle the last statement to auto-return if it's an expression.
-   */
-  private _handleLastStatement(
-    code: string,
-    ast: any
-  ): {
-    withReturn: boolean;
-    modifiedUserCode: string;
-    extraReturnCode: string;
-  } {
-    if (ast.body.length === 0) {
-      return {
-        withReturn: false,
-        modifiedUserCode: code,
-        extraReturnCode: ''
-      };
-    }
-
-    const lastNode = ast.body[ast.body.length - 1];
-
-    // If the last node is an expression statement (and not an assignment)
-    if (
-      lastNode.type === 'ExpressionStatement' &&
-      lastNode.expression.type !== 'AssignmentExpression'
-    ) {
-      const lastNodeStart = lastNode.start;
-      const lastNodeExprEnd = lastNode.expression.end;
-      const lastNodeRestEnd = lastNode.end;
-
-      // Check for semicolon after the expression
-      let semicolonFound = false;
-      for (let i = lastNodeExprEnd; i < lastNodeRestEnd; i++) {
-        if (code[i] === ';') {
-          semicolonFound = true;
-          break;
-        }
-      }
-
-      if (!semicolonFound) {
-        // Remove the last node from the code, with the parentheses around
-        // the expression, as in `({ a: 1 })`
-        const modifiedUserCode =
-          code.substring(0, lastNodeStart) + code.substring(lastNodeRestEnd);
-        const codeOfLastNode = code.substring(lastNodeStart, lastNodeRestEnd);
-        const extraReturnCode = `return ${codeOfLastNode};`;
-
-        return {
-          withReturn: true,
-          modifiedUserCode,
-          extraReturnCode
-        };
-      }
-    }
-
-    return {
-      withReturn: false,
-      modifiedUserCode: code,
-      extraReturnCode: ''
-    };
   }
 
   /**
@@ -1087,170 +1063,270 @@ export class JavaScriptExecutor {
   }
 
   /**
-   * Rewrite import statements to dynamic imports, and top-level declarations
-   * to assignments to the global scope.
+   * Rewrite the code of a cell to run in the body of an async function:
+   * import statements to dynamic imports, top-level declarations to
+   * assignments to the global scope, and the last expression to a return.
+   *
+   * The rewrites are edits of the code of the cell, which keep its lines,
+   * with a map of the positions for the tracebacks.
    */
-  private _rewriteTopLevelStatements(
+  private _rewriteCell(
     code: string,
     ast: any
   ): {
-    modifiedUserCode: string;
-    codeAddToGlobalScope: string;
-    hoistedCode: string;
+    edited: string;
+    map: PositionMap;
+    hoisted: string;
+    withReturn: boolean;
   } {
-    let modifiedUserCode = code;
-    let codeAddToGlobalScope = '';
-    const hoistedCode: string[] = [];
+    const edits = new SourceEdits(code);
+    const hoisted: string[] = [];
+    // The names of the builtin globals that the code of the cell can assign
+    // again after their declaration
+    const reassignable = new Set<string>();
 
-    // Process statements in reverse order to maintain correct positions
-    for (let i = ast.body.length - 1; i >= 0; i--) {
-      const node = ast.body[i];
-
+    ast.body.forEach((node: any, i: number) => {
       if (node.type === 'ImportDeclaration') {
-        const importSource = this._transformImportSource(node.source.value);
-        const importSourceCode = JSON.stringify(importSource);
-
-        if (node.specifiers.length === 0) {
-          // Side-effect import: import 'module'
-          modifiedUserCode = this._replaceCode(
-            modifiedUserCode,
-            node.start,
-            node.end,
-            `await import(${importSourceCode});\n`
-          );
-        } else {
-          let hasDefaultImport = false;
-          let defaultImportName = '';
-          let hasNamespaceImport = false;
-          let namespaceImportName = '';
-          const importedNames: string[] = [];
-          const localNames: string[] = [];
-
-          // Get imported and local names
-          for (const specifier of node.specifiers) {
-            if (specifier.type === 'ImportSpecifier') {
-              if (specifier.imported.name === 'default') {
-                hasDefaultImport = true;
-                defaultImportName = specifier.local.name;
-              } else {
-                importedNames.push(specifier.imported.name);
-                localNames.push(specifier.local.name);
-              }
-            } else if (specifier.type === 'ImportDefaultSpecifier') {
-              hasDefaultImport = true;
-              defaultImportName = specifier.local.name;
-            } else if (specifier.type === 'ImportNamespaceSpecifier') {
-              hasNamespaceImport = true;
-              namespaceImportName = specifier.local.name;
-            }
-          }
-
-          const importBinding = `__jsKernelImport${i}`;
-          let newCodeOfNode = `const ${importBinding} = await import(${importSourceCode});\n`;
-
-          const destructuredNames: string[] = [];
-          if (hasDefaultImport) {
-            destructuredNames.push(`default: ${defaultImportName}`);
-            codeAddToGlobalScope +=
-              this._addToGlobalThisCode(defaultImportName);
-          }
-
-          if (importedNames.length > 0) {
-            for (let j = 0; j < importedNames.length; j++) {
-              // Handle aliased imports: import { foo as bar } -> const { foo: bar }
-              destructuredNames.push(
-                importedNames[j] !== localNames[j]
-                  ? `${importedNames[j]}: ${localNames[j]}`
-                  : importedNames[j]
-              );
-              // Use local name for globalThis assignment since that's what's in scope
-              codeAddToGlobalScope += this._addToGlobalThisCode(localNames[j]);
-            }
-          }
-
-          if (destructuredNames.length > 0) {
-            newCodeOfNode += `const { ${destructuredNames.join(
-              ', '
-            )} } = ${importBinding};\n`;
-          }
-
-          if (hasNamespaceImport) {
-            newCodeOfNode += `const ${namespaceImportName} = ${importBinding};\n`;
-            codeAddToGlobalScope +=
-              this._addToGlobalThisCode(namespaceImportName);
-          }
-
-          modifiedUserCode = this._replaceCode(
-            modifiedUserCode,
-            node.start,
-            node.end,
-            newCodeOfNode
-          );
-        }
+        this._rewriteImport(edits, node, i);
       } else if (this._declaresBuiltinGlobal(node)) {
-        // Keep the declaration local, and copy it at the end like imports
-        for (const name of this._declaredNames(node)) {
-          codeAddToGlobalScope += this._addToGlobalThisCode(name);
+        // Keep the declaration local, and copy it to the global scope where
+        // it is declared, so that it is kept if a later line throws
+        const names = this._declaredNames(node);
+        if (node.type !== 'VariableDeclaration' || node.kind !== 'const') {
+          names.forEach(name => reassignable.add(name));
         }
+        const copies = names
+          .map(name => this._addToGlobalThisCode(name))
+          .join(' ');
+        const separator =
+          node.type === 'VariableDeclaration' && code[node.end - 1] !== ';'
+            ? '; '
+            : ' ';
+        edits.insert(node.end, `${separator}${copies}`);
       } else if (node.type === 'FunctionDeclaration') {
         // Assign the function before the code runs, using a hoisted factory
         const factoryName = `__jsKernelFunction${i}`;
-        const functionCode = modifiedUserCode.substring(node.start, node.end);
-        modifiedUserCode = this._replaceCode(
-          modifiedUserCode,
-          node.start,
-          node.end,
-          `function ${factoryName}() { return ${functionCode} }`
-        );
-        hoistedCode.unshift(`${node.id.name} = ${factoryName}();`);
+        edits.insert(node.start, `function ${factoryName}() { return `);
+        edits.insert(node.end, ' }');
+        hoisted.push(`${node.id.name} = ${factoryName}();`);
       } else if (node.type === 'ClassDeclaration') {
-        const classCode = modifiedUserCode.substring(node.start, node.end);
-        modifiedUserCode = this._replaceCode(
-          modifiedUserCode,
-          node.start,
-          node.end,
-          `${node.id.name} = ${classCode};`
-        );
+        edits.insert(node.start, `${node.id.name} = `);
+        edits.insert(node.end, ';');
       } else if (node.type === 'VariableDeclaration') {
-        modifiedUserCode = this._replaceCode(
-          modifiedUserCode,
-          node.start,
-          node.end,
-          this._rewriteVariableDeclaration(modifiedUserCode, node)
-        );
+        this._rewriteVariableDeclaration(edits, node);
+      }
+    });
+
+    // Return the last expression, unless it ends with a semicolon or is an
+    // assignment. The parentheses go around the statement, so that the
+    // parentheses of `({ a: 1 })` are kept, and the value is not assigned,
+    // so that the names of the anonymous functions are not inferred.
+    const last = ast.body[ast.body.length - 1];
+    const withReturn =
+      !!last &&
+      last.type === 'ExpressionStatement' &&
+      last.expression.type !== 'AssignmentExpression' &&
+      !code.slice(last.expression.end, last.end).includes(';');
+
+    // Copy the builtin globals again at the end of the cell, before the
+    // last expression, with the values of their last assignments
+    if (reassignable.size > 0) {
+      const copies = [...reassignable]
+        .map(name => this._addToGlobalThisCode(name))
+        .join(' ');
+      if (withReturn) {
+        edits.insert(last.start, `;${copies} `);
+      } else {
+        edits.insert(last.end, `; ${copies}`);
       }
     }
 
-    return {
-      modifiedUserCode,
-      codeAddToGlobalScope,
-      hoistedCode: hoistedCode.join(' ')
-    };
+    if (withReturn) {
+      edits.insert(last.start, 'return (');
+      edits.insert(last.end, ')');
+    }
+
+    const { code: edited, map } = edits.apply();
+    return { edited, map, hoisted: hoisted.join(' '), withReturn };
+  }
+
+  /**
+   * Rewrite an import statement to a dynamic import, on one line followed by
+   * the line breaks of the statement, with the copies of the imported names
+   * to the global scope.
+   */
+  private _rewriteImport(edits: SourceEdits, node: any, index: number): void {
+    const code = edits.source;
+    const importSource = this._transformImportSource(node.source.value);
+    const importSourceCode = JSON.stringify(importSource);
+    const lineBreaks = '\n'.repeat(
+      lineStarts(code.slice(node.start, node.end)).length - 1
+    );
+
+    if (node.specifiers.length === 0) {
+      // Side-effect import: import 'module'
+      edits.replace(
+        node.start,
+        node.end,
+        `await import(${importSourceCode});${lineBreaks}`
+      );
+      return;
+    }
+
+    const importBinding = `__jsKernelImport${index}`;
+    const statements = [
+      `const ${importBinding} = await import(${importSourceCode});`
+    ];
+    const destructuredNames: string[] = [];
+    const localNames: string[] = [];
+    let namespaceImportName = '';
+    for (const specifier of node.specifiers) {
+      const localName = specifier.local.name;
+      if (specifier.type === 'ImportNamespaceSpecifier') {
+        namespaceImportName = localName;
+        continue;
+      }
+      // Handle aliased imports: import { foo as bar } -> const { foo: bar }
+      const importedName =
+        specifier.type === 'ImportDefaultSpecifier'
+          ? 'default'
+          : specifier.imported.name;
+      destructuredNames.push(
+        importedName === localName ? localName : `${importedName}: ${localName}`
+      );
+      localNames.push(localName);
+    }
+    if (destructuredNames.length > 0) {
+      statements.push(
+        `const { ${destructuredNames.join(', ')} } = ${importBinding};`
+      );
+    }
+    if (namespaceImportName) {
+      statements.push(`const ${namespaceImportName} = ${importBinding};`);
+      localNames.push(namespaceImportName);
+    }
+    for (const name of localNames) {
+      statements.push(this._addToGlobalThisCode(name));
+    }
+    edits.replace(node.start, node.end, statements.join(' ') + lineBreaks);
   }
 
   /**
    * Rewrite a variable declaration to an assignment, e.g. `let a = 1, b;`
-   * to `a = 1, b = undefined;`.
+   * to `    a = 1, b = undefined;`.
    */
-  private _rewriteVariableDeclaration(code: string, node: any): string {
+  private _rewriteVariableDeclaration(edits: SourceEdits, node: any): void {
     const declarations = node.declarations;
     const lastDeclaration = declarations[declarations.length - 1];
 
     // Wrap patterns in parentheses, and pad to keep the columns
     const isPattern = declarations[0].id.type !== 'Identifier';
-    let newCode = (isPattern ? ';(' : '').padEnd(node.kind.length);
-
-    let position = node.start + node.kind.length;
+    edits.replace(
+      node.start,
+      node.start + node.kind.length,
+      (isPattern ? ';(' : '').padEnd(node.kind.length)
+    );
     for (const declaration of declarations) {
       if (!declaration.init) {
-        newCode += `${code.substring(position, declaration.end)} = undefined`;
-        position = declaration.end;
+        edits.insert(declaration.end, ' = undefined');
       }
     }
-    newCode += code.substring(position, lastDeclaration.end);
-    newCode += isPattern ? ')' : '';
-    newCode += code.substring(lastDeclaration.end, node.end);
-    return newCode.endsWith(';') ? newCode : `${newCode};`;
+    if (isPattern) {
+      edits.insert(lastDeclaration.end, ')');
+    }
+    if (edits.source[node.end - 1] !== ';') {
+      edits.insert(node.end, ';');
+    }
+  }
+
+  /**
+   * Compile the body of a cell to an async function, in the realm of the
+   * global scope.
+   */
+  private _compile(body: string): () => Promise<any> {
+    if (!this._asyncFunction) {
+      this._asyncFunction = this._createScopedFunction(
+        'return (async function () {}).constructor'
+      )() as (...args: string[]) => () => Promise<any>;
+    }
+    return this._asyncFunction(...this._helperParameters, body);
+  }
+
+  /**
+   * Measure, once, how the engine reports the positions of the cells, with
+   * a probe compiled like a cell. Also raise the number of frames of the
+   * stack traces, since the frames of the kernel take some.
+   */
+  private _calibrate(): ICalibration | null {
+    if (this._calibration !== undefined) {
+      return this._calibration;
+    }
+    const errorConstructor = safe(() => this._globalScope.Error);
+    if (
+      typeof errorConstructor?.stackTraceLimit === 'number' &&
+      errorConstructor.stackTraceLimit < STACK_TRACE_LIMIT
+    ) {
+      safe(() => {
+        errorConstructor.stackTraceLimit = STACK_TRACE_LIMIT;
+      });
+    }
+    // The body of an async function runs synchronously until its first
+    // await, so the error is created when the probe is called
+    const holder: { e?: unknown } = {};
+    safe(() => {
+      const probe = this._compile(
+        `;\nthis.e =\nnew Error()\n//# sourceURL=${PROBE_URL}`
+      );
+      void probe.call(holder);
+    });
+    this._calibration = calibrate(holder.e, PROBE_URL);
+    return this._calibration;
+  }
+
+  /**
+   * Register the code of a cell for the tracebacks, forgetting the oldest
+   * cells beyond MAX_CELLS.
+   */
+  private _registerCell(name: string, source: ICellSource): void {
+    this._cells.set(name, source);
+    for (const oldest of this._cells.keys()) {
+      if (this._cells.size <= MAX_CELLS) {
+        break;
+      }
+      this._cells.delete(oldest);
+    }
+  }
+
+  /**
+   * A syntax error of acorn as a CellSyntaxError, with its location and
+   * without the `(line:column)` suffix of its message.
+   */
+  private _toCellSyntaxError(error: any, name: string): unknown {
+    const loc = safe(() => error.loc);
+    if (
+      !(error instanceof SyntaxError) ||
+      typeof loc?.line !== 'number' ||
+      typeof loc?.column !== 'number'
+    ) {
+      return error;
+    }
+    const message = error.message.replace(/ \(\d+:\d+\)$/, '');
+    return new CellSyntaxError(message, {
+      token: name,
+      line: loc.line,
+      column: loc.column
+    });
+  }
+
+  /**
+   * The context of the tracebacks: the cells and the calibration.
+   */
+  private _tracebackContext(currentToken?: string): ITracebackContext {
+    return {
+      cells: this._cells,
+      calibration: this._calibrate(),
+      currentToken
+    };
   }
 
   /**
@@ -1266,7 +1342,7 @@ export class JavaScriptExecutor {
       return {
         name: safe(() => String(value.name), 'Error'),
         message: safe(() => String(value.message), ''),
-        stack: safe(() => String(value.stack), '')
+        stack: safe(() => this.cleanStackTrace(value), '')
       };
     }
     if (isDate(value)) {
@@ -1497,6 +1573,22 @@ export class JavaScriptExecutor {
     return docs;
   }
 
+  /**
+   * Formats the frames of the errors shown by inspect.
+   */
+  private _formatStack = (error: unknown, colors: boolean) =>
+    this.formatStackFrames(error, colors);
+
+  /**
+   * The names of the parameters of the compiled cells, for the helpers the
+   * kernel passes to them.
+   */
+  private _helperParameters: string[] = [];
+  private _asyncFunction: ((...args: string[]) => () => Promise<any>) | null =
+    null;
+  private _calibration: ICalibration | null | undefined = undefined;
+  private _cells = new Map<string, ICellSource>();
+  private _silentCount = 0;
   private _introspection: Introspection | null = null;
   private _config: ExecutorConfig;
   private _globalScope: Record<string, any>;

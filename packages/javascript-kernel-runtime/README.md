@@ -8,6 +8,7 @@ kernel that runs next to the user code. It covers:
   declarations kept in the global scope, `import` statements
 - Node.js-style `inspect()` of the values, and the `console`
 - `display()` and the rich outputs (HTML, Markdown, SVG, images, JSON, ...)
+- the tracebacks of the errors, with their locations in the cells
 - completion, inspection (the documentation of the names) and `isComplete`
 - comms and [Jupyter Widgets](https://ipywidgets.readthedocs.io/)
 
@@ -184,10 +185,81 @@ const evaluator = new runtime.JavaScriptRuntimeEvaluator({
 });
 ```
 
+## Tracebacks
+
+The evaluator names the cells after their execution count, like `In[3]`
+(`<silent-1>`, `<silent-2>`... for the execution count 0), and compiles them
+with a `//# sourceURL=In[3]` directive. The `traceback` of an
+`execute_error` is a list of lines, colored with ANSI escape codes:
+
+```
+In[3]:2
+  throw new Error("boom")
+        ^
+
+Error: boom
+    at inner (In[3]:2:9)
+    at In[3]:4:1
+```
+
+To report the errors thrown outside of an execution, like in a timer, format
+them with the executor of the evaluator:
+
+```javascript
+const { traceback } = evaluator.executor.formatError(error, {
+  prefix: 'Uncaught'
+});
+onOutput({
+  type: 'stream',
+  bundle: { name: 'stderr', text: traceback.join('\n') + '\n' }
+});
+```
+
+The positions of the frames are mapped back to the cells: the evaluator
+measures once how the engine reports the positions of the code compiled at
+runtime, with a probe compiled like a cell, and hides the frames of the files
+below the probe, which are the ones of the kernel. It raises
+`Error.stackTraceLimit` to 50, when the engine has it, since the frames of
+the kernel take some. With an engine which ignores the `//# sourceURL`
+directive, the frames of the code compiled at runtime are attributed to the
+current cell, which is approximate.
+
+A kernel which compiles the cells itself, for example with a native
+`evalScript(source, fileName)`, can reuse the helpers of the tracebacks:
+
+```javascript
+const cells = new Map();
+cells.set('In[3]', runtime.createCellSource({ name: 'In[3]', code }));
+const context = {
+  cells,
+  calibration: {
+    sourceUrlHonored: true,
+    sharedFile: null,
+    lineOffset: 0,
+    columnBase: 1,
+    kernelFiles: new Set(['runtime.js'])
+  }
+};
+const { ename, evalue, traceback } = runtime.formatError(error, context);
+```
+
+- `parseStack(stack)` parses the stack traces of V8 and QuickJS
+  (`    at name (file:1:2)`), SpiderMonkey and JavaScriptCore
+  (`name@file:1:2`).
+- `mapFrames(frames, context)` maps the frames to the cells and removes the
+  frames of the kernel, `formatFrames(frames)` formats them like Node.js.
+- `formatError(value, context, { prefix, colors })` returns the `ename`,
+  `evalue` and `traceback` of a thrown value.
+- `SourceEdits` edits a source code and maps the positions of the edited
+  code back to the source, for the kernels which rewrite the cells.
+- `CellSyntaxError` is a syntax error with its location in a cell, shown with
+  a caret.
+
 ## Engine requirements
 
 - The ES2020 syntax, and the ES2022 built-ins.
-- The `Function` constructor, which compiles the cells.
+- The `Function` constructor and the constructor of the async functions,
+  which compile the cells.
 - Optionally, dynamic `import()`, for the `import` statements of the cells.
 
 The other host APIs are optional:

@@ -6,7 +6,6 @@ import type { KernelMessage } from '@jupyterlab/services';
 import type { IMimeBundle } from '@jupyterlab/nbformat';
 
 import { JavaScriptExecutor, type IAsyncCodeResult } from './executor';
-import { normalizeError } from './errors';
 import { CommManager } from './comm';
 import type { CommTargetHandler } from './comm';
 import { createConsole, type KernelConsole } from './console';
@@ -69,6 +68,8 @@ export class JavaScriptRuntimeEvaluator {
       clear: wait => {
         this._display.clear(wait);
       },
+      formatStack: (error, colors) =>
+        this._executor.formatStackFrames(error, colors),
       now:
         options.now ??
         (() => {
@@ -127,21 +128,23 @@ export class JavaScriptRuntimeEvaluator {
   ): Promise<KernelMessage.IExecuteReplyMsg['content']> {
     this._parentHeader = parentHeader;
     return this._withParentMessageId(parentMessageId, async () => {
-      // Parse-time errors are syntax errors, so show only `Name: message`.
+      // The name of the cell in the tracebacks
+      const name = executionCount > 0 ? `In[${executionCount}]` : undefined;
       let asyncFunction: () => Promise<any>;
       let withReturn: boolean;
       let docs: IAsyncCodeResult['docs'];
+      let token: string;
       try {
-        const parsed = this._executor.makeAsyncFromCode(code);
+        const parsed = this._executor.makeAsyncFromCode(code, { name });
         asyncFunction = parsed.asyncFunction;
         withReturn = parsed.withReturn;
         docs = parsed.docs;
+        token = parsed.name;
       } catch (error) {
-        const normalized = normalizeError(error);
-        return this._emitError(executionCount, normalized, false);
+        // A syntax error, with its location in the cell
+        return this._emitError(executionCount, error);
       }
 
-      // Runtime errors may include useful eval frames from user code.
       try {
         const resultPromise = this._evalFunc(asyncFunction);
 
@@ -173,8 +176,8 @@ export class JavaScriptRuntimeEvaluator {
           user_expressions: {}
         };
       } catch (error) {
-        const normalized = normalizeError(error);
-        return this._emitError(executionCount, normalized, true);
+        // The thrown value as is, which may not be an error
+        return this._emitError(executionCount, error, token);
       } finally {
         // The declarations made before an error keep their documentation
         this._executor.introspection.registerDocs(docs);
@@ -328,22 +331,25 @@ export class JavaScriptRuntimeEvaluator {
   }
 
   /**
-   * Build and emit an execute error reply.
+   * Build and emit an execute error reply, with the traceback of a thrown
+   * value.
+   *
+   * @param currentToken - The name of the cell which threw the value.
    */
   private _emitError(
     executionCount: number,
-    error: Error,
-    includeStack: boolean
+    error: unknown,
+    currentToken?: string
   ): KernelMessage.IExecuteReplyMsg['content'] {
-    const traceback = includeStack
-      ? this._executor.cleanStackTrace(error)
-      : `${error.name}: ${error.message}`;
+    const { ename, evalue, traceback } = this._executor.formatError(error, {
+      currentToken
+    });
 
     const content: KernelMessage.IReplyErrorContent = {
       status: 'error',
-      ename: error.name || 'Error',
-      evalue: error.message || '',
-      traceback: [traceback]
+      ename,
+      evalue,
+      traceback
     };
 
     this._onOutput({

@@ -18,7 +18,8 @@ async function getNotebook(page: IJupyterLabPageFixture): Promise<Locator> {
 }
 
 /**
- * Get the first line of the errors shown in the outputs of the notebook.
+ * Get the `Name: message` line of the errors shown in the outputs of the
+ * notebook.
  */
 async function getErrors(page: IJupyterLabPageFixture): Promise<string[]> {
   const notebook = await getNotebook(page);
@@ -27,11 +28,12 @@ async function getErrors(page: IJupyterLabPageFixture): Promise<string[]> {
       '.jp-OutputArea-output[data-mime-type="application/vnd.jupyter.stderr"]'
     )
     .allTextContents();
-  // Errors are shown on stderr like the console.error output, but start with
-  // the name of the error
-  return stderr
-    .filter(text => /^\w*Error: /.test(text))
-    .map(text => text.split('\n')[0]);
+  // Errors are shown on stderr like the console.error output, after the line
+  // of code where they happened, and start with the name of the error
+  return stderr.flatMap(text => {
+    const header = text.split('\n').find(line => /^\w*Error: /.test(line));
+    return header ? [header] : [];
+  });
 }
 
 /**

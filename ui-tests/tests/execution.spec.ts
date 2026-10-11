@@ -51,6 +51,20 @@ for (const kernel of KERNELS) {
       ]);
     });
 
+    test('Keep declarations named like the globals of the page', async ({
+      page
+    }) => {
+      // `status` is a global of the page in the iframe kernel
+      await runCode(page, "let status = 'idle';\nstatus = 'done';");
+      let index = await runCode(page, 'status');
+      expect(await page.notebook.getCellTextOutput(index)).toEqual(["'done'"]);
+
+      // The declaration is kept when a later line throws
+      await runCode(page, "let status = 'set';\nthrow new Error('later')");
+      index = await runCode(page, 'status');
+      expect(await page.notebook.getCellTextOutput(index)).toEqual(["'set'"]);
+    });
+
     test('Await promises at the top level', async ({ page }) => {
       const index = await runCode(
         page,
@@ -98,7 +112,7 @@ for (const kernel of KERNELS) {
     test('Show syntax errors', async ({ page }) => {
       const index = await runCode(page, 'let = 1');
       expect(await page.notebook.getCellTextOutput(index)).toEqual([
-        "SyntaxError: The keyword 'let' is reserved (1:0)"
+        "In[1]:1\nlet = 1\n^\n\nSyntaxError: The keyword 'let' is reserved"
       ]);
     });
 

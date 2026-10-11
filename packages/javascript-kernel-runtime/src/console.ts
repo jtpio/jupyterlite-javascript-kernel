@@ -6,6 +6,7 @@ import type { IMimeBundle } from '@jupyterlab/nbformat';
 import {
   formatPrimitive,
   inspect,
+  type IInspectOptions,
   isDate,
   isMap,
   isRegExp,
@@ -36,6 +37,12 @@ export interface IConsoleHost {
    * The current time in milliseconds, for console.time.
    */
   now(): number;
+
+  /**
+   * Format the lines after `Name: message` of an error, for the errors
+   * logged and console.trace, like IInspectOptions.formatStack.
+   */
+  formatStack?(error: unknown, colors: boolean): string[] | null;
 }
 
 /**
@@ -71,8 +78,16 @@ export type KernelConsole = IKernelConsole;
 /**
  * Format the arguments of console.log like Node.js, with the printf-like
  * substitutions (%s, %d, %i, %f, %j, %o, %O, %c) of the first argument.
+ *
+ * @param args - The arguments.
+ * @param colors - Whether to color with ANSI escape codes.
+ * @param options - Other options of inspect, like formatStack.
  */
-export function formatArguments(args: unknown[], colors = true): string {
+export function formatArguments(
+  args: unknown[],
+  colors = true,
+  options: IInspectOptions = {}
+): string {
   const parts: string[] = [];
   let rest = args;
   const first = args[0];
@@ -95,7 +110,7 @@ export function formatArguments(args: unknown[], colors = true): string {
             return `${arg}n`;
           }
           if (arg !== null && typeof arg === 'object') {
-            return inspect(arg, { depth: 1, colors });
+            return inspect(arg, { ...options, depth: 1, colors });
           }
           return String(arg);
         case 'd':
@@ -117,9 +132,9 @@ export function formatArguments(args: unknown[], colors = true): string {
         case 'j':
           return safe(() => JSON.stringify(arg), '[Circular]') as string;
         case 'o':
-          return inspect(arg, { colors, depth: 4 });
+          return inspect(arg, { ...options, colors, depth: 4 });
         case 'O':
-          return inspect(arg, { colors });
+          return inspect(arg, { ...options, colors });
         case 'c':
           return '';
       }
@@ -129,7 +144,9 @@ export function formatArguments(args: unknown[], colors = true): string {
     rest = args.slice(used);
   }
   for (const arg of rest) {
-    parts.push(typeof arg === 'string' ? arg : inspect(arg, { colors }));
+    parts.push(
+      typeof arg === 'string' ? arg : inspect(arg, { ...options, colors })
+    );
   }
   return parts.join(' ');
 }
@@ -259,6 +276,10 @@ export function createConsole(host: IConsoleHost): KernelConsole {
   let groupIndentation = '';
   const counts = new Map<string, number>();
   const timers = new Map<string, number>();
+  const formatStack = host.formatStack?.bind(host);
+  const inspectOptions: IInspectOptions = formatStack ? { formatStack } : {};
+  const format = (args: unknown[]) =>
+    formatArguments(args, true, inspectOptions);
 
   const write = (name: 'stdout' | 'stderr', text: string) => {
     if (groupIndentation) {
@@ -272,40 +293,43 @@ export function createConsole(host: IConsoleHost): KernelConsole {
 
   const console: KernelConsole = {
     log(...args: unknown[]) {
-      write('stdout', formatArguments(args));
+      write('stdout', format(args));
     },
     info(...args: unknown[]) {
-      write('stdout', formatArguments(args));
+      write('stdout', format(args));
     },
     debug(...args: unknown[]) {
-      write('stdout', formatArguments(args));
+      write('stdout', format(args));
     },
     error(...args: unknown[]) {
-      write('stderr', formatArguments(args));
+      write('stderr', format(args));
     },
     warn(...args: unknown[]) {
-      write('stderr', formatArguments(args));
+      write('stderr', format(args));
     },
     trace(...args: unknown[]) {
-      // Skip the first line (the error) and the frame of console.trace
-      const stack = String(new Error().stack ?? '');
-      const frames = stack
-        .split('\n')
-        .filter(line => /^\s*at |@/.test(line))
-        .slice(1);
+      // The frames mapped to the cells, without the ones of the kernel, or
+      // else the frames without the first one, of console.trace
+      const error = new Error();
+      const frames =
+        safe(() => formatStack?.(error, true)) ??
+        String(error.stack ?? '')
+          .split('\n')
+          .filter(line => /^\s*at |@/.test(line))
+          .slice(1);
       write(
         'stderr',
-        [
-          `Trace${args.length ? `: ${formatArguments(args)}` : ''}`,
-          ...frames
-        ].join('\n')
+        [`Trace${args.length ? `: ${format(args)}` : ''}`, ...frames].join('\n')
       );
     },
     dir(value: unknown, options: Record<string, unknown> = {}) {
-      write('stdout', inspect(value, { colors: true, ...options }));
+      write(
+        'stdout',
+        inspect(value, { colors: true, ...inspectOptions, ...options })
+      );
     },
     dirxml(...args: unknown[]) {
-      write('stdout', formatArguments(args));
+      write('stdout', format(args));
     },
     table(data: unknown, properties?: readonly string[]) {
       const bundle = formatTable(data, properties);
@@ -317,7 +341,7 @@ export function createConsole(host: IConsoleHost): KernelConsole {
     },
     group(...label: unknown[]) {
       if (label.length) {
-        write('stdout', formatArguments(label));
+        write('stdout', format(label));
       }
       groupIndentation += '  ';
     },

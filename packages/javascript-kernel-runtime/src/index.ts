@@ -11,4 +11,7 @@ export * from './inspect';
 export * from './introspection';
 export * from './protocol';
 export * from './runtime_evaluator';
+export * from './source_edits';
+export * from './traceback';
+export { stripAnsi } from './utils';
 export * from './widgets';

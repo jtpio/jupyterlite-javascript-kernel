@@ -223,6 +223,29 @@ The `console` methods print to the outputs of the cell, with the values formatte
 - `console.count`, `console.countReset`, `console.time`, `console.timeLog`, `console.timeEnd` and `console.assert` work like in the browser
 - `console.clear` clears the outputs of the cell
 
+## Errors
+
+An error shows where it happened in the cell, then its frames, like in Node.js:
+
+```
+In[3]:2
+  throw new Error("boom")
+        ^
+
+Error: boom
+    at inner (In[3]:2:9)
+    at outer (In[3]:5:3)
+    at In[3]:7:1
+```
+
+- `In[3]` is the execution count of the cell, followed by the line and the column. The frames of the functions defined in other cells show the cell where they are defined. The frames of the kernel are hidden.
+- Syntax errors show the line and a caret under the column, before running the cell.
+- Values thrown that are not errors are shown as is, like `Uncaught 'x'` for `throw "x"`.
+- The `cause` of an error and the errors of an `AggregateError` are shown nested, under `[cause]:` and `[errors]:`.
+- `console.error(error)`, `console.trace()` and the errors shown as values use the same locations.
+
+The columns can differ slightly between browsers, which point at different parts of the expression that failed.
+
 ## Input
 
 `prompt(message)` asks the user for some text, and returns it:
@@ -362,7 +385,7 @@ Disable iframe mode:
 
 The repository contains three npm packages:
 
-- `@jupyterlite/javascript-kernel-runtime`: the code running next to the user code, in the iframe or the Web Worker. It executes the cells, formats the outputs, and implements comms and widgets. It does not depend on JupyterLite, so that other JavaScript kernels can reuse it. It is engine-neutral: it only needs the ECMAScript built-ins, and compiles without the DOM types, which the build checks. It also ships single-file builds, with `acorn` and `astring` included, for kernels that do not use npm. See its [README](packages/javascript-kernel-runtime/README.md).
+- `@jupyterlite/javascript-kernel-runtime`: the code running next to the user code, in the iframe or the Web Worker. It executes the cells, formats the outputs, and implements comms and widgets. It does not depend on JupyterLite, so that other JavaScript kernels can reuse it. It is engine-neutral: it only needs the ECMAScript built-ins, and compiles without the DOM types, which the build checks. It also ships single-file builds, with `acorn` and `astring` included, for kernels that do not use npm, and exports the engine-neutral helpers of the tracebacks, like `parseStack` and `formatError`, for other kernels. See its [README](packages/javascript-kernel-runtime/README.md).
 - `@jupyterlite/javascript-kernel`: the JupyterLite kernel, with the iframe and Web Worker runtimes. It also exports everything from `@jupyterlite/javascript-kernel-runtime`.
 - `@jupyterlite/javascript-kernel-extension`: the JupyterLite extension registering the kernels.
 

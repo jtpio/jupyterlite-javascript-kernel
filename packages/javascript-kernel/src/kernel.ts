@@ -8,6 +8,7 @@ import { BaseKernel, type IKernel } from '@jupyterlite/services';
 import {
   ECMASCRIPT_EDITION,
   normalizeError as normalizeUnknownError,
+  stripAnsi,
   type JavaScriptExecutor,
   type RuntimeOutputMessage
 } from '@jupyterlite/javascript-kernel-runtime';
@@ -497,7 +498,8 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
         ? reply.traceback
         : [];
     if (traceback.length > 0) {
-      error.stack = traceback.join('\n');
+      // The traceback is colored for the notebook
+      error.stack = stripAnsi(traceback.join('\n'));
     }
 
     return error;
