@@ -1,0 +1,217 @@
+# @jupyterlite/javascript-kernel-runtime
+
+An engine-neutral Jupyter runtime for JavaScript: the part of a JavaScript
+kernel that runs next to the user code. It covers:
+
+- the rewriting of the cells with [acorn](https://github.com/acornjs/acorn)
+  and [astring](https://github.com/davidbonnet/astring): top-level `await`,
+  declarations kept in the global scope, `import` statements
+- Node.js-style `inspect()` of the values, and the `console`
+- `display()` and the rich outputs (HTML, Markdown, SVG, images, JSON, ...)
+- completion, inspection (the documentation of the names) and `isComplete`
+- comms and [Jupyter Widgets](https://ipywidgets.readthedocs.io/)
+
+It only needs the ECMAScript built-ins, so it runs in a browser window, a Web
+Worker or an engine without the web APIs. It is used by the
+[JupyterLite JavaScript kernel](https://github.com/jupyterlite/javascript-kernel)
+and the [p5.js kernel](https://github.com/jupyterlite/p5-kernel), and is meant
+to be embedded by engines like
+[xeus-quickjs](https://github.com/jtpio/xeus-quickjs).
+
+## Files
+
+- `lib/`: one ES module per source file, with the types, for bundlers.
+- `dist/javascript-kernel-runtime.umd.js`, `dist/javascript-kernel-runtime.umd.min.js`
+  and `dist/javascript-kernel-runtime.mjs`: single-file builds with acorn and
+  astring included, for the kernels that do not use npm, with their source
+  maps. `dist/THIRD_PARTY_LICENSES.txt` has the licenses of acorn and
+  astring (MIT).
+
+## Loading
+
+With a bundler:
+
+```javascript
+import { JavaScriptRuntimeEvaluator } from '@jupyterlite/javascript-kernel-runtime';
+```
+
+With a script, the UMD build sets a global. Delete it after reading it, so
+that the cells do not see it:
+
+```html
+<script src="https://cdn.jsdelivr.net/npm/@jupyterlite/javascript-kernel-runtime/dist/javascript-kernel-runtime.umd.min.js"></script>
+<script>
+  const runtime = globalThis.JupyterJavaScriptRuntime;
+  delete globalThis.JupyterJavaScriptRuntime;
+</script>
+```
+
+As an ES module, for example with `qjs -m` or from a CDN:
+
+```javascript
+import * as runtime from './javascript-kernel-runtime.mjs';
+```
+
+To embed it in an engine written in C or C++, evaluate the UMD file inside a
+CommonJS shim, which sets no global. This is how an engine like xeus-quickjs,
+which embeds acorn the same way, can embed it:
+
+```javascript
+const runtime = (function () {
+  const module = { exports: {} };
+  const exports = module.exports;
+  /* the content of javascript-kernel-runtime.umd.js */
+  return module.exports;
+})();
+```
+
+## The host adapter
+
+A kernel creates one evaluator for the realm running the cells, and calls
+`dispose()` when the kernel restarts:
+
+```javascript
+const evaluator = new runtime.JavaScriptRuntimeEvaluator({
+  globalScope: globalThis,
+  onOutput: message => publish(message)
+});
+const reply = await evaluator.execute('1 + 1', 1);
+```
+
+| Option                   | Description                                                                                                                                                       |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `globalScope`            | The global object of the realm running the cells. The evaluator installs `display`, `clearOutput`, `Jupyter` (and `prompt` with `requestInput`) on it.            |
+| `onOutput`               | Called with the output messages, see below.                                                                                                                       |
+| `requestInput`           | `(prompt, password, parentHeader?) => string \| null`: asks the user for some input, synchronously, for `prompt()`. Returns null when the input can not be asked. |
+| `now`                    | `() => number`: the current time in milliseconds, for `console.time()`. Defaults to `performance.now()`, or `Date.now()`.                                         |
+| `readFile`               | `(path) => Uint8Array`: reads a file, for `display.image(path)`, which is only available with it.                                                                 |
+| `promiseState`           | `(promise) => [state, value] \| null`: the state of a promise (0 pending, 1 fulfilled, 2 rejected), for engines which can tell it: the outputs then show it.      |
+| `onCommTargetRegistered` | `(targetName) => void`: called when a comm target is registered, for kernels that must register it before the frontend can open comms on it.                      |
+| `scheduler`              | `{ setTimeout(callback, ms), clearTimeout(handle) }`: the timers of the host, for the work the runtime defers. Defaults to the timers of `globalScope`, if any.   |
+| `executor`               | A `JavaScriptExecutor`, to configure it, for example to turn off the magic imports.                                                                               |
+
+The methods of the evaluator:
+
+- `execute(code, executionCount, parentMessageId?, parentHeader?)` runs a
+  cell, and returns a promise of the content of the `execute_reply`. The host
+  must run the job queue of the engine until the promise settles: browsers do
+  it on their own, QuickJS runs `JS_ExecutePendingJob` in a loop, and
+  quickjs-emscripten `runtime.executePendingJobs()`.
+- `complete(code, cursorPos)`, `inspect(code, cursorPos, detailLevel)` and
+  `isComplete(code)` are synchronous, and return the content of the replies.
+  The cursor positions are in code points, like in the Jupyter protocol.
+- `handleCommOpen(commId, targetName, data, buffers?, parentMessageId?)`,
+  `handleCommMsg(commId, data, buffers?, parentMessageId?)` and
+  `handleCommClose(commId, data, buffers?, parentMessageId?)` handle the comm
+  messages of the frontend.
+- `dispose()` removes the globals of the evaluator.
+
+`onOutput` is called synchronously and in order, during `execute()` and also
+later, for the outputs of callbacks, timers and widget handlers: the host
+attaches them to its current parent message. The messages
+(`RuntimeOutputMessage`) map to the Jupyter messages:
+
+| `type`                | Payload                                                            | Jupyter message                                                         |
+| --------------------- | ------------------------------------------------------------------ | ----------------------------------------------------------------------- |
+| `stream`              | `bundle`: `{ name, text }`                                         | `stream`                                                                |
+| `display_data`        | `bundle`: `{ data, metadata, transient }`                          | `display_data`                                                          |
+| `update_display_data` | `bundle`: `{ data, metadata, transient }`                          | `update_display_data`                                                   |
+| `clear_output`        | `bundle`: `{ wait }`                                               | `clear_output`                                                          |
+| `execute_result`      | `bundle`: `{ execution_count, data, metadata }`                    | `execute_result`, not published for silent requests                     |
+| `execute_error`       | `bundle`: `{ status, ename, evalue, traceback }`                   | `error`, also returned by `execute()` as the reply                      |
+| `comm_open`           | `content`: `{ comm_id, target_name, data }`, `metadata`, `buffers` | `comm_open`                                                             |
+| `comm_msg`            | `content`: `{ comm_id, data }`, `metadata`, `buffers`              | `comm_msg`                                                              |
+| `comm_close`          | `content`: `{ comm_id, data }`, `metadata`, `buffers`              | `comm_close`                                                            |
+| `input_request`       | `content`: `{ prompt, password }`                                  | `input_request`, not sent by the evaluator: kept for the input backends |
+
+For example, with the native functions of an engine like xeus-quickjs, which
+publish the messages:
+
+```javascript
+const onOutput = message => {
+  switch (message.type) {
+    case 'stream':
+      native.publishStream(message.bundle.name, message.bundle.text);
+      break;
+    case 'display_data':
+      native.displayData(
+        JSON.stringify(message.bundle.data),
+        JSON.stringify(message.bundle.metadata),
+        JSON.stringify(message.bundle.transient)
+      );
+      break;
+    // ...
+  }
+};
+```
+
+The adapter also wraps the natives whose shapes differ from the options above.
+For example, for natives that return a negative state for the values which are
+not promises, and an `ArrayBuffer` for the files:
+
+```javascript
+const evaluator = new runtime.JavaScriptRuntimeEvaluator({
+  globalScope: globalThis,
+  onOutput,
+  promiseState: value => {
+    const state = native.promiseState(value);
+    return state[0] < 0 ? null : state;
+  },
+  readFile: path => new Uint8Array(native.readFile(path))
+});
+```
+
+The host owns the interruptions and the timers:
+
+- To interrupt a cell, stop the engine (with `JS_SetInterruptHandler` in
+  QuickJS, or by terminating the iframe or the Web Worker): `execute()`
+  reports the error the engine throws.
+- The cells use the timers of the host, if any. The runtime itself does not
+  need them.
+
+The `import` statements of the cells load the npm packages from jsDelivr by
+default. Without network module loading, turn off the magic imports: the
+`import` statements then become `import(source)`, handled by the module
+loader of the engine.
+
+```javascript
+const config = new runtime.ExecutorConfig();
+config.magicImports = { ...config.magicImports, enabled: false };
+const evaluator = new runtime.JavaScriptRuntimeEvaluator({
+  globalScope: globalThis,
+  onOutput,
+  executor: new runtime.JavaScriptExecutor(globalThis, config)
+});
+```
+
+## Engine requirements
+
+- The ES2020 syntax, and the ES2022 built-ins.
+- The `Function` constructor, which compiles the cells.
+- Optionally, dynamic `import()`, for the `import` statements of the cells.
+
+The other host APIs are optional:
+
+| Global        | Without it                                                       |
+| ------------- | ---------------------------------------------------------------- |
+| `crypto`      | `crypto.getRandomValues()`, or else `Math.random()`, for the ids |
+| `TextDecoder` | A built-in UTF-8 decoder                                         |
+| `URL`         | The import URLs are joined as strings                            |
+| `performance` | `Date.now()` for `console.time()`                                |
+| `console`     | The evaluator installs its console                               |
+
+`crypto.randomUUID()` only exists in secure contexts: the ids of the comms
+also work in JupyterLite served over plain http.
+
+## Contributing
+
+The package compiles without the DOM types (`"lib": ["ES2022"]` and
+`"types": []` in its `tsconfig.json`), so every build fails when the code
+uses a DOM API. The globals of the host are only read in
+[`src/env.ts`](src/env.ts), with a fallback when they are missing.
+
+`jlpm build` builds `lib/` with `tsc`, then the single-file builds in `dist/`
+with `scripts/bundle.mjs`.
+
+The internal helpers are marked with `@internal`: they may change in any
+release.

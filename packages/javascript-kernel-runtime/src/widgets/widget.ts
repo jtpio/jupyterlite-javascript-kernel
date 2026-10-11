@@ -2,6 +2,7 @@
 // Distributed under the terms of the Modified BSD License.
 
 import type { CommManager, IComm } from '../comm';
+import { hostConsole } from '../env';
 import { toBytes } from '../utils';
 
 import {
@@ -320,7 +321,7 @@ export class Widget {
       try {
         cb(...args);
       } catch (e) {
-        console.error(`[Widget] Error in '${event}' handler:`, e);
+        hostConsole()?.error?.(`[Widget] Error in '${event}' handler:`, e);
       }
     }
   }
@@ -443,12 +444,22 @@ export class DOMWidget extends Widget {
   }
 }
 
+/**
+ * The serialized reference to a widget, `IPY_MODEL_<comm id>`.
+ *
+ * @internal
+ */
 export function _serializeWidgetReference(
   widget: Widget | null
 ): string | null {
   return widget ? `IPY_MODEL_${widget.commId}` : null;
 }
 
+/**
+ * The widget of a serialized reference, or null.
+ *
+ * @internal
+ */
 export function _deserializeWidgetReference(
   manager: CommManager,
   value: unknown
@@ -462,6 +473,11 @@ export function _deserializeWidgetReference(
   return manager.getWidget<Widget>(value.slice('IPY_MODEL_'.length)) ?? null;
 }
 
+/**
+ * The serialized pair of a widget and one of its traits, for links.
+ *
+ * @internal
+ */
 export function _serializeWidgetPair(
   pair: WidgetTraitPair | null
 ): [string, string] | null {
@@ -471,6 +487,11 @@ export function _serializeWidgetPair(
   return [`IPY_MODEL_${pair[0].commId}`, pair[1]];
 }
 
+/**
+ * The pair of a widget and one of its traits, from its serialized form.
+ *
+ * @internal
+ */
 export function _deserializeWidgetPair(
   manager: CommManager,
   value: unknown

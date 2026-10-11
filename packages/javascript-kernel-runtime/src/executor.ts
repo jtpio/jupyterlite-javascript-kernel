@@ -9,6 +9,7 @@ import { generate } from 'astring';
 import type { IMimeBundle } from '@jupyterlab/nbformat';
 
 import { normalizeBundle } from './display';
+import { resolveUrl } from './env';
 import {
   inspect,
   isDate,
@@ -21,8 +22,21 @@ import {
 import { Introspection, type IDeclarationDoc } from './introspection';
 import { escapeHtml, safe } from './utils';
 
-/** Matches the word "eval" in a stack frame (user eval code). */
-const RE_EVAL = /\beval\b/;
+/**
+ * Matches the stack frames of the code of the cells, which is compiled with
+ * the Function constructor: the browsers name its source `eval` or
+ * `<anonymous>`, and engines like QuickJS name it `<input>`. A position must
+ * follow these names, so that the frames of anonymous functions and of the
+ * built-in functions, like `at new Promise (<anonymous>)`, do not match.
+ */
+const RE_USER_FRAME = /\beval\b|<anonymous>:\d|<input>:\d/;
+
+/**
+ * Whether a line of a stack trace is a frame of the code of the cells.
+ */
+function isUserFrame(line: string): boolean {
+  return RE_USER_FRAME.test(line);
+}
 
 /**
  * The ECMAScript edition accepted by the kernel.
@@ -62,6 +76,16 @@ const REPR_METHODS: [string, string][] = [
   ['_toLatex', 'text/latex'],
   ['_toJson', 'application/json']
 ];
+
+/**
+ * What the kernel uses of a canvas element, without the DOM types.
+ */
+interface ICanvasLike {
+  width: number;
+  height: number;
+  toDataURL(type?: string): string;
+  outerHTML?: string;
+}
 
 /**
  * Configuration for magic imports.
@@ -670,7 +694,7 @@ export class JavaScriptExecutor {
       }
 
       // Only keep lines that reference user eval code.
-      if (RE_EVAL.test(trimmed) || trimmed.includes('<anonymous>')) {
+      if (isUserFrame(trimmed)) {
         userFrames.push(line);
       }
     }
@@ -1059,11 +1083,7 @@ export class JavaScriptExecutor {
     const normalizedBase = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
     const normalizedPath = path.replace(/^\/+/, '');
 
-    try {
-      return new URL(normalizedPath, normalizedBase).toString();
-    } catch {
-      return `${normalizedBase}${normalizedPath}`;
-    }
+    return resolveUrl(normalizedPath, normalizedBase);
   }
 
   /**
@@ -1347,7 +1367,7 @@ export class JavaScriptExecutor {
 
     // For canvas elements, try to get image data
     if (isCanvasElement) {
-      const canvas = element as HTMLCanvasElement;
+      const canvas = element as ICanvasLike;
       try {
         const dataUrl = canvas.toDataURL('image/png');
         const base64 = dataUrl.split(',')[1];

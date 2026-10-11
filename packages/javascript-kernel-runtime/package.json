@@ -15,18 +15,24 @@
   "sideEffects": false,
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
+  "unpkg": "dist/javascript-kernel-runtime.umd.min.js",
+  "jsdelivr": "dist/javascript-kernel-runtime.umd.min.js",
   "directories": {
     "lib": "lib/"
   },
   "files": [
+    "dist/*",
     "lib/**/*.d.ts",
     "lib/**/*.js.map",
     "lib/**/*.js",
     "src/**/*.{ts,tsx}"
   ],
   "scripts": {
-    "build": "tsc -b",
-    "clean": "rimraf lib && rimraf tsconfig.tsbuildinfo",
+    "build": "jlpm build:lib && jlpm build:bundle",
+    "build:bundle": "node scripts/bundle.mjs",
+    "build:lib": "tsc -b",
+    "build:prod": "jlpm build",
+    "clean": "rimraf lib dist tsconfig.tsbuildinfo",
     "prepublishOnly": "npm run build",
     "watch": "tsc -b --watch"
   },
@@ -37,6 +43,7 @@
     "astring": "^1.9.0"
   },
   "devDependencies": {
+    "@rspack/core": "^2.2.5",
     "rimraf": "~5.0.1",
     "typescript": "~5.0.2"
   },

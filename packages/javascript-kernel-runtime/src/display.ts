@@ -3,6 +3,7 @@
 
 import type { IMimeBundle } from '@jupyterlab/nbformat';
 
+import { decodeUtf8 } from './env';
 import { inspect } from './inspect';
 import { setDoc } from './introspection';
 import { bytesToBase64, toBytes } from './utils';
@@ -369,7 +370,7 @@ export function createDisplay(host: IDisplayHost): IDisplay {
         }
         const bytes = readFile(String(path));
         if (mimeType === 'image/svg+xml') {
-          return display.svg(new TextDecoder().decode(bytes), options);
+          return display.svg(decodeUtf8(bytes), options);
         }
         return imageHelper(mimeType)(bytes, options);
       },

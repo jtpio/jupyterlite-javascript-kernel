@@ -4,6 +4,7 @@
 export * from './comm';
 export * from './console';
 export * from './display';
+export { uuid, decodeUtf8 } from './env';
 export * from './errors';
 export * from './executor';
 export * from './inspect';

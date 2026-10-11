@@ -1,6 +1,7 @@
 // Copyright (c) Jupyter Development Team.
 // Distributed under the terms of the Modified BSD License.
 
+import { uuid } from '../env';
 import type { RuntimeOutputHandler } from '../protocol';
 
 /**
@@ -37,8 +38,12 @@ export type CommTargetHandler = (
  * Manages comm lifecycle within the runtime.
  */
 export class CommManager {
-  constructor(onOutput: RuntimeOutputHandler) {
+  constructor(
+    onOutput: RuntimeOutputHandler,
+    options: CommManager.IOptions = {}
+  ) {
     this._onOutput = onOutput;
+    this._onTargetRegistered = options.onTargetRegistered;
   }
 
   /**
@@ -51,7 +56,7 @@ export class CommManager {
     buffers?: ArrayBuffer[],
     commId?: string
   ): IComm {
-    const id = commId ?? crypto.randomUUID();
+    const id = commId ?? uuid();
     const comm = this._createComm(id, targetName);
     this._comms.set(id, comm);
 
@@ -74,6 +79,7 @@ export class CommManager {
    */
   registerTarget(targetName: string, handler: CommTargetHandler): void {
     this._targets.set(targetName, handler);
+    this._onTargetRegistered?.(targetName);
   }
 
   /**
@@ -92,6 +98,8 @@ export class CommManager {
 
   /**
    * Register a widget instance by comm ID.
+   *
+   * @internal
    */
   registerWidget<T>(commId: string, widget: T): void {
     this._widgets.set(commId, widget);
@@ -99,6 +107,8 @@ export class CommManager {
 
   /**
    * Look up a widget instance by comm ID.
+   *
+   * @internal
    */
   getWidget<T>(commId: string): T | undefined {
     return this._widgets.get(commId) as T | undefined;
@@ -106,6 +116,8 @@ export class CommManager {
 
   /**
    * Remove a widget registration.
+   *
+   * @internal
    */
   unregisterWidget(commId: string): void {
     this._widgets.delete(commId);
@@ -113,6 +125,8 @@ export class CommManager {
 
   /**
    * Track the active parent message ID for output capture helpers.
+   *
+   * @internal
    */
   setCurrentMessageId(messageId: string | null): void {
     this._currentMessageId = messageId;
@@ -120,6 +134,8 @@ export class CommManager {
 
   /**
    * The active parent message ID, if any.
+   *
+   * @internal
    */
   getCurrentMessageId(): string | null {
     return this._currentMessageId;
@@ -127,6 +143,8 @@ export class CommManager {
 
   /**
    * Handle a comm_open message from the frontend.
+   *
+   * @internal
    */
   handleCommOpen(
     commId: string,
@@ -151,6 +169,8 @@ export class CommManager {
 
   /**
    * Handle a comm_msg message from the frontend.
+   *
+   * @internal
    */
   handleCommMsg(
     commId: string,
@@ -163,6 +183,8 @@ export class CommManager {
 
   /**
    * Handle a comm_close message from the frontend.
+   *
+   * @internal
    */
   handleCommClose(
     commId: string,
@@ -193,6 +215,8 @@ export class CommManager {
 
   /**
    * The MIME bundle showing the view of a widget.
+   *
+   * @internal
    */
   widgetMimeBundle(commId: string): {
     'text/plain': string;
@@ -269,8 +293,25 @@ export class CommManager {
   }
 
   private _onOutput: RuntimeOutputHandler;
+  private _onTargetRegistered?: (targetName: string) => void;
   private _comms = new Map<string, IComm>();
   private _targets = new Map<string, CommTargetHandler>();
   private _widgets = new Map<string, unknown>();
   private _currentMessageId: string | null = null;
+}
+
+/**
+ * A namespace for CommManager statics.
+ */
+export namespace CommManager {
+  /**
+   * The options of a comm manager.
+   */
+  export interface IOptions {
+    /**
+     * Called when a comm target is registered, for kernels that must
+     * register the targets on their side before the frontend can open comms.
+     */
+    onTargetRegistered?: (targetName: string) => void;
+  }
 }

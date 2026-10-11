@@ -39,30 +39,34 @@ export interface IConsoleHost {
 }
 
 /**
+ * The methods of the console of the kernel, typed without the DOM types.
+ */
+export interface IKernelConsole {
+  log(...data: unknown[]): void;
+  info(...data: unknown[]): void;
+  debug(...data: unknown[]): void;
+  error(...data: unknown[]): void;
+  warn(...data: unknown[]): void;
+  trace(...data: unknown[]): void;
+  dir(item?: unknown, options?: Record<string, unknown>): void;
+  dirxml(...data: unknown[]): void;
+  table(data: unknown, properties?: readonly string[]): void;
+  group(...data: unknown[]): void;
+  groupCollapsed(...data: unknown[]): void;
+  groupEnd(): void;
+  time(label?: unknown): void;
+  timeLog(label?: unknown, ...data: unknown[]): void;
+  timeEnd(label?: unknown): void;
+  count(label?: unknown): void;
+  countReset(label?: unknown): void;
+  assert(condition?: unknown, ...data: unknown[]): void;
+  clear(): void;
+}
+
+/**
  * The methods of the console of the kernel.
  */
-export type KernelConsole = Pick<
-  Console,
-  | 'log'
-  | 'info'
-  | 'debug'
-  | 'error'
-  | 'warn'
-  | 'trace'
-  | 'dir'
-  | 'dirxml'
-  | 'table'
-  | 'group'
-  | 'groupCollapsed'
-  | 'groupEnd'
-  | 'time'
-  | 'timeLog'
-  | 'timeEnd'
-  | 'count'
-  | 'countReset'
-  | 'assert'
-  | 'clear'
->;
+export type KernelConsole = IKernelConsole;
 
 /**
  * Format the arguments of console.log like Node.js, with the printf-like
@@ -360,7 +364,7 @@ export function createConsole(host: IConsoleHost): KernelConsole {
     countReset(label: unknown = 'default') {
       counts.delete(String(label));
     },
-    assert(condition?: boolean, ...data: unknown[]) {
+    assert(condition?: unknown, ...data: unknown[]) {
       if (condition) {
         return;
       }

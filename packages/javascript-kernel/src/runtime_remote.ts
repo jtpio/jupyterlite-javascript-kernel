@@ -4,7 +4,8 @@
 import {
   JavaScriptRuntimeEvaluator,
   type JavaScriptExecutor,
-  type RuntimeOutputMessage
+  type RuntimeOutputMessage,
+  uuid
 } from '@jupyterlite/javascript-kernel-runtime';
 
 import type { IRemoteRuntimeApi } from './runtime_protocol';
@@ -27,7 +28,7 @@ function createInputRequester(
   return (prompt, password, parentHeader) => {
     const inputRequest = {
       header: {
-        msg_id: crypto.randomUUID(),
+        msg_id: uuid(),
         msg_type: 'input_request',
         session: parentHeader?.session ?? '',
         username: parentHeader?.username ?? '',

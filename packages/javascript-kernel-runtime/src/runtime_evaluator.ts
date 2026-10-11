@@ -11,6 +11,7 @@ import { CommManager } from './comm';
 import type { CommTargetHandler } from './comm';
 import { createConsole, type KernelConsole } from './console';
 import { createDisplay, type IDisplay } from './display';
+import { setPromiseStateResolver, type PromiseStateResolver } from './inspect';
 import { setDoc } from './introspection';
 import type { RuntimeOutputHandler } from './protocol';
 import { Widget, createWidgetClasses } from './widgets';
@@ -34,8 +35,15 @@ export class JavaScriptRuntimeEvaluator {
       options.executor ?? new JavaScriptExecutor(options.globalScope);
 
     this._requestInput = options.requestInput;
+    this._scheduler = options.scheduler ?? defaultScheduler(this._globalScope);
+    if (options.promiseState) {
+      setPromiseStateResolver(options.promiseState);
+      this._resetPromiseState = true;
+    }
 
-    this._commManager = new CommManager(options.onOutput);
+    this._commManager = new CommManager(options.onOutput, {
+      onTargetRegistered: options.onCommTargetRegistered
+    });
     this._display = createDisplay({
       publish: (data, metadata, transient, update) => {
         const bundle = { data, metadata, transient } as any;
@@ -48,7 +56,8 @@ export class JavaScriptRuntimeEvaluator {
       clear: wait => {
         this._onOutput({ type: 'clear_output', bundle: { wait } });
       },
-      mimeBundle: value => this._mimeBundle(value)
+      mimeBundle: value => this._mimeBundle(value),
+      readFile: options.readFile
     });
     this._console = createConsole({
       write: (name, text) => {
@@ -60,12 +69,14 @@ export class JavaScriptRuntimeEvaluator {
       clear: wait => {
         this._display.clear(wait);
       },
-      now: () => {
-        const performance = this._globalScope.performance;
-        return typeof performance?.now === 'function'
-          ? performance.now()
-          : Date.now();
-      }
+      now:
+        options.now ??
+        (() => {
+          const performance = this._globalScope.performance;
+          return typeof performance?.now === 'function'
+            ? performance.now()
+            : Date.now();
+        })
     });
     this._setupGlobals();
     this._setupConsole();
@@ -78,6 +89,10 @@ export class JavaScriptRuntimeEvaluator {
     this._restoreConsole();
     this._restoreGlobals();
     this._commManager.dispose();
+    if (this._resetPromiseState) {
+      setPromiseStateResolver(null);
+      this._resetPromiseState = false;
+    }
   }
 
   /**
@@ -85,6 +100,13 @@ export class JavaScriptRuntimeEvaluator {
    */
   get globalScope(): Record<string, any> {
     return this._globalScope;
+  }
+
+  /**
+   * The timers of the host, if any, for the work the runtime defers.
+   */
+  get scheduler(): JavaScriptRuntimeEvaluator.IScheduler | undefined {
+    return this._scheduler;
   }
 
   /**
@@ -423,6 +445,10 @@ export class JavaScriptRuntimeEvaluator {
       | Record<string, unknown>
       | undefined;
     if (!scopeConsole) {
+      // Engines without a console get the one of the kernel, removed by
+      // dispose() with the other globals
+      this._previousGlobals.set('console', undefined);
+      this._globalScope.console = { ...this._console };
       return;
     }
     for (const [name, method] of Object.entries(this._console)) {
@@ -466,6 +492,8 @@ export class JavaScriptRuntimeEvaluator {
   private _display: IDisplay;
   private _console: KernelConsole;
   private _requestInput?: JavaScriptRuntimeEvaluator.IOptions['requestInput'];
+  private _scheduler?: JavaScriptRuntimeEvaluator.IScheduler;
+  private _resetPromiseState = false;
   private _parentHeader?: Record<string, unknown>;
   private _previousGlobals = new Map<string, PropertyDescriptor | undefined>();
   private _originalConsole = new Map<string, unknown>();
@@ -480,8 +508,22 @@ export namespace JavaScriptRuntimeEvaluator {
    * The instantiation options for a runtime evaluator.
    */
   export interface IOptions {
+    /**
+     * The global object of the realm running the code of the cells.
+     */
     globalScope: Record<string, any>;
+
+    /**
+     * Called with the outputs of the runtime, synchronously and in order:
+     * during execute(), and later for the outputs of callbacks, timers and
+     * widget handlers.
+     */
     onOutput: RuntimeOutputHandler;
+
+    /**
+     * The executor compiling the cells, to customize it (for example to turn
+     * off the magic imports). Defaults to a JavaScriptExecutor of globalScope.
+     */
     executor?: JavaScriptExecutor;
 
     /**
@@ -494,5 +536,66 @@ export namespace JavaScriptRuntimeEvaluator {
       password: boolean,
       parentHeader?: Record<string, unknown>
     ) => string | null;
+
+    /**
+     * The current time in milliseconds, for console.time. Defaults to
+     * performance.now of globalScope, or else Date.now.
+     */
+    now?: () => number;
+
+    /**
+     * Read a file, for display.image(path). Without it, display.image is not
+     * available.
+     */
+    readFile?: (path: string) => Uint8Array;
+
+    /**
+     * Get the state of a promise, for engines which can tell it: the
+     * promises are then shown with their state. Reset by dispose().
+     */
+    promiseState?: PromiseStateResolver;
+
+    /**
+     * Called when a comm target is registered, for kernels that must
+     * register the targets on their side before the frontend can open comms.
+     */
+    onCommTargetRegistered?: (targetName: string) => void;
+
+    /**
+     * The timers of the host, for the work the runtime defers. Defaults to
+     * setTimeout and clearTimeout of globalScope, when they exist.
+     */
+    scheduler?: IScheduler;
   }
+
+  /**
+   * The timers of a host.
+   */
+  export interface IScheduler {
+    /**
+     * Call a function after a delay in milliseconds, and return a handle.
+     */
+    setTimeout(callback: () => void, ms: number): unknown;
+
+    /**
+     * Cancel a call scheduled with setTimeout.
+     */
+    clearTimeout(handle: unknown): void;
+  }
+}
+
+/**
+ * The timers of a global scope, when it has setTimeout and clearTimeout.
+ */
+function defaultScheduler(
+  scope: Record<string, any>
+): JavaScriptRuntimeEvaluator.IScheduler | undefined {
+  const { setTimeout, clearTimeout } = scope;
+  if (typeof setTimeout !== 'function' || typeof clearTimeout !== 'function') {
+    return undefined;
+  }
+  return {
+    setTimeout: (callback, ms) => setTimeout.call(scope, callback, ms),
+    clearTimeout: handle => clearTimeout.call(scope, handle)
+  };
 }
