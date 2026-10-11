@@ -40,6 +40,7 @@
   },
   "dependencies": {
     "@jupyterlab/application": "^4.6.0",
+    "@jupyterlite/apputils": "^0.8.0",
     "@jupyterlite/javascript-kernel": "^0.4.0-alpha.5",
     "@jupyterlite/services": "^0.8.0",
     "@lumino/disposable": "^2.1.5",
@@ -58,6 +59,10 @@
     "extension": true,
     "outputDir": "../../jupyterlite_javascript_kernel/labextension",
     "sharedPackages": {
+      "@jupyterlite/apputils": {
+        "bundled": false,
+        "singleton": true
+      },
       "@jupyterlite/javascript-kernel": {
         "singleton": true
       },

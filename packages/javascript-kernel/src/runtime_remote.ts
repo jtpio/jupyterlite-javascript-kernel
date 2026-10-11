@@ -10,6 +10,53 @@ import {
 import type { IRemoteRuntimeApi } from './runtime_protocol';
 
 /**
+ * Ask the user for some input with an input_request message, sent to the
+ * page through the service worker of JupyterLite. The synchronous request
+ * blocks until the user replies, so it can only be used in a Web Worker: in
+ * an iframe, it would block the page showing the input box.
+ */
+function createInputRequester(
+  baseUrl: string,
+  browsingContextId: string
+): (
+  prompt: string,
+  password: boolean,
+  parentHeader?: Record<string, unknown>
+) => string | null {
+  const url = `${baseUrl.replace(/\/$/, '')}/api/stdin/kernel`;
+  return (prompt, password, parentHeader) => {
+    const inputRequest = {
+      header: {
+        msg_id: crypto.randomUUID(),
+        msg_type: 'input_request',
+        session: parentHeader?.session ?? '',
+        username: parentHeader?.username ?? '',
+        date: new Date().toISOString(),
+        version: '5.3'
+      },
+      parent_header: parentHeader ?? {},
+      metadata: {},
+      content: { prompt, password },
+      channel: 'stdin',
+      buffers: []
+    };
+    try {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', url, false);
+      xhr.send(JSON.stringify({ browsingContextId, data: inputRequest }));
+      const reply = JSON.parse(xhr.responseText);
+      if (!reply || 'error' in reply) {
+        return null;
+      }
+      return reply.content?.value ?? null;
+    } catch (error) {
+      console.warn(`Failed to request user input: ${error}`);
+      return null;
+    }
+  };
+}
+
+/**
  * Create a Comlink runtime API bound to the provided global scope.
  */
 export function createRemoteRuntimeApi(
@@ -25,13 +72,31 @@ export function createRemoteRuntimeApi(
     return evaluator;
   };
 
+  // The outputs not yet handled by the kernel. They go through the port of
+  // the output callback, and the replies through another port, so a reply
+  // could arrive before the outputs of its cell, which would be lost.
+  const pendingOutputs = new Set<Promise<unknown>>();
+
   const emitOutput = (
     callback: Parameters<IRemoteRuntimeApi['initialize']>[1],
     message: RuntimeOutputMessage
   ): void => {
-    void Promise.resolve(callback(makeCloneSafe(message))).catch(() => {
-      // Ignore output callback failures so execution replies can still resolve.
-    });
+    const delivered = Promise.resolve(callback(makeCloneSafe(message))).catch(
+      () => {
+        // Ignore output callback failures so execution replies can still resolve.
+      }
+    );
+    pendingOutputs.add(delivered);
+    void delivered.then(() => pendingOutputs.delete(delivered));
+  };
+
+  /**
+   * Wait until the kernel handled all the outputs sent so far.
+   */
+  const flushOutputs = async (): Promise<void> => {
+    while (pendingOutputs.size > 0) {
+      await Promise.all([...pendingOutputs]);
+    }
   };
 
   return {
@@ -48,16 +113,27 @@ export function createRemoteRuntimeApi(
         executor,
         onOutput: message => {
           emitOutput(onOutput, message);
-        }
+        },
+        requestInput: options.browsingContextId
+          ? createInputRequester(options.baseUrl, options.browsingContextId)
+          : undefined
       });
     },
 
     async execute(
       code: string,
       executionCount: number,
-      parentMessageId?: string
+      parentMessageId?: string,
+      parentHeader?: Parameters<IRemoteRuntimeApi['execute']>[3]
     ) {
-      return ensureEvaluator().execute(code, executionCount, parentMessageId);
+      const reply = await ensureEvaluator().execute(
+        code,
+        executionCount,
+        parentMessageId,
+        parentHeader as Record<string, unknown> | undefined
+      );
+      await flushOutputs();
+      return reply;
     },
 
     async preloadModule(moduleName: string): Promise<void> {

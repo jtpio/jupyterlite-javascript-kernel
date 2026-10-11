@@ -2,6 +2,7 @@
 // Distributed under the terms of the Modified BSD License.
 
 import type { CommManager, IComm } from '../comm';
+import { toBytes } from '../utils';
 
 import {
   CONTROLS_MODULE,
@@ -67,10 +68,16 @@ export class Widget {
     this._listeners = new Map();
     this._observerWrappers = new Map();
 
+    const {
+      state: serialized,
+      buffers,
+      bufferPaths
+    } = this._serializeStateWithBuffers(this._state);
     this._comm = manager.open(
       'jupyter.widget',
-      { state: this._serializeState(this._state), buffer_paths: [] },
-      { version: WIDGET_PROTOCOL_VERSION }
+      { state: serialized, buffer_paths: bufferPaths },
+      { version: WIDGET_PROTOCOL_VERSION },
+      buffers
     );
 
     this._comm.onMsg = (data, buffers) => {
@@ -116,11 +123,7 @@ export class Widget {
     }
 
     if (changes.length > 0) {
-      this._comm.send({
-        method: 'update',
-        state: this._serializeState(updates),
-        buffer_paths: []
-      });
+      this._sendState(updates);
       for (const [key, val, old] of changes) {
         this._trigger(`change:${key}`, val, old);
       }
@@ -223,7 +226,14 @@ export class Widget {
     buffers?: ArrayBuffer[]
   ): void {
     if (data.method === 'update' && data.state) {
-      const state = data.state as Record<string, unknown>;
+      const state = { ...(data.state as Record<string, unknown>) };
+      // Binary values are sent as buffers, with their path in the state
+      const bufferPaths = (data.buffer_paths as string[][] | undefined) ?? [];
+      bufferPaths.forEach((path, i) => {
+        if (path.length === 1 && buffers?.[i]) {
+          state[path[0]] = new Uint8Array(buffers[i]);
+        }
+      });
       const changes: Array<[string, unknown, unknown]> = [];
       for (const [key, val] of Object.entries(state)) {
         const next = this._deserializeProperty(key, val);
@@ -242,12 +252,49 @@ export class Widget {
     }
 
     if (data.method === 'request_state') {
-      this._comm.send({
-        method: 'update',
-        state: this._serializeState(this._state),
-        buffer_paths: []
-      });
+      this._sendState(this._state);
     }
+  }
+
+  /**
+   * Send some state to the frontend.
+   */
+  protected _sendState(state: Record<string, unknown>): void {
+    const {
+      state: serialized,
+      buffers,
+      bufferPaths
+    } = this._serializeStateWithBuffers(state);
+    this._comm.send(
+      { method: 'update', state: serialized, buffer_paths: bufferPaths },
+      undefined,
+      buffers
+    );
+  }
+
+  /**
+   * Serialize some state, with the binary values (ArrayBuffer, typed arrays)
+   * in buffers, and their paths in the state.
+   */
+  protected _serializeStateWithBuffers(state: Record<string, unknown>): {
+    state: Record<string, unknown>;
+    buffers: ArrayBuffer[];
+    bufferPaths: string[][];
+  } {
+    const serialized: Record<string, unknown> = {};
+    const buffers: ArrayBuffer[] = [];
+    const bufferPaths: string[][] = [];
+    for (const [key, value] of Object.entries(state)) {
+      const bytes = toBytes(value);
+      if (bytes !== null) {
+        buffers.push(bytes.slice().buffer);
+        bufferPaths.push([key]);
+        serialized[key] = null;
+      } else {
+        serialized[key] = this._serializeProperty(key, value);
+      }
+    }
+    return { state: serialized, buffers, bufferPaths };
   }
 
   protected _serializeState(

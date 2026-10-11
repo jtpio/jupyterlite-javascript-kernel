@@ -62,6 +62,16 @@ test.describe('Examples', () => {
     await expect(outputs.getByText('3628800', { exact: true })).toBeVisible();
     await expect(outputs.getByText("'Hello, World!'")).toBeVisible();
     await expect(outputs.getByText('Done after 1 second!')).toBeVisible();
+    // The console
+    await expect(
+      outputs.getByText('Ada Lovelace was born in 1815')
+    ).toBeVisible();
+    await expect(
+      outputs.getByRole('table').getByRole('row', { name: '0 JavaScript 1995' })
+    ).toBeVisible();
+    await expect(outputs.getByText(/loop: \d+\.\d{3}ms/)).toBeVisible();
+    // The documented function
+    await expect(outputs.getByText('12.566370614359172')).toBeVisible();
     // The last cell shows an error on purpose
     expect(await getErrors(page)).toEqual(['Error: Something went wrong!']);
   });
@@ -96,6 +106,13 @@ test.describe('Examples', () => {
     ).not.toHaveCount(0);
     await expect(outputs.getByText('9007199254740993n')).toBeVisible();
     await expect(outputs.getByText('Symbol(my-symbol)')).toBeVisible();
+    await expect(outputs.getByText('31 °C')).toBeVisible();
+    // The display helpers
+    await expect(outputs.getByRole('link', { name: 'link' })).toBeVisible();
+    await expect(outputs.locator('mjx-container').first()).toBeVisible();
+    await expect(outputs.getByText('Done!', { exact: true })).toBeVisible();
+    await expect(outputs.getByText('Lift off!', { exact: true })).toBeVisible();
+    await expect(outputs.getByText(/^Countdown/)).toHaveCount(0);
     // The errors are shown as values, not raised
     expect(await getErrors(page)).toEqual([]);
   });
@@ -121,6 +138,7 @@ test.describe('Examples', () => {
     ).toBeVisible();
     await expect(outputs.getByRole('tab', { name: 'Slider' })).toBeVisible();
     await expect(outputs.getByText('Comm ID:')).toBeVisible();
+    await expect(outputs.getByRole('img')).toHaveAttribute('width', '240');
     expect(await getErrors(page)).toEqual([]);
   });
 });

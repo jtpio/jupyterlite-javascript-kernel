@@ -136,9 +136,12 @@ export class CommManager {
   ): void {
     const handler = this._targets.get(targetName);
     if (!handler) {
-      console.warn(
-        `[javascript-kernel] No handler registered for comm target "${targetName}"`
-      );
+      // Close the comm like ipykernel, so that the frontend can fall back
+      // (the console would print in the outputs of the running cell)
+      this._onOutput({
+        type: 'comm_close',
+        content: { comm_id: commId, data: {} }
+      });
       return;
     }
     const comm = this._createComm(commId, targetName);
@@ -181,18 +184,32 @@ export class CommManager {
     this._onOutput({
       type: 'display_data',
       bundle: {
-        data: {
-          'text/plain': 'Widget',
-          'application/vnd.jupyter.widget-view+json': {
-            version_major: 2,
-            version_minor: 0,
-            model_id: commId
-          }
-        },
+        data: this.widgetMimeBundle(commId),
         metadata: {},
         transient: {}
       }
     });
+  }
+
+  /**
+   * The MIME bundle showing the view of a widget.
+   */
+  widgetMimeBundle(commId: string): {
+    'text/plain': string;
+    'application/vnd.jupyter.widget-view+json': {
+      version_major: number;
+      version_minor: number;
+      model_id: string;
+    };
+  } {
+    return {
+      'text/plain': 'Widget',
+      'application/vnd.jupyter.widget-view+json': {
+        version_major: 2,
+        version_minor: 0,
+        model_id: commId
+      }
+    };
   }
 
   /**

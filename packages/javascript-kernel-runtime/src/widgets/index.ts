@@ -13,6 +13,7 @@ export * from './widget_string';
 export * from './widget_output';
 export * from './widget_button';
 export * from './widget_color';
+export * from './widget_image';
 export * from './widget_box';
 export * from './widget_selectioncontainer';
 export * from './widget_link';
@@ -73,6 +74,7 @@ import {
 import { Output } from './widget_output';
 import { Button } from './widget_button';
 import { ColorPicker } from './widget_color';
+import { Image } from './widget_image';
 import { Box, GridBox, HBox, VBox } from './widget_box';
 import { Accordion, Stack, Tab } from './widget_selectioncontainer';
 import { DirectionalLink, Link } from './widget_link';
@@ -128,6 +130,7 @@ export const widgetClasses: Record<string, typeof Widget> = {
   Output,
   Button,
   ColorPicker,
+  Image,
   Box,
   HBox,
   VBox,

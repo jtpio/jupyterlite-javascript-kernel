@@ -3,12 +3,23 @@
 
 import type { KernelMessage } from '@jupyterlab/services';
 
-import { parse } from 'acorn';
+import { parse, type Comment } from 'acorn';
 import { generate } from 'astring';
 
 import type { IMimeBundle } from '@jupyterlab/nbformat';
 
-export { IDisplayData, IDisplayCallbacks, DisplayHelper } from './display';
+import { normalizeBundle } from './display';
+import {
+  inspect,
+  isDate,
+  isError,
+  isMap,
+  isModuleNamespace,
+  isRegExp,
+  isSet
+} from './inspect';
+import { Introspection, type IDeclarationDoc } from './introspection';
+import { escapeHtml, safe } from './utils';
 
 /** Matches the word "eval" in a stack frame (user eval code). */
 const RE_EVAL = /\beval\b/;
@@ -17,9 +28,31 @@ const RE_EVAL = /\beval\b/;
  * Parse the code of a cell. Cells are parsed as modules, so that they can
  * use import declarations and top-level await.
  */
-function parseCode(code: string): any {
-  return parse(code, { ecmaVersion: 'latest', sourceType: 'module' });
+function parseCode(code: string, comments?: Comment[]): any {
+  return parse(code, {
+    ecmaVersion: 'latest',
+    sourceType: 'module',
+    onComment: comments
+  });
 }
+
+/**
+ * The symbol of the method returning the MIME bundle of an object.
+ */
+const JUPYTER_DISPLAY = Symbol.for('Jupyter.display');
+
+/**
+ * The methods returning a representation of an object, with its MIME type.
+ */
+const REPR_METHODS: [string, string][] = [
+  ['_toHtml', 'text/html'],
+  ['_toMarkdown', 'text/markdown'],
+  ['_toSvg', 'image/svg+xml'],
+  ['_toPng', 'image/png'],
+  ['_toJpeg', 'image/jpeg'],
+  ['_toLatex', 'text/latex'],
+  ['_toJson', 'application/json']
+];
 
 /**
  * Configuration for magic imports.
@@ -36,6 +69,10 @@ export interface IMagicImportsConfig {
 export interface IAsyncCodeResult {
   asyncFunction: () => Promise<any>;
   withReturn: boolean;
+  /**
+   * The documentation of the top-level declarations, from their JSDoc.
+   */
+  docs: IDeclarationDoc[];
 }
 
 /**
@@ -63,6 +100,7 @@ export interface ICompletionResult {
   matches: string[];
   cursorStart: number;
   cursorEnd?: number;
+  metadata?: Record<string, unknown>;
   status?: string;
 }
 
@@ -143,11 +181,13 @@ export class JavaScriptExecutor {
     if (code.length === 0) {
       return {
         asyncFunction: async () => {},
-        withReturn: false
+        withReturn: false,
+        docs: []
       };
     }
 
-    const ast = parseCode(code);
+    const comments: Comment[] = [];
+    const ast = parseCode(code, comments);
 
     // Handle last statement / add return if needed
     const { withReturn, modifiedUserCode, extraReturnCode } =
@@ -177,7 +217,8 @@ export class JavaScriptExecutor {
 
     return {
       asyncFunction,
-      withReturn
+      withReturn,
+      docs: this._declarationDocs(code, ast, comments)
     };
   }
 
@@ -480,36 +521,36 @@ export class JavaScriptExecutor {
   }
 
   /**
-   * Get MIME bundle for a value.
-   * Supports custom output methods:
-   * - _toHtml() for text/html
-   * - _toSvg() for image/svg+xml
-   * - _toPng() for image/png (base64)
-   * - _toJpeg() for image/jpeg (base64)
-   * - _toMime() for custom MIME bundle
-   * - inspect() for text/plain (Node.js style)
+   * Get the MIME bundle of a value.
+   *
+   * Objects can define their representations with:
+   * - a [Symbol.for('Jupyter.display')]() method returning a MIME bundle
+   * - a _toMime() method returning a MIME bundle
+   * - _toHtml(), _toMarkdown(), _toSvg(), _toPng(), _toJpeg(), _toLatex()
+   *   or _toJson() methods
+   *
+   * The plain text representation is formatted like util.inspect in Node.js,
+   * and the data with a JSON representation is also shown as a tree.
    *
    * @param value - The value to convert to a MIME bundle.
    * @returns The MIME bundle representation of the value.
    */
   getMimeBundle(value: any): IMimeBundle {
-    // Handle null and undefined
-    if (value === null) {
-      return { 'text/plain': 'null' };
-    }
-    if (value === undefined) {
-      return { 'text/plain': 'undefined' };
-    }
+    const text = () => inspect(value, { colors: true });
 
-    // Check for custom MIME output methods
-    if (typeof value === 'object' && value !== null) {
-      const customMime = this._getCustomMimeBundle(value);
-      if (customMime) {
-        return customMime;
+    if (
+      value !== null &&
+      (typeof value === 'object' || typeof value === 'function')
+    ) {
+      const custom = this._getCustomMimeBundle(value);
+      if (custom) {
+        if (!('text/plain' in custom)) {
+          custom['text/plain'] = text();
+        }
+        return custom;
       }
     }
 
-    // Handle primitives
     if (typeof value === 'string') {
       // Check if it looks like HTML (must start with a valid tag: <div>, <p class="...">,
       // <!DOCTYPE>, <!-- -->, <br/>, etc.). Rejects non-HTML like "<a, b>".
@@ -523,85 +564,19 @@ export class JavaScriptExecutor {
           'text/plain': value
         };
       }
-      return { 'text/plain': `'${value}'` };
-    }
-    if (typeof value === 'number' || typeof value === 'boolean') {
-      return { 'text/plain': String(value) };
+      return { 'text/plain': text() };
     }
 
-    // Handle Symbol
-    if (typeof value === 'symbol') {
-      return { 'text/plain': value.toString() };
-    }
-
-    // Handle BigInt
-    if (typeof value === 'bigint') {
-      return { 'text/plain': `${value.toString()}n` };
-    }
-
-    // Handle functions
     if (typeof value === 'function') {
-      const funcString = value.toString();
-      const name = value.name || 'anonymous';
+      const source = safe(() => Function.prototype.toString.call(value), '');
       return {
-        'text/plain': `[Function: ${name}]`,
-        'text/html': `<pre style="margin:0"><code>${this._escapeHtml(funcString)}</code></pre>`
+        'text/plain': text(),
+        'text/html': `<pre style="margin:0"><code>${escapeHtml(source)}</code></pre>`
       };
     }
 
-    // Handle Error objects
-    if (this._isInstanceOfRealm(value, 'Error')) {
-      const errorValue = value as Error;
-      return {
-        'text/plain': errorValue.stack || errorValue.toString(),
-        'application/json': {
-          name: errorValue.name,
-          message: errorValue.message,
-          stack: errorValue.stack
-        }
-      };
-    }
-
-    // Handle Date objects
-    if (this._isInstanceOfRealm(value, 'Date')) {
-      const dateValue = value as Date;
-      return {
-        'text/plain': dateValue.toISOString(),
-        'application/json': dateValue.toISOString()
-      };
-    }
-
-    // Handle RegExp objects
-    if (this._isInstanceOfRealm(value, 'RegExp')) {
-      return { 'text/plain': (value as RegExp).toString() };
-    }
-
-    // Handle Map
-    if (this._isInstanceOfRealm(value, 'Map')) {
-      const mapValue = value as Map<any, any>;
-      const entries = Array.from(mapValue.entries());
-      try {
-        return {
-          'text/plain': `Map(${mapValue.size}) { ${entries.map(([k, v]) => `${String(k)} => ${String(v)}`).join(', ')} }`,
-          'application/json': Object.fromEntries(entries)
-        };
-      } catch {
-        return { 'text/plain': `Map(${mapValue.size})` };
-      }
-    }
-
-    // Handle Set
-    if (this._isInstanceOfRealm(value, 'Set')) {
-      const setValue = value as Set<any>;
-      const items = Array.from(setValue);
-      try {
-        return {
-          'text/plain': `Set(${setValue.size}) { ${items.map(v => String(v)).join(', ')} }`,
-          'application/json': items
-        };
-      } catch {
-        return { 'text/plain': `Set(${setValue.size})` };
-      }
+    if (value === null || typeof value !== 'object') {
+      return { 'text/plain': text() };
     }
 
     // Handle DOM elements (Canvas, HTMLElement, etc.)
@@ -609,170 +584,47 @@ export class JavaScriptExecutor {
       return this._getDOMElementMimeBundle(value);
     }
 
-    // Handle arrays
-    if (Array.isArray(value)) {
-      try {
-        const preview = this._formatArrayPreview(value);
-        return {
-          'application/json': value,
-          'text/plain': preview
-        };
-      } catch {
-        return { 'text/plain': `Array(${value.length})` };
+    // Objects which are already a MIME bundle, with MIME types in their data
+    if (value.data && typeof value.data === 'object') {
+      const dataKeys = Object.keys(value.data);
+      if (dataKeys.some(key => key.includes('/'))) {
+        return value.data;
       }
     }
 
-    // Handle typed arrays
-    if (ArrayBuffer.isView(value)) {
-      const typedArray = value as unknown as { length: number };
-      return {
-        'text/plain': `${value.constructor.name}(${typedArray.length})`
-      };
+    // Data with a JSON representation is also shown as an interactive tree
+    const json = this._toJson(value);
+    if (json !== undefined) {
+      return { 'application/json': json, 'text/plain': text() };
     }
-
-    // Handle Promise (show as pending)
-    if (this._isInstanceOfRealm(value, 'Promise')) {
-      return { 'text/plain': 'Promise { <pending> }' };
-    }
-
-    // Handle generic objects
-    if (typeof value === 'object') {
-      // Check if it's already a mime bundle (has data with MIME-type keys)
-      if (value.data && typeof value.data === 'object') {
-        const dataKeys = Object.keys(value.data);
-        const hasMimeKeys = dataKeys.some(key => key.includes('/'));
-        if (hasMimeKeys) {
-          return value.data;
-        }
-      }
-
-      try {
-        const preview = this._formatObjectPreview(value);
-        return {
-          'application/json': value,
-          'text/plain': preview
-        };
-      } catch {
-        // Object might have circular references or be non-serializable
-        return { 'text/plain': this._formatNonSerializableObject(value) };
-      }
-    }
-
-    // Fallback
-    return { 'text/plain': String(value) };
+    return { 'text/plain': text() };
   }
 
   /**
-   * Complete code at cursor position.
+   * Complete a line of code, at its end.
    *
    * @param codeLine - The line of code to complete.
-   * @param globalScope - The global scope for variable lookup.
    * @returns The completion result with matches and cursor position.
    */
-  completeLine(
-    codeLine: string,
-    globalScope: any = this._globalScope
-  ): ICompletionResult {
-    // Remove unwanted left part
-    const stopChars = ' {}()=+-*/%&|^~<>,:;!?@#';
-    let codeBegin = 0;
-    for (let i = codeLine.length - 1; i >= 0; i--) {
-      if (stopChars.includes(codeLine[i])) {
-        codeBegin = i + 1;
-        break;
-      }
-    }
-
-    const pseudoExpression = codeLine.substring(codeBegin);
-
-    // Find part right of dot/bracket
-    const expStopChars = '.]';
-    let splitPos = pseudoExpression.length;
-    let found = false;
-
-    for (let i = splitPos - 1; i >= 0; i--) {
-      if (expStopChars.includes(pseudoExpression[i])) {
-        splitPos = i;
-        found = true;
-        break;
-      }
-    }
-
-    let rootObjectStr = '';
-    let toMatch = pseudoExpression;
-    let cursorStart = codeBegin;
-
-    if (found) {
-      rootObjectStr = pseudoExpression.substring(0, splitPos);
-      toMatch = pseudoExpression.substring(splitPos + 1);
-      cursorStart += splitPos + 1;
-    }
-
-    // Find root object
-    let rootObject = globalScope;
-    if (rootObjectStr !== '') {
-      try {
-        const evalFunc = this._createScopedFunction(
-          'scope',
-          `with(scope) { return ${rootObjectStr}; }`
-        ) as (scope: any) => any;
-        rootObject = evalFunc(globalScope);
-      } catch {
-        return {
-          matches: [],
-          cursorStart,
-          status: 'error'
-        };
-      }
-    }
-
-    // Collect all properties including from prototype chain
-    const matches = this._getAllProperties(rootObject, toMatch);
-
-    return {
-      matches,
-      cursorStart
-    };
+  completeLine(codeLine: string): ICompletionResult {
+    return this.completeRequest(codeLine, codeLine.length);
   }
 
   /**
-   * Complete request with multi-line support.
+   * Complete the code at the cursor position.
    *
    * @param code - The full code content.
-   * @param cursorPos - The cursor position in the code.
+   * @param cursorPos - The cursor position in the code, in code points.
    * @returns The completion result with matches and cursor positions.
    */
   completeRequest(code: string, cursorPos: number): ICompletionResult {
-    const lines = code.split('\n');
-
-    // Find line the cursor is on
-    let lineIndex = 0;
-    let cursorPosInLine = 0;
-    let lineBegin = 0;
-
-    for (let i = 0; i < lines.length; i++) {
-      if (cursorPos >= lineBegin && cursorPos <= lineBegin + lines[i].length) {
-        lineIndex = i;
-        cursorPosInLine = cursorPos - lineBegin;
-        break;
-      }
-      lineBegin += lines[i].length + 1; // +1 for \n
-    }
-
-    const codeLine = lines[lineIndex];
-
-    const codePrefix = codeLine.slice(0, cursorPosInLine);
-    const lineRes = this.completeLine(codePrefix);
-    const matches = lineRes.matches;
-    const inLineCursorStart = lineRes.cursorStart;
-    const tail = codeLine.slice(cursorPosInLine);
-    const cursorTail = tail.match(/^[\w$]*/)?.[0] ?? '';
-
+    const reply = this.introspection.complete(code, cursorPos);
     return {
-      matches,
-      cursorStart: lineBegin + inLineCursorStart,
-      cursorEnd: cursorPos + cursorTail.length,
-      status: lineRes.status || 'ok'
+      matches: reply.matches,
+      cursorStart: reply.cursor_start,
+      cursorEnd: reply.cursor_end,
+      metadata: reply.metadata,
+      status: 'ok'
     };
   }
 
@@ -862,119 +714,44 @@ export class JavaScriptExecutor {
   }
 
   /**
-   * Inspect an object at the cursor position.
-   * Returns documentation/type information for tooltips.
+   * Inspect the expression at the cursor position, for the contextual help
+   * and the tooltips.
    *
    * @param code - The code containing the expression to inspect.
-   * @param cursorPos - The cursor position in the code.
+   * @param cursorPos - The cursor position in the code, in code points.
    * @param detailLevel - The level of detail (0 for basic, higher for more).
-   * @returns The inspection result with documentation data.
+   * @returns The inspection result.
    */
   inspect(
     code: string,
     cursorPos: number,
     detailLevel: KernelMessage.IInspectRequestMsg['content']['detail_level'] = 0
   ): IInspectResult {
-    // Extract the word/expression at cursor position
-    const expression = this._extractExpressionAtCursor(code, cursorPos);
-
-    if (!expression) {
-      return {
-        status: 'ok',
-        found: false,
-        data: {},
-        metadata: {}
-      };
-    }
-
-    try {
-      // Try to evaluate the expression in the global scope
-      const evalFunc = this._createScopedFunction(
-        'scope',
-        `with(scope) { return ${expression}; }`
-      ) as (scope: any) => any;
-      const value = evalFunc(this._globalScope);
-
-      // Build inspection data
-      const inspectionData = this._buildInspectionData(
-        expression,
-        value,
-        detailLevel
-      );
-
-      // Add predefined documentation if available
-      const doc = this.getBuiltinDocumentation(expression);
-      if (doc) {
-        const mdContent = inspectionData['text/markdown'] || '';
-        inspectionData['text/markdown'] = mdContent + `\n\n---\n\n${doc}`;
-        const plainContent = inspectionData['text/plain'] || '';
-        inspectionData['text/plain'] = plainContent + `\n\nDoc: ${doc}`;
-      }
-
-      return {
-        status: 'ok',
-        found: true,
-        data: inspectionData,
-        metadata: {}
-      };
-    } catch {
-      // Try to provide info even if we can't evaluate
-      return this.inspectBuiltin(expression, detailLevel);
-    }
+    const reply = this.introspection.inspect(code, cursorPos, detailLevel);
+    return {
+      status: 'ok',
+      found: reply.found,
+      data: reply.data,
+      metadata: reply.metadata
+    };
   }
 
   /**
-   * Provide inspection info for built-in objects.
-   * First tries runtime lookup, then falls back to predefined docs.
-   *
-   * @param expression - The expression to look up.
-   * @param detailLevel - The level of detail requested.
-   * @returns The inspection result.
+   * The code completion and inspection of the global scope.
    */
-  protected inspectBuiltin(
-    expression: string,
-    detailLevel: number
-  ): IInspectResult {
-    // First, try to find the expression in the global scope at runtime
-    const runtimeResult = this._inspectAtRuntime(expression, detailLevel);
-    if (runtimeResult.found) {
-      return runtimeResult;
+  get introspection(): Introspection {
+    if (!this._introspection) {
+      this._introspection = new Introspection({
+        globalScope: this._globalScope,
+        evaluate: expression =>
+          this._createScopedFunction(`return (${expression});`).call(
+            this._globalScope
+          ),
+        builtinDocumentation: expression =>
+          this.getBuiltinDocumentation(expression)
+      });
     }
-
-    // Fall back to predefined documentation
-    const doc = this.getBuiltinDocumentation(expression);
-    if (doc) {
-      return {
-        status: 'ok',
-        found: true,
-        data: {
-          'text/plain': `${expression}: ${doc}`,
-          'text/markdown': `**${expression}**\n\n${doc}`
-        },
-        metadata: {}
-      };
-    }
-
-    // Try to find similar names in global scope for suggestions
-    const suggestions = this._findSimilarNames(expression);
-    if (suggestions.length > 0) {
-      return {
-        status: 'ok',
-        found: true,
-        data: {
-          'text/plain': `'${expression}' not found. Did you mean: ${suggestions.join(', ')}?`,
-          'text/markdown': `\`${expression}\` not found.\n\n**Did you mean:**\n${suggestions.map(s => `- \`${s}\``).join('\n')}`
-        },
-        metadata: {}
-      };
-    }
-
-    return {
-      status: 'ok',
-      found: false,
-      data: {},
-      metadata: {}
-    };
+    return this._introspection;
   }
 
   /**
@@ -1448,79 +1225,96 @@ export class JavaScriptExecutor {
   }
 
   /**
-   * Escape HTML special characters.
+   * The JSON representation of a value, shown as an interactive tree, or
+   * undefined for values without one.
    */
-  private _escapeHtml(text: string): string {
-    const htmlEscapes: Record<string, string> = {
-      '&': '&amp;',
-      '<': '&lt;',
-      '>': '&gt;',
-      '"': '&quot;',
-      "'": '&#39;'
-    };
-    return text.replace(/[&<>"']/g, char => htmlEscapes[char]);
+  private _toJson(value: any): any {
+    // Copy the data, so that it can be sent whatever its realm
+    const copy = (data: unknown) =>
+      safe(() => JSON.parse(JSON.stringify(data)), undefined);
+
+    if (isError(value)) {
+      return {
+        name: safe(() => String(value.name), 'Error'),
+        message: safe(() => String(value.message), ''),
+        stack: safe(() => String(value.stack), '')
+      };
+    }
+    if (isDate(value)) {
+      const time = Date.prototype.getTime.call(value);
+      return Number.isNaN(time)
+        ? undefined
+        : Date.prototype.toISOString.call(value);
+    }
+    if (isMap(value)) {
+      return copy(Object.fromEntries(Map.prototype.entries.call(value)));
+    }
+    if (isSet(value)) {
+      return copy(Array.from(Set.prototype.values.call(value)));
+    }
+    if (
+      isRegExp(value) ||
+      ArrayBuffer.isView(value) ||
+      isModuleNamespace(value) ||
+      safe(
+        () =>
+          [
+            '[object Promise]',
+            '[object WeakMap]',
+            '[object WeakSet]',
+            '[object ArrayBuffer]'
+          ].includes(Object.prototype.toString.call(value)),
+        false
+      )
+    ) {
+      return undefined;
+    }
+    return copy(value);
   }
 
   /**
-   * Get custom MIME bundle from object methods.
-   * Checks for _toHtml, _toSvg, _toPng, _toJpeg, _toMime, inspect.
+   * Get the MIME bundle of the custom representations of an object, or null
+   * if it has none.
    */
   private _getCustomMimeBundle(value: any): IMimeBundle | null {
-    // Check for _toMime() first - returns a full MIME bundle directly.
-    if (typeof value._toMime === 'function') {
-      try {
-        const mimeResult = value._toMime();
-        if (mimeResult && typeof mimeResult === 'object') {
-          return mimeResult;
-        }
-      } catch {
-        // Ignore errors in custom methods
-      }
+    const data: IMimeBundle = {};
+    const add = (bundle: unknown) => {
+      Object.assign(
+        data,
+        safe(() => normalizeBundle(bundle), {})
+      );
+    };
+
+    const jupyterDisplay = safe(() => value[JUPYTER_DISPLAY]);
+    if (typeof jupyterDisplay === 'function') {
+      add(safe(() => jupyterDisplay.call(value)));
     }
-
-    // Try each custom output method. Each returns a string for its MIME type.
-    const customMimeMethods: [string, string][] = [
-      ['_toHtml', 'text/html'],
-      ['_toSvg', 'image/svg+xml'],
-      ['_toPng', 'image/png'],
-      ['_toJpeg', 'image/jpeg'],
-      ['_toMarkdown', 'text/markdown'],
-      ['_toLatex', 'text/latex']
-    ];
-
-    const bundle: IMimeBundle = {};
-    let hasCustomOutput = false;
-
-    for (const [method, mimeType] of customMimeMethods) {
-      if (typeof value[method] === 'function') {
-        try {
-          const result = value[method]();
-          if (typeof result === 'string') {
-            bundle[mimeType] = result;
-            hasCustomOutput = true;
-          }
-        } catch {
-          // Ignore errors in custom methods
+    if (typeof safe(() => value._toMime) === 'function') {
+      add(safe(() => value._toMime()));
+    }
+    for (const [method, mimeType] of REPR_METHODS) {
+      if (
+        !(mimeType in data) &&
+        typeof safe(() => value[method]) === 'function'
+      ) {
+        const result = safe(() => value[method]());
+        if (result !== undefined && result !== null) {
+          add({ [mimeType]: result });
         }
       }
     }
-
-    if (!hasCustomOutput) {
+    if (Object.keys(data).length === 0) {
       return null;
     }
 
-    // Add text/plain representation using inspect() if available.
-    if (typeof value.inspect === 'function') {
-      try {
-        bundle['text/plain'] = value.inspect();
-      } catch {
-        bundle['text/plain'] = String(value);
+    // A custom plain text, from an inspect() method
+    if (!('text/plain' in data) && typeof value.inspect === 'function') {
+      const text = safe(() => value.inspect());
+      if (typeof text === 'string') {
+        data['text/plain'] = text;
       }
-    } else {
-      bundle['text/plain'] = String(value);
     }
-
-    return bundle;
+    return data;
   }
 
   /**
@@ -1609,427 +1403,72 @@ export class JavaScriptExecutor {
   }
 
   /**
-   * Format array preview with truncation.
+   * The documentation of the top-level declarations of a cell, from the
+   * JSDoc comments just before them.
    */
-  private _formatArrayPreview(arr: any[], maxItems: number = 10): string {
-    if (arr.length === 0) {
-      return '[]';
-    }
-    const items = arr.slice(0, maxItems).map(item => {
-      if (item === null) {
-        return 'null';
-      }
-      if (item === undefined) {
-        return 'undefined';
-      }
-      if (typeof item === 'string') {
-        return `'${item}'`;
-      }
-      if (typeof item === 'object') {
-        if (Array.isArray(item)) {
-          return `Array(${item.length})`;
-        }
-        return '{...}';
-      }
-      return String(item);
-    });
-    const suffix = arr.length > maxItems ? `, ... (${arr.length} items)` : '';
-    return `[${items.join(', ')}${suffix}]`;
-  }
-
-  /**
-   * Format object preview with truncation.
-   */
-  private _formatObjectPreview(obj: object, maxProps: number = 5): string {
-    const keys = Object.keys(obj);
-    if (keys.length === 0) {
-      return '{}';
-    }
-    const constructor = obj.constructor?.name;
-    const prefix =
-      constructor && constructor !== 'Object' ? `${constructor} ` : '';
-
-    const props = keys.slice(0, maxProps).map(key => {
-      try {
-        const value = (obj as any)[key];
-        let valueStr: string;
-        if (value === null) {
-          valueStr = 'null';
-        } else if (value === undefined) {
-          valueStr = 'undefined';
-        } else if (typeof value === 'string') {
-          valueStr = `'${value.length > 20 ? value.substring(0, 20) + '...' : value}'`;
-        } else if (typeof value === 'object') {
-          valueStr = Array.isArray(value) ? `Array(${value.length})` : '{...}';
-        } else if (typeof value === 'function') {
-          valueStr = '[Function]';
-        } else {
-          valueStr = String(value);
-        }
-        return `${key}: ${valueStr}`;
-      } catch {
-        return `${key}: <error>`;
-      }
-    });
-
-    const suffix = keys.length > maxProps ? ', ...' : '';
-    return `${prefix}{ ${props.join(', ')}${suffix} }`;
-  }
-
-  /**
-   * Format non-serializable object (circular refs, etc.).
-   */
-  private _formatNonSerializableObject(obj: object): string {
-    const constructor = obj.constructor?.name || 'Object';
-    const keys = Object.keys(obj);
-    return `${constructor} { ${keys.length} properties }`;
-  }
-
-  /**
-   * Get all properties of an object including inherited ones.
-   * Filters by prefix and returns sorted unique matches.
-   */
-  private _getAllProperties(obj: any, prefix: string): string[] {
-    const seen = new Set<string>();
-    const matches: string[] = [];
-    const lowerPrefix = prefix.toLowerCase();
-    // The depth in the prototype chain where each match is defined
-    const depths = new Map<string, number>();
-
-    // Helper to add matching properties
-    const addMatching = (props: string[], depth: number) => {
-      for (const prop of props) {
-        if (!seen.has(prop) && prop.startsWith(prefix)) {
-          seen.add(prop);
-          matches.push(prop);
-          depths.set(prop, depth);
-        }
-      }
-    };
-
-    // Helper to add case-insensitive matches (lower priority)
-    const addCaseInsensitive = (props: string[], depth: number) => {
-      for (const prop of props) {
-        if (
-          !seen.has(prop) &&
-          prop.toLowerCase().startsWith(lowerPrefix) &&
-          !prop.startsWith(prefix)
-        ) {
-          seen.add(prop);
-          matches.push(prop);
-          depths.set(prop, depth);
-        }
-      }
-    };
-
-    try {
-      // Walk up the prototype chain
-      let current = obj;
-      let depth = 0;
-      while (current !== null && current !== undefined) {
-        try {
-          // Get own property names (includes non-enumerable)
-          const ownProps = Object.getOwnPropertyNames(current);
-          addMatching(ownProps, depth);
-
-          // Also get enumerable properties from for...in
-          for (const key in current) {
-            if (!seen.has(key) && key.startsWith(prefix)) {
-              seen.add(key);
-              matches.push(key);
-              depths.set(key, depth);
-            }
-          }
-        } catch {
-          // Some objects may throw on getOwnPropertyNames
-        }
-
-        // Move up prototype chain
-        try {
-          current = Object.getPrototypeOf(current);
-          depth++;
-        } catch {
-          break;
-        }
-      }
-
-      // Add case-insensitive matches as secondary results
-      current = obj;
-      depth = 0;
-      while (current !== null && current !== undefined) {
-        try {
-          const ownProps = Object.getOwnPropertyNames(current);
-          addCaseInsensitive(ownProps, depth);
-        } catch {
-          // Ignore
-        }
-        try {
-          current = Object.getPrototypeOf(current);
-          depth++;
-        } catch {
-          break;
-        }
-      }
-    } catch {
-      // Fallback to simple for...in if above fails
-      try {
-        for (const key in obj) {
-          if (key.startsWith(prefix)) {
-            matches.push(key);
-          }
-        }
-      } catch {
-        // Ignore
-      }
-    }
-
-    // Sort matches: exact prefix matches first, then the own properties
-    // before the inherited ones, then alphabetically
-    return matches.sort((a, b) => {
-      const aExact = a.startsWith(prefix);
-      const bExact = b.startsWith(prefix);
-      if (aExact && !bExact) {
-        return -1;
-      }
-      if (!aExact && bExact) {
-        return 1;
-      }
-      const depthDifference = (depths.get(a) ?? 0) - (depths.get(b) ?? 0);
-      if (depthDifference !== 0) {
-        return depthDifference;
-      }
-      return a.localeCompare(b);
-    });
-  }
-
-  /**
-   * Extract the expression at the cursor position.
-   */
-  private _extractExpressionAtCursor(
+  private _declarationDocs(
     code: string,
-    cursorPos: number
-  ): string | null {
-    // Find word boundaries around cursor
-    const beforeCursor = code.substring(0, cursorPos);
-    const afterCursor = code.substring(cursorPos);
-
-    // Match identifier characters going backwards
-    const beforeMatch = beforeCursor.match(/[\w.$]+$/);
-    const afterMatch = afterCursor.match(/^[\w]*/);
-
-    if (!beforeMatch) {
-      return null;
-    }
-
-    return beforeMatch[0] + (afterMatch?.[0] || '');
-  }
-
-  /**
-   * Build rich inspection data for a value.
-   */
-  private _buildInspectionData(
-    expression: string,
-    value: any,
-    detailLevel: number
-  ): IInspectResult['data'] {
-    const lines: string[] = [];
-
-    // Type information
-    const type = this._getTypeString(value);
-    lines.push(`**${expression}**: \`${type}\``);
-    lines.push('');
-
-    // Value preview
-    if (typeof value === 'function') {
-      const funcStr = value.toString();
-      const signature = this._extractFunctionSignature(funcStr);
-      lines.push('**Signature:**');
-      lines.push('```javascript');
-      lines.push(signature);
-      lines.push('```');
-
-      if (detailLevel > 0) {
-        lines.push('');
-        lines.push('**Source:**');
-        lines.push('```javascript');
-        lines.push(funcStr);
-        lines.push('```');
-      }
-    } else if (typeof value === 'object' && value !== null) {
-      // List properties
-      const props = Object.keys(value).slice(0, 20);
-      if (props.length > 0) {
-        lines.push('**Properties:**');
-        for (const prop of props) {
-          try {
-            const propType = this._getTypeString(value[prop]);
-            lines.push(`- \`${prop}\`: ${propType}`);
-          } catch {
-            lines.push(`- \`${prop}\`: (inaccessible)`);
-          }
+    ast: any,
+    comments: Comment[]
+  ): IDeclarationDoc[] {
+    const docs: IDeclarationDoc[] = [];
+    const findDoc = (start: number): string | null => {
+      for (let i = comments.length - 1; i >= 0; i--) {
+        const comment = comments[i];
+        if (comment.end > start) {
+          continue;
         }
-        if (Object.keys(value).length > 20) {
-          lines.push(`- ... and ${Object.keys(value).length - 20} more`);
-        }
-      }
-    } else {
-      lines.push(`**Value:** \`${String(value)}\``);
-    }
-
-    return {
-      'text/plain': lines.join('\n').replace(/\*\*/g, ''),
-      'text/markdown': lines.join('\n')
-    };
-  }
-
-  /**
-   * Get a human-readable type string for a value.
-   */
-  private _getTypeString(value: any): string {
-    if (value === null) {
-      return 'null';
-    }
-    if (value === undefined) {
-      return 'undefined';
-    }
-    if (Array.isArray(value)) {
-      return `Array(${value.length})`;
-    }
-    if (typeof value === 'function') {
-      const name = value.name || 'anonymous';
-      return `function ${name}()`;
-    }
-    if (typeof value === 'object') {
-      const constructor = value.constructor?.name;
-      return constructor || 'Object';
-    }
-    return typeof value;
-  }
-
-  /**
-   * Extract function signature from function string.
-   */
-  private _extractFunctionSignature(funcStr: string): string {
-    // Try to extract just the signature
-    const match = funcStr.match(
-      /^(async\s+)?function\s*(\w*)\s*\([^)]*\)|^(async\s+)?\([^)]*\)\s*=>|^(async\s+)?(\w+)\s*=>/
-    );
-    if (match) {
-      return match[0];
-    }
-    // For methods and short functions, return first line
-    const firstLine = funcStr.split('\n')[0];
-    return firstLine.length > 100
-      ? firstLine.substring(0, 100) + '...'
-      : firstLine;
-  }
-
-  /**
-   * Try to inspect an expression by looking it up in the global scope at runtime.
-   */
-  private _inspectAtRuntime(
-    expression: string,
-    detailLevel: number
-  ): IInspectResult {
-    try {
-      // Try to find the value in global scope
-      const parts = expression.split('.');
-      let value: any = this._globalScope;
-
-      for (const part of parts) {
-        if (value === null || value === undefined) {
-          return { status: 'ok', found: false, data: {}, metadata: {} };
-        }
-        const hasProp =
-          part in value || Object.prototype.hasOwnProperty.call(value, part);
-        if (hasProp) {
-          value = value[part];
-        } else {
-          return { status: 'ok', found: false, data: {}, metadata: {} };
-        }
-      }
-
-      // Build inspection data with additional documentation if available
-      const inspectionData = this._buildInspectionData(
-        expression,
-        value,
-        detailLevel
-      );
-
-      // Add predefined documentation if available
-      const doc = this.getBuiltinDocumentation(expression);
-      if (doc) {
-        const mdContent = inspectionData['text/markdown'] || '';
-        inspectionData['text/markdown'] = mdContent + `\n\n---\n\n${doc}`;
-        const plainContent = inspectionData['text/plain'] || '';
-        inspectionData['text/plain'] = plainContent + `\n\nDoc: ${doc}`;
-      }
-
-      return {
-        status: 'ok',
-        found: true,
-        data: inspectionData,
-        metadata: {}
-      };
-    } catch {
-      return { status: 'ok', found: false, data: {}, metadata: {} };
-    }
-  }
-
-  /**
-   * Find similar names in global scope for suggestions.
-   */
-  private _findSimilarNames(expression: string): string[] {
-    const suggestions: string[] = [];
-    const lowerExpr = expression.toLowerCase();
-
-    try {
-      // Check global scope for similar names
-      const globalProps = this._getAllProperties(this._globalScope, '');
-
-      for (const prop of globalProps) {
-        // Check for similar names (Levenshtein-like simple check)
-        const lowerProp = prop.toLowerCase();
         if (
-          lowerProp.includes(lowerExpr) ||
-          lowerExpr.includes(lowerProp) ||
-          this._isSimilar(lowerExpr, lowerProp)
+          comment.type === 'Block' &&
+          comment.value.startsWith('*') &&
+          code.slice(comment.end, start).trim() === ''
         ) {
-          suggestions.push(prop);
-          if (suggestions.length >= 5) {
-            break;
+          return comment.value
+            .replace(/^\*/, '')
+            .split('\n')
+            .map(line => line.replace(/^\s*\* ?/, ''))
+            .join('\n')
+            .trim();
+        }
+        return null;
+      }
+      return null;
+    };
+    const declare = (node: any, outer: any) => {
+      const doc = findDoc(outer.start);
+      if (!doc) {
+        return;
+      }
+      if (node.type === 'VariableDeclaration') {
+        for (const declaration of node.declarations) {
+          if (declaration.id.type === 'Identifier') {
+            docs.push({ name: declaration.id.name, doc });
           }
         }
+      } else if (
+        (node.type === 'FunctionDeclaration' ||
+          node.type === 'ClassDeclaration') &&
+        node.id
+      ) {
+        docs.push({ name: node.id.name, doc });
       }
-    } catch {
-      // Ignore errors
-    }
-
-    return suggestions;
-  }
-
-  /**
-   * Simple similarity check for two strings.
-   */
-  private _isSimilar(a: string, b: string): boolean {
-    // Check if strings differ by only 1-2 characters
-    if (Math.abs(a.length - b.length) > 2) {
-      return false;
-    }
-
-    let differences = 0;
-    const maxLen = Math.max(a.length, b.length);
-    for (let i = 0; i < maxLen; i++) {
-      if (a[i] !== b[i]) {
-        differences++;
-        if (differences > 2) {
-          return false;
+    };
+    for (const node of ast.body) {
+      if (
+        node.type === 'ExportNamedDeclaration' ||
+        node.type === 'ExportDefaultDeclaration'
+      ) {
+        if (node.declaration) {
+          declare(node.declaration, node);
         }
+      } else {
+        declare(node, node);
       }
     }
-    return differences <= 2;
+    return docs;
   }
 
+  private _introspection: Introspection | null = null;
   private _config: ExecutorConfig;
   private _globalScope: Record<string, any>;
 }

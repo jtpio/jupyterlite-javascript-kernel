@@ -31,6 +31,7 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
     super(options);
     this._runtimeMode = options.runtime ?? 'iframe';
     this._executorFactory = options.executorFactory;
+    this._browsingContextId = options.browsingContextId;
     this._startupExtensions = [...(options.startupExtensions ?? [])];
     this._backend = this.createBackend(this._runtimeMode);
   }
@@ -110,7 +111,8 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
       return await this._backend.execute(
         content.code,
         this.executionCount,
-        this.parentHeader?.msg_id
+        this.parentHeader?.msg_id,
+        this.parentHeader
       );
     } catch (error) {
       const normalized = this.normalizeError(error);
@@ -320,6 +322,7 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
     if (runtimeMode === 'worker') {
       return new WorkerRuntimeBackend({
         ...options,
+        browsingContextId: this._browsingContextId,
         onReady: async context => {
           await this.onRuntimeReady({
             runtime: 'worker',
@@ -529,6 +532,7 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
   private _comms = new Map<string, { target_name: string }>();
   private _backend: IRuntimeBackend;
   private _executorFactory?: JavaScriptKernel.IExecutorFactory;
+  private _browsingContextId?: string;
   private _startupExtensions: JavaScriptKernel.IStartupExtension[];
   private _appliedStartupExtensions = new Set<string>();
   private _runtimeReadyContext: JavaScriptKernel.IRuntimeReadyContext | null =
@@ -606,5 +610,12 @@ export namespace JavaScriptKernel {
     runtime?: RuntimeMode;
     executorFactory?: IExecutorFactory;
     startupExtensions?: readonly IStartupExtension[];
+
+    /**
+     * The id of the browsing context of the page, from the service worker
+     * manager of JupyterLite. With it, prompt() asks for user input in the
+     * Web Worker runtime.
+     */
+    browsingContextId?: string;
   }
 }

@@ -1,243 +1,402 @@
 // Copyright (c) Jupyter Development Team.
 // Distributed under the terms of the Modified BSD License.
 
-import type { KernelMessage } from '@jupyterlab/services';
 import type { IMimeBundle } from '@jupyterlab/nbformat';
 
-/**
- * Display request from display().
- */
-export type IDisplayData = Omit<
-  KernelMessage.IDisplayDataMsg['content'],
-  'data'
-> & {
-  data: IMimeBundle;
-};
+import { inspect } from './inspect';
+import { setDoc } from './introspection';
+import { bytesToBase64, toBytes } from './utils';
 
 /**
- * Callbacks for display operations.
+ * Options of display() and of its helpers.
  */
-export interface IDisplayCallbacks {
-  onDisplay?: (data: IDisplayData) => void;
-  onClear?: (wait: boolean) => void;
+export interface IDisplayOptions {
+  /**
+   * The id of the display, to update its outputs later: a string, or true
+   * for a new id. display() then returns a handle.
+   */
+  id?: string | boolean;
+
+  /**
+   * The metadata of the output.
+   */
+  metadata?: Record<string, unknown>;
+
+  /**
+   * Whether the value is a MIME bundle to show as is.
+   */
+  raw?: boolean;
 }
 
 /**
- * Display helper class for rich output.
- * Provides methods like html(), svg(), png(), etc.
+ * Options of the image helpers.
  */
-export class DisplayHelper {
+export interface IImageOptions extends IDisplayOptions {
+  width?: number | string;
+  height?: number | string;
+}
+
+/**
+ * What display() needs from the kernel.
+ */
+export interface IDisplayHost {
   /**
-   * Instantiate a new DisplayHelper.
-   *
-   * @param displayId - Optional display ID for update operations.
+   * Publish a display_data message, or an update_display_data message.
    */
-  constructor(displayId?: string) {
-    this._displayId = displayId;
-  }
+  publish(
+    data: IMimeBundle,
+    metadata: Record<string, unknown>,
+    transient: { display_id?: string },
+    update: boolean
+  ): void;
 
   /**
-   * Set the callbacks for display operations.
-   *
-   * @param callbacks - The callbacks for display and clear operations.
+   * Clear the outputs of the cell.
    */
-  setCallbacks(callbacks: IDisplayCallbacks): void {
-    this._displayCallback = callbacks.onDisplay;
-    this._clearCallback = callbacks.onClear;
-  }
+  clear(wait: boolean): void;
 
   /**
-   * Get the result if set via display methods.
-   *
-   * @returns The MIME bundle result, or undefined if not set.
+   * The MIME bundle of a value.
    */
-  getResult(): IMimeBundle | undefined {
-    return this._result;
-  }
+  mimeBundle(value: unknown): IMimeBundle;
 
   /**
-   * Clear the result.
+   * Read a file, for display.image(path). The helper is only available when
+   * the kernel can read files.
    */
-  clearResult(): void {
-    this._result = undefined;
-  }
+  readFile?(path: string): Uint8Array;
+}
 
-  /**
-   * Create a new display with optional ID.
-   *
-   * @param id - Optional display ID for update operations.
-   * @returns A new DisplayHelper instance.
-   *
-   * @example
-   * display('my-id').html('<div>...</div>')
-   */
-  display(id?: string): DisplayHelper {
-    const child = new DisplayHelper(id);
-    child.setCallbacks({
-      onDisplay: this._displayCallback,
-      onClear: this._clearCallback
-    });
-    return child;
-  }
+/**
+ * The display() function, with its helpers.
+ */
+export interface IDisplay {
+  (value: unknown, options?: IDisplayOptions): DisplayHandle | undefined;
+  html(
+    content: string | TemplateStringsArray,
+    ...rest: unknown[]
+  ): DisplayHandle | undefined;
+  markdown(
+    content: string | TemplateStringsArray,
+    ...rest: unknown[]
+  ): DisplayHandle | undefined;
+  svg(
+    content: string | TemplateStringsArray,
+    ...rest: unknown[]
+  ): DisplayHandle | undefined;
+  latex(
+    content: string | TemplateStringsArray,
+    ...rest: unknown[]
+  ): DisplayHandle | undefined;
+  text(
+    content: string | TemplateStringsArray,
+    ...rest: unknown[]
+  ): DisplayHandle | undefined;
+  json(content: unknown, options?: IDisplayOptions): DisplayHandle | undefined;
+  png(content: unknown, options?: IImageOptions): DisplayHandle | undefined;
+  jpeg(content: unknown, options?: IImageOptions): DisplayHandle | undefined;
+  image?(
+    path: string,
+    options?: IImageOptions & { type?: string }
+  ): DisplayHandle | undefined;
+  mime(
+    bundle: Record<string, unknown>,
+    options?: IDisplayOptions
+  ): DisplayHandle | undefined;
+  clear(wait?: boolean): void;
+}
 
-  /**
-   * Display HTML content.
-   *
-   * @param content - The HTML content to display.
-   * @param metadata - Optional metadata for the display.
-   */
-  html(content: string, metadata?: Record<string, any>): void {
-    this._sendDisplay(
-      { 'text/html': content, 'text/plain': content },
-      metadata
+const IMAGE_TYPES: Record<string, string> = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  bmp: 'image/bmp',
+  svg: 'image/svg+xml'
+};
+
+/**
+ * Whether a MIME type holds JSON data.
+ */
+export function isJsonMimeType(mimeType: string): boolean {
+  return mimeType === 'application/json' || /\+json$/.test(mimeType);
+}
+
+/**
+ * Normalize a MIME bundle given by the user: binary data is encoded in
+ * base64, and the values of the non-JSON types are converted to strings.
+ */
+export function normalizeBundle(bundle: unknown): IMimeBundle {
+  if (bundle === null || typeof bundle !== 'object') {
+    throw new TypeError(
+      'A MIME bundle must be an object mapping MIME types to data'
     );
   }
-
-  /**
-   * Display SVG content.
-   *
-   * @param content - The SVG content to display.
-   * @param metadata - Optional metadata for the display.
-   */
-  svg(content: string, metadata?: Record<string, any>): void {
-    this._sendDisplay(
-      {
-        'image/svg+xml': content,
-        'text/plain': '[SVG Image]'
-      },
-      metadata
-    );
-  }
-
-  /**
-   * Display PNG image (base64 encoded).
-   *
-   * @param base64Content - The base64-encoded PNG data.
-   * @param metadata - Optional metadata for the display.
-   */
-  png(base64Content: string, metadata?: Record<string, any>): void {
-    this._sendDisplay(
-      {
-        'image/png': base64Content,
-        'text/plain': '[PNG Image]'
-      },
-      metadata
-    );
-  }
-
-  /**
-   * Display JPEG image (base64 encoded).
-   *
-   * @param base64Content - The base64-encoded JPEG data.
-   * @param metadata - Optional metadata for the display.
-   */
-  jpeg(base64Content: string, metadata?: Record<string, any>): void {
-    this._sendDisplay(
-      {
-        'image/jpeg': base64Content,
-        'text/plain': '[JPEG Image]'
-      },
-      metadata
-    );
-  }
-
-  /**
-   * Display plain text.
-   *
-   * @param content - The text content to display.
-   * @param metadata - Optional metadata for the display.
-   */
-  text(content: string, metadata?: Record<string, any>): void {
-    this._sendDisplay({ 'text/plain': content }, metadata);
-  }
-
-  /**
-   * Display Markdown content.
-   *
-   * @param content - The Markdown content to display.
-   * @param metadata - Optional metadata for the display.
-   */
-  markdown(content: string, metadata?: Record<string, any>): void {
-    this._sendDisplay(
-      { 'text/markdown': content, 'text/plain': content },
-      metadata
-    );
-  }
-
-  /**
-   * Display LaTeX content.
-   *
-   * @param content - The LaTeX content to display.
-   * @param metadata - Optional metadata for the display.
-   */
-  latex(content: string, metadata?: Record<string, any>): void {
-    this._sendDisplay(
-      { 'text/latex': content, 'text/plain': content },
-      metadata
-    );
-  }
-
-  /**
-   * Display JSON content.
-   *
-   * @param content - The JSON content to display.
-   * @param metadata - Optional metadata for the display.
-   */
-  json(content: any, metadata?: Record<string, any>): void {
-    this._sendDisplay(
-      {
-        'application/json': content,
-        'text/plain': JSON.stringify(content, null, 2)
-      },
-      metadata
-    );
-  }
-
-  /**
-   * Display with custom MIME bundle.
-   *
-   * @param mimeBundle - The MIME bundle to display.
-   * @param metadata - Optional metadata for the display.
-   */
-  mime(mimeBundle: IMimeBundle, metadata?: Record<string, any>): void {
-    this._sendDisplay(mimeBundle, metadata);
-  }
-
-  /**
-   * Clear the current output.
-   *
-   * @param options - Clear options.
-   * @param options.wait - If true, wait for new output before clearing.
-   */
-  clear(options: { wait?: boolean } = {}): void {
-    if (this._clearCallback) {
-      this._clearCallback(options.wait ?? false);
+  const data: IMimeBundle = {};
+  for (const [mimeType, content] of Object.entries(bundle)) {
+    if (content === undefined) {
+      continue;
+    }
+    const bytes = toBytes(content);
+    if (bytes !== null) {
+      data[mimeType] = bytesToBase64(bytes);
+    } else if (isJsonMimeType(mimeType)) {
+      data[mimeType] = content as any;
+    } else {
+      data[mimeType] = String(content);
     }
   }
+  return data;
+}
+
+let displayCount = 0;
+
+function newDisplayId(): string {
+  displayCount++;
+  const random = Math.floor(Math.random() * 0x100000000)
+    .toString(16)
+    .padStart(8, '0');
+  return `display-${random}-${displayCount}`;
+}
+
+/**
+ * A handle on the outputs of a display id, to update them.
+ */
+export class DisplayHandle {
+  constructor(
+    host: IDisplayHost,
+    id: string,
+    mimeType?: string,
+    placeholder?: string
+  ) {
+    this.id = id;
+    // Not enumerable, so that the handle shows only its id
+    Object.defineProperties(this, {
+      _host: { value: host },
+      _mimeType: { value: mimeType },
+      _placeholder: { value: placeholder }
+    });
+  }
 
   /**
-   * Send display data.
+   * The display id.
    */
-  private _sendDisplay(
-    data: IMimeBundle,
-    metadata?: Record<string, any>
+  readonly id: string;
+
+  /**
+   * Show a value in a new output, updated with the other outputs of this
+   * handle.
+   */
+  display(value: unknown, options: IDisplayOptions = {}): void {
+    this._publish(value, options, false);
+  }
+
+  /**
+   * Replace the content of the outputs of this handle.
+   */
+  update(value: unknown, options: IDisplayOptions = {}): void {
+    this._publish(value, options, true);
+  }
+
+  private _publish(
+    value: unknown,
+    options: IDisplayOptions,
+    update: boolean
   ): void {
-    const displayData: IDisplayData = {
+    let data: IMimeBundle;
+    if (options.raw) {
+      data = normalizeBundle(value);
+    } else if (this._mimeType && typeof value === 'string') {
+      data = {
+        [this._mimeType]: value,
+        'text/plain': this._placeholder || value
+      };
+    } else {
+      data = this._host.mimeBundle(value);
+    }
+    this._host.publish(
       data,
-      metadata: metadata ?? {},
-      transient: this._displayId ? { display_id: this._displayId } : undefined
+      options.metadata ?? {},
+      { display_id: this.id },
+      update
+    );
+  }
+
+  private _host!: IDisplayHost;
+  private _mimeType?: string;
+  private _placeholder?: string;
+}
+
+/**
+ * Create the display() function of a kernel.
+ */
+export function createDisplay(host: IDisplayHost): IDisplay {
+  const show = (
+    value: unknown,
+    options: IDisplayOptions & { mimeType?: string; placeholder?: string } = {}
+  ): DisplayHandle | undefined => {
+    let id: string | undefined;
+    if (options.id === true) {
+      id = newDisplayId();
+    } else if (options.id !== undefined && options.id !== false) {
+      id = String(options.id);
+    }
+    const data = options.raw ? normalizeBundle(value) : host.mimeBundle(value);
+    host.publish(
+      data,
+      options.metadata ?? {},
+      id ? { display_id: id } : {},
+      false
+    );
+    return id
+      ? new DisplayHandle(host, id, options.mimeType, options.placeholder)
+      : undefined;
+  };
+
+  const display = ((value: unknown, options: IDisplayOptions = {}) =>
+    show(value, options)) as IDisplay;
+
+  // Helpers accepting a string, or a tagged template like display.html`<b>${x}</b>`.
+  // Like with String.raw, the backslashes of templates are kept, for LaTeX.
+  const templateContent = (
+    content: string | TemplateStringsArray,
+    values: unknown[]
+  ): { text: string; options: IDisplayOptions } => {
+    if (Array.isArray(content) && Array.isArray((content as any).raw)) {
+      const raw = (content as TemplateStringsArray).raw;
+      let text = raw[0];
+      for (let i = 0; i < values.length; i++) {
+        text += String(values[i]) + raw[i + 1];
+      }
+      return { text, options: {} };
+    }
+    return {
+      text: String(content),
+      options: (values[0] as IDisplayOptions) ?? {}
+    };
+  };
+
+  const mimeHelper =
+    (mimeType: string, description: string) =>
+    (
+      content: string | TemplateStringsArray,
+      ...rest: unknown[]
+    ): DisplayHandle | undefined => {
+      const { text, options } = templateContent(content, rest);
+      const placeholder =
+        mimeType === 'text/plain' ? undefined : `<${description}>`;
+      const data: Record<string, string> = { [mimeType]: text };
+      if (placeholder) {
+        data['text/plain'] = placeholder;
+      }
+      return show(data, { ...options, raw: true, mimeType, placeholder });
     };
 
-    if (this._displayCallback) {
-      this._displayCallback(displayData);
-    } else {
-      // Store as result for synchronous return
-      this._result = data;
-    }
-  }
+  const imageHelper =
+    (mimeType: string) =>
+    (
+      content: unknown,
+      options: IImageOptions = {}
+    ): DisplayHandle | undefined => {
+      const bytes = toBytes(content);
+      const data = bytes !== null ? bytesToBase64(bytes) : String(content);
+      const metadata: Record<string, unknown> = { ...options.metadata };
+      if (options.width || options.height) {
+        const size: Record<string, unknown> = {};
+        if (options.width) {
+          size.width = options.width;
+        }
+        if (options.height) {
+          size.height = options.height;
+        }
+        metadata[mimeType] = size;
+      }
+      return show(
+        { [mimeType]: data, 'text/plain': `<${mimeType} image>` },
+        { ...options, raw: true, metadata }
+      );
+    };
 
-  private _displayCallback?: (data: IDisplayData) => void;
-  private _clearCallback?: (wait: boolean) => void;
-  private _displayId?: string;
-  private _result?: IMimeBundle;
+  display.html = setDoc(
+    mimeHelper('text/html', 'HTML'),
+    'Displays HTML.\n\ndisplay.html(content, options?) or display.html`<b>${value}</b>`'
+  );
+  display.markdown = setDoc(
+    mimeHelper('text/markdown', 'Markdown'),
+    'Displays Markdown.\n\ndisplay.markdown(content, options?) or display.markdown`# ${title}`'
+  );
+  display.svg = setDoc(
+    mimeHelper('image/svg+xml', 'SVG'),
+    'Displays an SVG image from its source.\n\ndisplay.svg(content, options?)'
+  );
+  display.latex = setDoc(
+    mimeHelper('text/latex', 'LaTeX'),
+    'Displays LaTeX, for example display.latex("$e^{i\\\\pi} + 1 = 0$").'
+  );
+  display.text = setDoc(
+    mimeHelper('text/plain', 'text'),
+    'Displays plain text.\n\ndisplay.text(content, options?)'
+  );
+  display.json = setDoc(
+    (content: unknown, options: IDisplayOptions = {}) =>
+      show(
+        { 'application/json': content, 'text/plain': inspect(content) },
+        { ...options, raw: true }
+      ),
+    'Displays JSON data as an interactive tree.\n\ndisplay.json(value, options?)'
+  );
+  display.png = setDoc(
+    imageHelper('image/png'),
+    'Displays a PNG image from its bytes (Uint8Array, ArrayBuffer) or base64 data.\n\n' +
+      'display.png(data, { width?, height? })'
+  );
+  display.jpeg = setDoc(
+    imageHelper('image/jpeg'),
+    'Displays a JPEG image from its bytes (Uint8Array, ArrayBuffer) or base64 data.\n\n' +
+      'display.jpeg(data, { width?, height? })'
+  );
+  if (host.readFile) {
+    const readFile = host.readFile;
+    display.image = setDoc(
+      (path: string, options: IImageOptions & { type?: string } = {}) => {
+        const extension = String(path).split('.').pop()!.toLowerCase();
+        const mimeType = options.type || IMAGE_TYPES[extension];
+        if (!mimeType) {
+          throw new TypeError(
+            `Unknown image type for '${path}', pass it with the type option`
+          );
+        }
+        const bytes = readFile(String(path));
+        if (mimeType === 'image/svg+xml') {
+          return display.svg(new TextDecoder().decode(bytes), options);
+        }
+        return imageHelper(mimeType)(bytes, options);
+      },
+      'Displays an image file.\n\ndisplay.image(path, { width?, height?, type? })'
+    );
+  }
+  display.mime = setDoc(
+    (bundle: Record<string, unknown>, options: IDisplayOptions = {}) =>
+      show(bundle, { ...options, raw: true }),
+    'Displays a MIME bundle, an object mapping MIME types to data.\n\n' +
+      'display.mime({ "text/html": "<b>Hi</b>", "text/plain": "Hi" }, options?)'
+  );
+  display.clear = setDoc(
+    (wait = false) => host.clear(Boolean(wait)),
+    'Clears the outputs of the cell. With wait=true, waits for the next output to clear them.'
+  );
+
+  return setDoc(
+    display,
+    'Displays a value with its richest representation.\n\n' +
+      'display(value, { id?, metadata? })\n\n' +
+      'Objects can define _toHtml(), _toMarkdown(), _toSvg(), _toPng(), _toJpeg(), _toLatex(),\n' +
+      '_toJson() or _toMime() methods, or a [Symbol.for("Jupyter.display")]() method returning\n' +
+      'a MIME bundle. With { id: true } (or a string), returns a handle to update the output:\n\n' +
+      '    const handle = display("Loading...", { id: true });\n' +
+      '    handle.update("Done!");\n\n' +
+      'See also display.html, display.markdown, display.svg, display.png, display.latex,\n' +
+      'display.json, display.mime and display.clear.'
+  );
 }

@@ -153,6 +153,88 @@ Limits of automatic cleanup:
 - It will not automatically remove all event listeners or timers.
 - It cannot safely revert all stateful third-party module internals.
 
+## Rich output
+
+The last expression of a cell is shown as its result. The values are printed like with `util.inspect` in Node.js, and the data with a JSON representation, like objects and arrays, is also shown as an interactive tree.
+
+`display(value, options)` shows values in the middle of a cell. With the `id` option (`true` to generate one), it returns a handle to update the output later, also from other cells:
+
+```javascript
+const task = display.text('Starting...', { id: true });
+await new Promise(resolve => setTimeout(resolve, 1000));
+task.update('Done!');
+```
+
+The `metadata` option sets the metadata of the output. `handle.display(value)` shows a new output, updated together with the other outputs of the handle.
+
+The helpers of `display` show content for the common MIME types:
+
+- `display.html`, `display.markdown`, `display.svg`, `display.latex` and `display.text` take a string, or are used as tagged templates: ``display.markdown`**${name}**` ``
+- `display.json(value)` shows an interactive JSON tree
+- `display.png(bytes, { width, height })` and `display.jpeg(...)` show images, from their bytes or base64
+- `display.mime(bundle)` shows a MIME bundle, like `{ 'text/html': '<b>Hi</b>', 'text/plain': 'Hi' }`
+
+`clearOutput(wait)` clears the outputs of the cell. With `wait` set to `true`, they are cleared when the next output arrives, to avoid flickering.
+
+Objects can define their own representation, with a `[Symbol.for('Jupyter.display')]()` or `_toMime()` method returning a MIME bundle, or with the `_toHtml()`, `_toMarkdown()`, `_toSvg()`, `_toPng()`, `_toJpeg()`, `_toLatex()` and `_toJson()` methods:
+
+```javascript
+class Temperature {
+  constructor(celsius) {
+    this.celsius = celsius;
+  }
+
+  [Symbol.for('Jupyter.display')]() {
+    return {
+      'text/html': `<b>${this.celsius} °C</b>`,
+      'text/plain': `${this.celsius} °C`
+    };
+  }
+}
+
+new Temperature(21);
+```
+
+> **Note:** the second argument of `display()` used to be the metadata of the output. It is now an object of options, with the metadata under `metadata`.
+
+## Console
+
+The `console` methods print to the outputs of the cell, with the values formatted like in Node.js:
+
+- `console.log`, `console.info` and `console.debug` print to the standard output, `console.error`, `console.warn` and `console.trace` to the standard error
+- the format specifiers `%s`, `%d`, `%i`, `%f`, `%j`, `%o`, `%O` and `%c` are replaced, like `console.log('%s is %d', 'answer', 42)`
+- `console.table` shows a table, `console.dir` an object with options like `{ depth }`
+- `console.group`, `console.groupCollapsed` and `console.groupEnd` indent the messages
+- `console.count`, `console.countReset`, `console.time`, `console.timeLog`, `console.timeEnd` and `console.assert` work like in the browser
+- `console.clear` clears the outputs of the cell
+
+## Input
+
+`prompt(message)` asks the user for some text, and returns it:
+
+```javascript
+const name = prompt('What is your name?');
+```
+
+- In `JavaScript (Web Worker)`, the question is shown in the output area, like `input()` in Python kernels. `prompt.password(message)` hides the answer. This uses the JupyterLite service worker, so it needs a browser supporting it.
+- In `JavaScript (IFrame)`, the code runs on the main thread of the page, so `prompt()` is the dialog of the browser.
+
+## Completion and documentation
+
+Press **Tab** to complete the names defined in the kernel, and the properties of objects and literals like `"text".toUpp`. The completer shows the type of each completion, like `class` or `function`.
+
+Press **Shift+Tab**, or open **Help > Show Contextual Help**, to see the documentation of the name under the cursor: its signature, its JSDoc comment, and its source. The built-in objects link to their page on MDN, and the names which are not defined show suggestions.
+
+```javascript
+/**
+ * Compute the area of a circle.
+ * @param {number} radius - The radius of the circle
+ */
+function circleArea(radius) {
+  return Math.PI * radius ** 2;
+}
+```
+
 ## Jupyter Widgets
 
 The kernel provides built-in support for [Jupyter Widgets](https://ipywidgets.readthedocs.io/) (`ipywidgets`-compatible). Widget classes and helpers are available under `Jupyter.widgets`; destructure the ones you need before using them:
@@ -193,6 +275,7 @@ Widgets auto-display when they are the last expression in a cell. Use the global
 - **Display**: `Label`, `HTML`, `HTMLMath`, `Output`
 - **Button**: `Button` (with `.onClick()` handler)
 - **Color**: `ColorPicker`
+- **Media**: `Image` (from bytes, sent as binary buffers)
 - **Layout / Style**: `Layout`, `DescriptionStyle`, `SliderStyle`, `ProgressStyle`, `ButtonStyle`, `CheckboxStyle`, `ToggleButtonStyle`, `ToggleButtonsStyle`, `TextStyle`, `HTMLStyle`, `HTMLMathStyle`, `LabelStyle`
 - **Containers**: `Box`, `HBox`, `VBox`, `GridBox`, `Accordion`, `Tab`, `Stack`
 - **Helpers**: `jslink`, `jsdlink`
@@ -217,6 +300,7 @@ The widget runtime is split into files that roughly follow the upstream `ipywidg
 | `packages/controls/src/widget_box.ts`                | `packages/javascript-kernel-runtime/src/widgets/widget_box.ts`                | Ported  | Box, HBox, VBox, GridBox                                             |
 | `packages/controls/src/widget_selectioncontainer.ts` | `packages/javascript-kernel-runtime/src/widgets/widget_selectioncontainer.ts` | Ported  | Accordion, Tab, Stack                                                |
 | `packages/controls/src/widget_link.ts`               | `packages/javascript-kernel-runtime/src/widgets/widget_link.ts`               | Ported  | `jslink`, `jsdlink`, `Link`, and `DirectionalLink`                   |
+| `packages/controls/src/widget_image.ts`              | `packages/javascript-kernel-runtime/src/widgets/widget_image.ts`              | Ported  | `Image`; `Video` and `Audio` are not ported yet                      |
 
 > **Note:** `jupyterlab-widgets`, `@jupyter-widgets/controls`, and `@jupyter-widgets/output` must be available in the JupyterLite deployment for the full widget set to render.
 

@@ -127,5 +127,36 @@ for (const kernel of KERNELS) {
       await expect(widget.getByRole('textbox')).toHaveValue('second page');
       await expect(widget.locator('.widget-slider')).toBeHidden();
     });
+
+    test('Show images from their bytes', async ({ page }) => {
+      // A red PNG image of 3x2 pixels
+      const index = await runCode(
+        page,
+        [
+          'const { Image } = Jupyter.widgets;',
+          'const png = "iVBORw0KGgoAAAANSUhEUgAAAAMAAAACCAIAAAASFvFNAAAAEElEQVR4nGP4z8AAQQxwFgBB0gX7h/C5SAAAAABJRU5ErkJggg==";',
+          'const bytes = Uint8Array.from(atob(png), c => c.charCodeAt(0));',
+          'const image = new Image({ value: bytes, format: "png", width: "60" });',
+          'image'
+        ].join('\n')
+      );
+      const img = (await getOutputs(page, index)).getByRole('img');
+      const naturalWidth = () =>
+        img.evaluate(element => (element as HTMLImageElement).naturalWidth);
+
+      await expect(img).toHaveAttribute('width', '60');
+      await expect.poll(naturalWidth).toBe(3);
+
+      // New bytes are sent to the frontend
+      await runCode(
+        page,
+        [
+          'const svg = \'<svg xmlns="http://www.w3.org/2000/svg" width="5" height="4"><rect width="5" height="4" fill="blue"/></svg>\';',
+          'image.format = "svg+xml";',
+          'image.value = new TextEncoder().encode(svg);'
+        ].join('\n')
+      );
+      await expect.poll(naturalWidth).toBe(5);
+    });
   });
 }

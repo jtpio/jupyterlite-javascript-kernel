@@ -3,12 +3,22 @@
 
 import type { KernelMessage } from '@jupyterlab/services';
 
-import { JavaScriptExecutor } from './executor';
+import type { IMimeBundle } from '@jupyterlab/nbformat';
+
+import { JavaScriptExecutor, type IAsyncCodeResult } from './executor';
 import { normalizeError } from './errors';
 import { CommManager } from './comm';
 import type { CommTargetHandler } from './comm';
+import { createConsole, type KernelConsole } from './console';
+import { createDisplay, type IDisplay } from './display';
+import { setDoc } from './introspection';
 import type { RuntimeOutputHandler } from './protocol';
 import { Widget, createWidgetClasses } from './widgets';
+
+/**
+ * The names of the globals installed by the evaluator.
+ */
+const GLOBALS = ['display', 'clearOutput', 'prompt', 'Jupyter'];
 
 /**
  * Shared execution logic for iframe and worker runtime backends.
@@ -23,21 +33,50 @@ export class JavaScriptRuntimeEvaluator {
     this._executor =
       options.executor ?? new JavaScriptExecutor(options.globalScope);
 
+    this._requestInput = options.requestInput;
+
     this._commManager = new CommManager(options.onOutput);
-    this._setupWidgets();
-    this._setupJupyterGlobal();
-    this._setupDisplay();
-    this._setupConsoleOverrides();
+    this._display = createDisplay({
+      publish: (data, metadata, transient, update) => {
+        const bundle = { data, metadata, transient } as any;
+        if (update) {
+          this._onOutput({ type: 'update_display_data', bundle });
+        } else {
+          this._onOutput({ type: 'display_data', bundle });
+        }
+      },
+      clear: wait => {
+        this._onOutput({ type: 'clear_output', bundle: { wait } });
+      },
+      mimeBundle: value => this._mimeBundle(value)
+    });
+    this._console = createConsole({
+      write: (name, text) => {
+        this._onOutput({ type: 'stream', bundle: { name, text } });
+      },
+      display: data => {
+        this._display(data, { raw: true });
+      },
+      clear: wait => {
+        this._display.clear(wait);
+      },
+      now: () => {
+        const performance = this._globalScope.performance;
+        return typeof performance?.now === 'function'
+          ? performance.now()
+          : Date.now();
+      }
+    });
+    this._setupGlobals();
+    this._setupConsole();
   }
 
   /**
    * Dispose the evaluator and restore patched globals where possible.
    */
   dispose(): void {
-    this._restoreConsoleOverrides();
-    this._restoreDisplay();
-    this._restoreWidgets();
-    this._restoreJupyterGlobal();
+    this._restoreConsole();
+    this._restoreGlobals();
     this._commManager.dispose();
   }
 
@@ -61,16 +100,20 @@ export class JavaScriptRuntimeEvaluator {
   async execute(
     code: string,
     executionCount: number,
-    parentMessageId?: string
+    parentMessageId?: string,
+    parentHeader?: Record<string, unknown>
   ): Promise<KernelMessage.IExecuteReplyMsg['content']> {
+    this._parentHeader = parentHeader;
     return this._withParentMessageId(parentMessageId, async () => {
       // Parse-time errors are syntax errors, so show only `Name: message`.
       let asyncFunction: () => Promise<any>;
       let withReturn: boolean;
+      let docs: IAsyncCodeResult['docs'];
       try {
         const parsed = this._executor.makeAsyncFromCode(code);
         asyncFunction = parsed.asyncFunction;
         withReturn = parsed.withReturn;
+        docs = parsed.docs;
       } catch (error) {
         const normalized = normalizeError(error);
         return this._emitError(executionCount, normalized, false);
@@ -87,7 +130,7 @@ export class JavaScriptRuntimeEvaluator {
             if (result instanceof Widget) {
               this._commManager.displayWidget(result.commId);
             } else {
-              const data = this._executor.getMimeBundle(result);
+              const data = this._mimeBundle(result);
               this._onOutput({
                 type: 'execute_result',
                 bundle: {
@@ -110,6 +153,9 @@ export class JavaScriptRuntimeEvaluator {
       } catch (error) {
         const normalized = normalizeError(error);
         return this._emitError(executionCount, normalized, true);
+      } finally {
+        // The declarations made before an error keep their documentation
+        this._executor.introspection.registerDocs(docs);
       }
     });
   }
@@ -126,8 +172,8 @@ export class JavaScriptRuntimeEvaluator {
     return {
       matches: result.matches,
       cursor_start: result.cursorStart,
-      cursor_end: result.cursorEnd || cursorPos,
-      metadata: {},
+      cursor_end: result.cursorEnd ?? cursorPos,
+      metadata: (result.metadata ?? {}) as any,
       status: 'ok'
     };
   }
@@ -290,207 +336,140 @@ export class JavaScriptRuntimeEvaluator {
   }
 
   /**
-   * Patch console methods in runtime scope to emit Jupyter stream messages.
+   * The MIME bundle of a value, with the view of the widgets.
    */
-  private _setupConsoleOverrides(): void {
-    const scopeConsole = this._globalScope.console as Console | undefined;
+  private _mimeBundle(value: unknown): IMimeBundle {
+    if (value instanceof Widget) {
+      return this._commManager.widgetMimeBundle(value.commId);
+    }
+    return this._executor.getMimeBundle(value);
+  }
+
+  /**
+   * Install the globals of the kernel: display, clearOutput, prompt and
+   * Jupyter, saving the previous values to restore them.
+   */
+  private _setupGlobals(): void {
+    const scope = this._globalScope;
+    for (const name of GLOBALS) {
+      this._previousGlobals.set(
+        name,
+        Object.getOwnPropertyDescriptor(scope, name)
+      );
+    }
+
+    scope.display = this._display;
+    scope.clearOutput = setDoc(
+      (wait = false) => this._display.clear(Boolean(wait)),
+      'Clears the outputs of the cell. With wait=true, waits for the next output to clear them.'
+    );
+
+    // Without a way to ask for input, the runtime keeps its own prompt(), like
+    // the dialog of the browser in an iframe
+    const requestInput = this._requestInput;
+    if (requestInput) {
+      const ask = (message: unknown, password: boolean) =>
+        requestInput(String(message), password, this._parentHeader);
+      const prompt = setDoc((message: unknown = '', defaultValue?: unknown) => {
+        const value = ask(message, false);
+        if ((value === '' || value === null) && defaultValue !== undefined) {
+          return String(defaultValue);
+        }
+        return value;
+      }, 'Asks the user for some input, and returns it as a string.\n\nprompt(message?, defaultValue?)') as ((
+        message?: unknown,
+        defaultValue?: unknown
+      ) => string | null) & {
+        password?: (message?: unknown) => string | null;
+      };
+      prompt.password = setDoc(
+        (message: unknown = '') => ask(message, true),
+        'Asks for a password, the input is hidden.\n\nprompt.password(message?)'
+      );
+      scope.prompt = prompt;
+    }
+
+    const previousJupyter = scope.Jupyter;
+    scope.Jupyter = {
+      ...(typeof previousJupyter === 'object' && previousJupyter !== null
+        ? previousJupyter
+        : {}),
+      comm: this._commManager,
+      widgets: createWidgetClasses(this._commManager)
+    };
+  }
+
+  /**
+   * Restore the globals replaced by the kernel.
+   */
+  private _restoreGlobals(): void {
+    const scope = this._globalScope;
+    for (const [name, descriptor] of this._previousGlobals) {
+      if (descriptor) {
+        Object.defineProperty(scope, name, descriptor);
+      } else {
+        delete scope[name];
+      }
+    }
+    this._previousGlobals.clear();
+  }
+
+  /**
+   * Replace the methods of the console of the runtime with the ones of the
+   * kernel, which write to the outputs of the cells.
+   */
+  private _setupConsole(): void {
+    const scopeConsole = this._globalScope.console as
+      | Record<string, unknown>
+      | undefined;
     if (!scopeConsole) {
       return;
     }
-
-    this._originalConsole = {
-      log: scopeConsole.log,
-      info: scopeConsole.info,
-      error: scopeConsole.error,
-      warn: scopeConsole.warn,
-      debug: scopeConsole.debug,
-      dir: scopeConsole.dir,
-      trace: scopeConsole.trace,
-      table: scopeConsole.table
-    };
-
-    const toText = (args: any[]) => {
-      const text = args
-        .map(arg => {
-          if (typeof arg === 'string') {
-            return arg;
-          }
-
-          try {
-            if (typeof arg === 'object' && arg !== null) {
-              const bundle = this._executor.getMimeBundle(arg);
-              const plain = bundle['text/plain'];
-              if (typeof plain === 'string') {
-                return plain;
-              }
-            }
-            return String(arg);
-          } catch {
-            return '[Unprintable value]';
-          }
-        })
-        .join(' ');
-
-      return `${text}\n`;
-    };
-
-    scopeConsole.log = (...args: any[]) => {
-      this._onOutput({
-        type: 'stream',
-        bundle: { name: 'stdout', text: toText(args) }
-      });
-    };
-
-    scopeConsole.info = scopeConsole.log;
-
-    scopeConsole.error = (...args: any[]) => {
-      this._onOutput({
-        type: 'stream',
-        bundle: { name: 'stderr', text: toText(args) }
-      });
-    };
-
-    scopeConsole.warn = scopeConsole.error;
-
-    scopeConsole.debug = scopeConsole.log;
-    scopeConsole.dir = scopeConsole.log;
-    scopeConsole.trace = scopeConsole.log;
-    scopeConsole.table = scopeConsole.log;
+    for (const [name, method] of Object.entries(this._console)) {
+      this._originalConsole.set(name, scopeConsole[name]);
+      scopeConsole[name] = method;
+    }
 
     if ('onerror' in this._globalScope) {
       this._originalOnError = this._globalScope.onerror;
-      this._globalScope.onerror = (message: any) => {
-        scopeConsole.error(message);
+      this._globalScope.onerror = (message: unknown) => {
+        this._console.error(message);
         return false;
       };
     }
   }
 
   /**
-   * Restore original console methods if they were patched.
+   * Restore the methods of the console of the runtime.
    */
-  private _restoreConsoleOverrides(): void {
-    if (!this._originalConsole) {
-      return;
-    }
-
-    const scopeConsole = this._globalScope.console as Console | undefined;
+  private _restoreConsole(): void {
+    const scopeConsole = this._globalScope.console as
+      | Record<string, unknown>
+      | undefined;
     if (scopeConsole) {
-      scopeConsole.log = this._originalConsole.log;
-      scopeConsole.info = this._originalConsole.info;
-      scopeConsole.error = this._originalConsole.error;
-      scopeConsole.warn = this._originalConsole.warn;
-      scopeConsole.debug = this._originalConsole.debug;
-      scopeConsole.dir = this._originalConsole.dir;
-      scopeConsole.trace = this._originalConsole.trace;
-      scopeConsole.table = this._originalConsole.table;
+      for (const [name, method] of this._originalConsole) {
+        scopeConsole[name] = method;
+      }
     }
+    this._originalConsole.clear();
 
     if ('onerror' in this._globalScope) {
       this._globalScope.onerror = this._originalOnError;
     }
-
-    this._originalConsole = null;
     this._originalOnError = undefined;
-  }
-
-  /**
-   * Install display() helper in runtime scope.
-   */
-  private _setupDisplay(): void {
-    this._previousDisplay = this._globalScope.display;
-
-    this._globalScope.display = (obj: any, metadata?: Record<string, any>) => {
-      if (obj instanceof Widget) {
-        this._commManager.displayWidget(obj.commId);
-        return;
-      }
-
-      const data = this._executor.getMimeBundle(obj);
-
-      this._onOutput({
-        type: 'display_data',
-        bundle: {
-          data,
-          metadata: metadata ?? {},
-          transient: {}
-        }
-      });
-    };
-  }
-
-  /**
-   * Restore previous display binding.
-   */
-  private _restoreDisplay(): void {
-    if (this._previousDisplay === undefined) {
-      delete this._globalScope.display;
-      return;
-    }
-
-    this._globalScope.display = this._previousDisplay;
-  }
-
-  /**
-   * Create runtime-local widget classes.
-   */
-  private _setupWidgets(): void {
-    this._widgetClasses = createWidgetClasses(this._commManager);
-  }
-
-  /**
-   * Clear runtime-local widget classes.
-   */
-  private _restoreWidgets(): void {
-    this._widgetClasses = null;
-  }
-
-  /**
-   * Install Jupyter.comm in runtime scope.
-   */
-  private _setupJupyterGlobal(): void {
-    this._previousJupyter = this._globalScope.Jupyter;
-    const previousJupyter =
-      typeof this._previousJupyter === 'object' &&
-      this._previousJupyter !== null
-        ? this._previousJupyter
-        : {};
-    this._globalScope.Jupyter = {
-      ...previousJupyter,
-      comm: this._commManager,
-      widgets: this._widgetClasses ?? {}
-    };
-  }
-
-  /**
-   * Restore previous Jupyter binding.
-   */
-  private _restoreJupyterGlobal(): void {
-    if (this._previousJupyter === undefined) {
-      delete this._globalScope.Jupyter;
-      return;
-    }
-    this._globalScope.Jupyter = this._previousJupyter;
   }
 
   private _globalScope: Record<string, any>;
   private _onOutput: RuntimeOutputHandler;
   private _executor: JavaScriptExecutor;
   private _commManager: CommManager;
-  private _widgetClasses: Record<string, unknown> | null = null;
-  private _previousJupyter: any;
-  private _previousDisplay: any;
+  private _display: IDisplay;
+  private _console: KernelConsole;
+  private _requestInput?: JavaScriptRuntimeEvaluator.IOptions['requestInput'];
+  private _parentHeader?: Record<string, unknown>;
+  private _previousGlobals = new Map<string, PropertyDescriptor | undefined>();
+  private _originalConsole = new Map<string, unknown>();
   private _originalOnError: any;
-  private _originalConsole: {
-    log: Console['log'];
-    info: Console['info'];
-    error: Console['error'];
-    warn: Console['warn'];
-    debug: Console['debug'];
-    dir: Console['dir'];
-    trace: Console['trace'];
-    table: Console['table'];
-  } | null = null;
 }
 
 /**
@@ -504,5 +483,16 @@ export namespace JavaScriptRuntimeEvaluator {
     globalScope: Record<string, any>;
     onOutput: RuntimeOutputHandler;
     executor?: JavaScriptExecutor;
+
+    /**
+     * Ask the user for some input, for prompt(). It blocks until the user
+     * replies, and returns null when the input can not be requested. Without
+     * it, the runtime keeps its own prompt().
+     */
+    requestInput?: (
+      prompt: string,
+      password: boolean,
+      parentHeader?: Record<string, unknown>
+    ) => string | null;
   }
 }

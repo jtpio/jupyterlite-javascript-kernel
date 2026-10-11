@@ -6,6 +6,7 @@ import {
   JupyterFrontEndPlugin
 } from '@jupyterlab/application';
 
+import { IServiceWorkerManager } from '@jupyterlite/apputils';
 import type { IKernel } from '@jupyterlite/services';
 
 import { IKernelSpecs } from '@jupyterlite/services';
@@ -30,13 +31,14 @@ interface IRegisterKernelOptions {
   name: string;
   displayName: string;
   runtime: RuntimeMode;
+  browsingContextId?: string;
 }
 
 const registerKernel = (
   kernelspecs: IKernelSpecs,
   options: IRegisterKernelOptions
 ) => {
-  const { name, displayName, runtime } = options;
+  const { name, displayName, runtime, browsingContextId } = options;
 
   kernelspecs.register({
     spec: {
@@ -63,6 +65,7 @@ const registerKernel = (
       const kernel = new JavaScriptKernel({
         ...options,
         runtime,
+        browsingContextId,
         startupExtensions: Private.startupExtensions
       } as JavaScriptKernel.IOptions);
       Private.kernelCreated.emit(kernel);
@@ -194,11 +197,18 @@ const kernelWorker: JupyterFrontEndPlugin<void> = {
   id: '@jupyterlite/javascript-kernel-extension:kernel-worker',
   autoStart: true,
   requires: [IKernelSpecs],
-  activate: (app: JupyterFrontEnd, kernelspecs: IKernelSpecs) => {
+  optional: [IServiceWorkerManager],
+  activate: (
+    app: JupyterFrontEnd,
+    kernelspecs: IKernelSpecs,
+    serviceWorkerManager: IServiceWorkerManager | null
+  ) => {
     registerKernel(kernelspecs, {
       name: 'javascript-worker',
       displayName: 'JavaScript (Web Worker)',
-      runtime: 'worker'
+      runtime: 'worker',
+      // The service worker relays the requests for user input of prompt()
+      browsingContextId: serviceWorkerManager?.browsingContextId
     });
   }
 };

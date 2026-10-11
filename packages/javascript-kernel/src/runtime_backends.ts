@@ -38,7 +38,8 @@ export interface IRuntimeBackend {
   execute(
     code: string,
     executionCount: number,
-    parentMessageId?: string
+    parentMessageId?: string,
+    parentHeader?: KernelMessage.IHeader
   ): Promise<KernelMessage.IExecuteReplyMsg['content']>;
   complete(
     code: string,
@@ -95,10 +96,16 @@ abstract class AbstractRuntimeBackend implements IRuntimeBackend {
   async execute(
     code: string,
     executionCount: number,
-    parentMessageId?: string
+    parentMessageId?: string,
+    parentHeader?: KernelMessage.IHeader
   ): Promise<KernelMessage.IExecuteReplyMsg['content']> {
     await this.ready;
-    return this._getRemote().execute(code, executionCount, parentMessageId);
+    return this._getRemote().execute(
+      code,
+      executionCount,
+      parentMessageId,
+      parentHeader
+    );
   }
 
   /**
@@ -515,7 +522,8 @@ export class WorkerRuntimeBackend extends AbstractRuntimeBackend {
       await withTimeout(
         remote.initialize(
           {
-            baseUrl: resolveBaseUrl(this._options.baseUrl)
+            baseUrl: resolveBaseUrl(this._options.baseUrl),
+            browsingContextId: this._options.browsingContextId
           },
           outputProxy
         ),
@@ -589,6 +597,11 @@ export namespace WorkerRuntimeBackend {
    */
   export interface IOptions extends IRuntimeBackendOptions {
     onReady?: (context: IReadyContext) => void | Promise<void>;
+
+    /**
+     * The id of the browsing context of the page, to ask for user input.
+     */
+    browsingContextId?: string;
   }
 }
 

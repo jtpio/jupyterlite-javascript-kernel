@@ -72,7 +72,7 @@ for (const kernel of KERNELS) {
 
       await expect(
         await getOutputs(page, index, 'application/vnd.jupyter.stdout')
-      ).toHaveText(['log 1 [2]\ninfo\n']);
+      ).toHaveText(['log 1 [ 2 ]\ninfo\n']);
       await expect(
         await getOutputs(page, index, 'application/vnd.jupyter.stderr')
       ).toHaveText(['error\nwarn\n']);

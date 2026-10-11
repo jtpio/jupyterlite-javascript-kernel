@@ -12,6 +12,18 @@ import type { RuntimeOutputMessage } from '@jupyterlite/javascript-kernel-runtim
 export type RuntimeMode = 'iframe' | 'worker';
 
 /**
+ * Options to initialize a runtime.
+ */
+export interface IRuntimeInitializeOptions extends IWorkerKernel.IOptions {
+  /**
+   * The id of the browsing context of the page, to ask for user input through
+   * the service worker. Only a runtime in a Web Worker can block until the
+   * user replies.
+   */
+  browsingContextId?: string;
+}
+
+/**
  * Output callback passed across Comlink endpoints.
  */
 export type RuntimeOutputCallback = (
@@ -23,13 +35,14 @@ export type RuntimeOutputCallback = (
  */
 export interface IRemoteRuntimeApi {
   initialize(
-    options: IWorkerKernel.IOptions,
+    options: IRuntimeInitializeOptions,
     onOutput: RuntimeOutputCallback
   ): Promise<void>;
   execute(
     code: string,
     executionCount: number,
-    parentMessageId?: string
+    parentMessageId?: string,
+    parentHeader?: KernelMessage.IHeader
   ): Promise<KernelMessage.IExecuteReplyMsg['content']>;
   preloadModule(moduleName: string): Promise<void>;
   registerCommTarget(

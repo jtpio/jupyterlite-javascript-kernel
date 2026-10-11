@@ -84,11 +84,13 @@ export async function createNotebook(
  * Type some code in the last cell of the notebook and run it with
  * Shift+Enter, like a user typing one cell after the other.
  *
+ * @param options.wait - Whether to wait for the end of the execution.
  * @returns The index of the cell.
  */
 export async function runCode(
   page: IJupyterLabPageFixture,
-  code: string
+  code: string,
+  options: { wait?: boolean } = {}
 ): Promise<number> {
   const count = await page.notebook.getCellCount();
   let index = count - 1;
@@ -100,7 +102,7 @@ export async function runCode(
     await page.notebook.addCell('code', code);
     index = count;
   }
-  await page.notebook.runCell(index);
+  await page.notebook.runCell(index, { wait: options.wait ?? true });
   return index;
 }
 
