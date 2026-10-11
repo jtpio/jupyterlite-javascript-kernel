@@ -409,6 +409,10 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
    * Route runtime output messages to Jupyter kernel channels.
    */
   protected processRuntimeMessage(message: RuntimeOutputMessage): void {
+    // The runtime of a disposed kernel can still send some outputs
+    if (this.isDisposed) {
+      return;
+    }
     const parentHeader = this.parentHeader;
 
     switch (message.type) {

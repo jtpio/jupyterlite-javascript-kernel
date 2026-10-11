@@ -1,6 +1,8 @@
 // Copyright (c) Jupyter Development Team.
 // Distributed under the terms of the Modified BSD License.
 
+import { isThenable } from '../utils';
+
 import { DOMWidget } from './widget';
 import { OUTPUT_MODULE, OUTPUT_MODULE_VERSION } from './version';
 
@@ -131,8 +133,16 @@ function _wrapCapturedOutputCallback<T extends (...args: any[]) => any>(
 
     try {
       const result = callback.apply(this, args);
-      if (result && typeof (result as Promise<unknown>).then === 'function') {
-        return Promise.resolve(result).finally(finish);
+      if (isThenable(result)) {
+        // The finally of the promise keeps its rejection in the realm of the
+        // callback, where the runtime reports the unhandled ones: a promise
+        // of the kernel could belong to the page of an iframe
+        const promise = result as PromiseLike<unknown> & {
+          finally?: (onFinally: () => void) => PromiseLike<unknown>;
+        };
+        return typeof promise.finally === 'function'
+          ? promise.finally(finish)
+          : Promise.resolve(result).finally(finish);
       }
       finish();
       return result;

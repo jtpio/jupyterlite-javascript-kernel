@@ -10,6 +10,7 @@ import { CommManager } from './comm';
 import type { CommTargetHandler } from './comm';
 import { createConsole, type KernelConsole } from './console';
 import { createDisplay, type IDisplay } from './display';
+import { hostConsole } from './env';
 import { setPromiseStateResolver, type PromiseStateResolver } from './inspect';
 import { setDoc } from './introspection';
 import type { RuntimeOutputHandler } from './protocol';
@@ -41,7 +42,8 @@ export class JavaScriptRuntimeEvaluator {
     }
 
     this._commManager = new CommManager(options.onOutput, {
-      onTargetRegistered: options.onCommTargetRegistered
+      onTargetRegistered: options.onCommTargetRegistered,
+      reportError: (error, inPromise) => this.reportUncaught(error, inPromise)
     });
     this._display = createDisplay({
       publish: (data, metadata, transient, update) => {
@@ -81,12 +83,15 @@ export class JavaScriptRuntimeEvaluator {
     });
     this._setupGlobals();
     this._setupConsole();
+    this._listenForUncaughtErrors();
   }
 
   /**
    * Dispose the evaluator and restore patched globals where possible.
    */
   dispose(): void {
+    this._isDisposed = true;
+    this._stopListeningForUncaughtErrors();
     this._restoreConsole();
     this._restoreGlobals();
     this._commManager.dispose();
@@ -181,8 +186,42 @@ export class JavaScriptRuntimeEvaluator {
       } finally {
         // The declarations made before an error keep their documentation
         this._executor.introspection.registerDocs(docs);
+        // document.open() removes the listeners of the window, add them back
+        this._listenForUncaughtErrors();
       }
     });
+  }
+
+  /**
+   * Print an error thrown outside of an execution, like in a timer, an event
+   * listener or a widget callback, on stderr: `Uncaught Error: ...` with its
+   * location in the cells. The outputs go to the current parent message of
+   * the host, usually the last cell that ran.
+   *
+   * The evaluator calls it for the `error` and `unhandledrejection` events
+   * of globalScope, when it has addEventListener. Hosts without these events
+   * can call it with the errors they catch.
+   *
+   * @param error - The thrown value, which may not be an error.
+   * @param inPromise - Whether the value is the reason of a rejected promise
+   * that has no handler: `Uncaught (in promise) ...`.
+   */
+  reportUncaught(error: unknown, inPromise = false): void {
+    try {
+      const { traceback } = this._executor.formatError(error, {
+        prefix: inPromise ? 'Uncaught (in promise)' : 'Uncaught'
+      });
+      this._onOutput({
+        type: 'stream',
+        bundle: { name: 'stderr', text: `${traceback.join('\n')}\n` }
+      });
+    } catch {
+      // The error can not be shown in the notebook, keep it in the console
+      hostConsole()?.error?.(
+        inPromise ? 'Uncaught (in promise)' : 'Uncaught',
+        error
+      );
+    }
   }
 
   /**
@@ -274,7 +313,7 @@ export class JavaScriptRuntimeEvaluator {
     buffers?: ArrayBuffer[],
     parentMessageId?: string
   ): void {
-    void this._withParentMessageId(parentMessageId, async () => {
+    this._runInBackground(parentMessageId, () => {
       this._commManager.handleCommOpen(commId, targetName, data, buffers);
     });
   }
@@ -288,7 +327,7 @@ export class JavaScriptRuntimeEvaluator {
     buffers?: ArrayBuffer[],
     parentMessageId?: string
   ): void {
-    void this._withParentMessageId(parentMessageId, async () => {
+    this._runInBackground(parentMessageId, () => {
       this._commManager.handleCommMsg(commId, data, buffers);
     });
   }
@@ -302,7 +341,7 @@ export class JavaScriptRuntimeEvaluator {
     buffers?: ArrayBuffer[],
     parentMessageId?: string
   ): void {
-    void this._withParentMessageId(parentMessageId, async () => {
+    this._runInBackground(parentMessageId, () => {
       this._commManager.handleCommClose(commId, data, buffers);
     });
   }
@@ -329,6 +368,71 @@ export class JavaScriptRuntimeEvaluator {
       this._commManager.setCurrentMessageId(previousMessageId);
     }
   }
+
+  /**
+   * Run a callback with the active parent message ID, outside of an
+   * execution, and report its errors.
+   *
+   * The rejections of the promises of the kernel are not seen by the
+   * listeners of globalScope when the kernel runs in another realm, like the
+   * page of an iframe, so they are reported here.
+   */
+  private _runInBackground(
+    parentMessageId: string | undefined,
+    callback: () => void
+  ): void {
+    this._withParentMessageId(parentMessageId, callback).catch(error =>
+      this.reportUncaught(error)
+    );
+  }
+
+  /**
+   * Listen for the errors thrown and the promises rejected without a
+   * handler in globalScope, outside of the executions.
+   *
+   * Cancelling the events keeps them out of the console of the browser, and
+   * keeps a Web Worker alive: the errors it does not cancel reach the page.
+   * Adding the same listeners again does nothing, so this can be called
+   * after every execution. An execution which ends after dispose() does not
+   * add them back.
+   */
+  private _listenForUncaughtErrors(): void {
+    const scope = this._globalScope;
+    if (this._isDisposed || typeof scope.addEventListener !== 'function') {
+      return;
+    }
+    scope.addEventListener('error', this._onError);
+    scope.addEventListener('unhandledrejection', this._onUnhandledRejection);
+  }
+
+  /**
+   * Remove the listeners of the uncaught errors.
+   */
+  private _stopListeningForUncaughtErrors(): void {
+    const scope = this._globalScope;
+    if (typeof scope.removeEventListener !== 'function') {
+      return;
+    }
+    scope.removeEventListener('error', this._onError);
+    scope.removeEventListener('unhandledrejection', this._onUnhandledRejection);
+  }
+
+  /**
+   * Handle the `error` event of an error thrown outside of an execution.
+   */
+  private _onError = (event: IErrorEvent): void => {
+    event.preventDefault?.();
+    this.reportUncaught(event.error ?? errorFromEvent(event));
+  };
+
+  /**
+   * Handle the `unhandledrejection` event of a promise rejected without a
+   * handler.
+   */
+  private _onUnhandledRejection = (event: IRejectionEvent): void => {
+    event.preventDefault?.();
+    this.reportUncaught(event.reason, true);
+  };
 
   /**
    * Build and emit an execute error reply, with the traceback of a thrown
@@ -461,14 +565,6 @@ export class JavaScriptRuntimeEvaluator {
       this._originalConsole.set(name, scopeConsole[name]);
       scopeConsole[name] = method;
     }
-
-    if ('onerror' in this._globalScope) {
-      this._originalOnError = this._globalScope.onerror;
-      this._globalScope.onerror = (message: unknown) => {
-        this._console.error(message);
-        return false;
-      };
-    }
   }
 
   /**
@@ -484,11 +580,6 @@ export class JavaScriptRuntimeEvaluator {
       }
     }
     this._originalConsole.clear();
-
-    if ('onerror' in this._globalScope) {
-      this._globalScope.onerror = this._originalOnError;
-    }
-    this._originalOnError = undefined;
   }
 
   private _globalScope: Record<string, any>;
@@ -500,10 +591,53 @@ export class JavaScriptRuntimeEvaluator {
   private _requestInput?: JavaScriptRuntimeEvaluator.IOptions['requestInput'];
   private _scheduler?: JavaScriptRuntimeEvaluator.IScheduler;
   private _resetPromiseState = false;
+  private _isDisposed = false;
   private _parentHeader?: Record<string, unknown>;
   private _previousGlobals = new Map<string, PropertyDescriptor | undefined>();
   private _originalConsole = new Map<string, unknown>();
-  private _originalOnError: any;
+}
+
+/**
+ * The `error` event of an error thrown outside of an execution
+ * (an ErrorEvent in browsers).
+ */
+interface IErrorEvent {
+  error?: unknown;
+  message?: string;
+  filename?: string;
+  lineno?: number;
+  colno?: number;
+  preventDefault?(): void;
+}
+
+/**
+ * The `unhandledrejection` event of a promise rejected without a handler
+ * (a PromiseRejectionEvent in browsers).
+ */
+interface IRejectionEvent {
+  reason?: unknown;
+  preventDefault?(): void;
+}
+
+/**
+ * An error for an `error` event without one, like the errors of the scripts
+ * of other origins: its message and the location of the script.
+ */
+function errorFromEvent(event: IErrorEvent): {
+  name: string;
+  message: string;
+  stack?: string;
+} {
+  // The message of the browsers starts with `Uncaught Error: `
+  const match = /^(?:Uncaught )?(?:([A-Za-z]*Error): )?([^]*)$/.exec(
+    event.message ?? ''
+  );
+  const name = match?.[1] || 'Error';
+  const message = match?.[2] ?? '';
+  const stack = event.filename
+    ? `${name}: ${message}\n    at ${event.filename}:${event.lineno ?? 0}:${event.colno ?? 0}`
+    : undefined;
+  return { name, message, stack };
 }
 
 /**

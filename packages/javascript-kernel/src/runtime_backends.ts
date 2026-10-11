@@ -208,8 +208,20 @@ abstract class AbstractRuntimeBackend implements IRuntimeBackend {
     return this._remote;
   }
 
+  /**
+   * Publish an output of the runtime, unless the backend is disposed: the
+   * outputs sent before the runtime stopped can still arrive after.
+   */
+  protected _publishOutput(message: RuntimeOutputMessage): void {
+    if (!this._isDisposed) {
+      this._options.onOutput(message);
+    }
+  }
+
   /** Human-readable label used in error messages. */
   protected abstract readonly _runtimeLabel: string;
+  protected abstract readonly _options: IRuntimeBackendOptions;
+  protected _isDisposed = false;
   protected _ready = new PromiseDelegate<void>();
   protected _remote: Comlink.Remote<IRemoteRuntimeApi> | null = null;
 }
@@ -238,6 +250,7 @@ export class IFrameRuntimeBackend extends AbstractRuntimeBackend {
    * Dispose iframe resources.
    */
   dispose(): void {
+    this._isDisposed = true;
     this._ready.reject(new Error('IFrame runtime disposed'));
 
     if (this._remote) {
@@ -342,7 +355,7 @@ export class IFrameRuntimeBackend extends AbstractRuntimeBackend {
       );
       const remote = Comlink.wrap<IRemoteRuntimeApi>(endpoint);
       const outputProxy = Comlink.proxy((message: RuntimeOutputMessage) => {
-        this._options.onOutput(message);
+        this._publishOutput(message);
       });
 
       this._remote = remote;
@@ -400,8 +413,8 @@ export class IFrameRuntimeBackend extends AbstractRuntimeBackend {
   }
 
   protected readonly _runtimeLabel = 'IFrame';
+  protected readonly _options: IFrameRuntimeBackend.IOptions;
 
-  private _options: IFrameRuntimeBackend.IOptions;
   private _iframe: HTMLIFrameElement | null = null;
   private _container: HTMLDivElement | null = null;
   private _outputProxy: RuntimeOutputCallback | null = null;
@@ -466,6 +479,19 @@ export class WorkerRuntimeBackend extends AbstractRuntimeBackend {
     });
 
     worker.onerror = event => {
+      if (this._isReady) {
+        // The runtime prints the uncaught errors of the cells and cancels
+        // them. Print the other ones too, and keep the worker running.
+        event.preventDefault();
+        this._publishOutput({
+          type: 'stream',
+          bundle: {
+            name: 'stderr',
+            text: `${event.message || 'Uncaught error in the Web Worker'}\n`
+          }
+        });
+        return;
+      }
       const details = [event.message || 'Worker runtime failed to initialize'];
       if (event.filename) {
         details.push(`at ${event.filename}:${event.lineno}:${event.colno}`);
@@ -483,7 +509,7 @@ export class WorkerRuntimeBackend extends AbstractRuntimeBackend {
     this._worker = worker;
     this._remote = Comlink.wrap<IRemoteRuntimeApi>(worker);
     this._outputProxy = Comlink.proxy((message: RuntimeOutputMessage) => {
-      this._options.onOutput(message);
+      this._publishOutput(message);
     });
 
     void this._init();
@@ -493,6 +519,7 @@ export class WorkerRuntimeBackend extends AbstractRuntimeBackend {
    * Dispose worker resources.
    */
   dispose(): void {
+    this._isDisposed = true;
     this._ready.reject(new Error('Worker runtime disposed'));
 
     if (this._remote) {
@@ -541,6 +568,7 @@ export class WorkerRuntimeBackend extends AbstractRuntimeBackend {
           remote.unregisterCommTarget(targetName)
       });
 
+      this._isReady = true;
       this._ready.resolve();
     } catch (error) {
       this._handleWorkerFatal(normalizeError(error));
@@ -563,8 +591,9 @@ export class WorkerRuntimeBackend extends AbstractRuntimeBackend {
   }
 
   protected readonly _runtimeLabel = 'Worker';
+  protected readonly _options: WorkerRuntimeBackend.IOptions;
 
-  private _options: WorkerRuntimeBackend.IOptions;
+  private _isReady = false;
   private _worker: Worker | null = null;
   private _outputProxy: RuntimeOutputCallback | null = null;
 

@@ -1,8 +1,9 @@
 // Copyright (c) Jupyter Development Team.
 // Distributed under the terms of the Modified BSD License.
 
-import { uuid } from '../env';
+import { hostConsole, uuid } from '../env';
 import type { RuntimeOutputHandler } from '../protocol';
+import { isThenable } from '../utils';
 
 /**
  * Represents an open comm channel.
@@ -44,6 +45,7 @@ export class CommManager {
   ) {
     this._onOutput = onOutput;
     this._onTargetRegistered = options.onTargetRegistered;
+    this._reportError = options.reportError;
   }
 
   /**
@@ -164,7 +166,10 @@ export class CommManager {
     }
     const comm = this._createComm(commId, targetName);
     this._comms.set(commId, comm);
-    handler(comm, data, buffers);
+    if (!this.invokeCallback(() => handler(comm, data, buffers))) {
+      // Close the comm when its handler fails, like ipykernel
+      this.invokeCallback(() => comm.close());
+    }
   }
 
   /**
@@ -177,8 +182,10 @@ export class CommManager {
     data: Record<string, unknown>,
     buffers?: ArrayBuffer[]
   ): void {
-    const comm = this._comms.get(commId);
-    comm?.onMsg?.(data, buffers);
+    const onMsg = this._comms.get(commId)?.onMsg;
+    if (onMsg) {
+      this.invokeCallback(() => onMsg(data, buffers));
+    }
   }
 
   /**
@@ -193,9 +200,60 @@ export class CommManager {
   ): void {
     const comm = this._comms.get(commId);
     if (comm) {
-      comm.onClose?.(data, buffers);
+      const onClose = comm.onClose;
+      if (onClose) {
+        this.invokeCallback(() => onClose(data, buffers));
+      }
       this._widgets.delete(commId);
       this._comms.delete(commId);
+    }
+  }
+
+  /**
+   * Report an error thrown by a callback of the user, outside of an
+   * execution: the evaluator prints it in the outputs.
+   *
+   * @param error - The thrown value.
+   * @param inPromise - Whether the value is the reason of a rejected promise.
+   *
+   * @internal
+   */
+  reportError(error: unknown, inPromise = false): void {
+    if (this._reportError) {
+      this._reportError(error, inPromise);
+    } else {
+      hostConsole()?.error?.(
+        inPromise ? 'Uncaught (in promise)' : 'Uncaught',
+        error
+      );
+    }
+  }
+
+  /**
+   * Call a callback of the user, like a comm handler or the handler of a
+   * widget event, and report its errors, as well as the rejection of the
+   * promise it returns.
+   *
+   * The callbacks are called by the kernel, which may run in another realm
+   * than the user code (the page of an iframe), so their errors are caught
+   * here rather than by the error listeners of the realm of the user code.
+   *
+   * @returns Whether the callback returned without throwing.
+   *
+   * @internal
+   */
+  invokeCallback(callback: () => unknown): boolean {
+    try {
+      const result = callback();
+      if (isThenable(result)) {
+        result.then(undefined, (error: unknown) => {
+          this.reportError(error, true);
+        });
+      }
+      return true;
+    } catch (error) {
+      this.reportError(error);
+      return false;
     }
   }
 
@@ -294,6 +352,7 @@ export class CommManager {
 
   private _onOutput: RuntimeOutputHandler;
   private _onTargetRegistered?: (targetName: string) => void;
+  private _reportError?: (error: unknown, inPromise: boolean) => void;
   private _comms = new Map<string, IComm>();
   private _targets = new Map<string, CommTargetHandler>();
   private _widgets = new Map<string, unknown>();
@@ -313,5 +372,12 @@ export namespace CommManager {
      * register the targets on their side before the frontend can open comms.
      */
     onTargetRegistered?: (targetName: string) => void;
+
+    /**
+     * Called with the errors thrown by the comm handlers and the callbacks
+     * of the widgets, and the rejections of the promises they return, to
+     * show them to the user. Defaults to the console of the host.
+     */
+    reportError?: (error: unknown, inPromise: boolean) => void;
   }
 }

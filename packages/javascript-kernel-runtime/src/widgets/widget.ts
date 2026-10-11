@@ -2,7 +2,6 @@
 // Distributed under the terms of the Modified BSD License.
 
 import type { CommManager, IComm } from '../comm';
-import { hostConsole } from '../env';
 import { toBytes } from '../utils';
 
 import {
@@ -316,13 +315,13 @@ export class Widget {
     return value;
   }
 
+  /**
+   * Call the listeners of an event. Their errors, and the rejections of the
+   * promises they return, are shown in the outputs.
+   */
   protected _trigger(event: string, ...args: unknown[]): void {
     for (const cb of this._listeners.get(event) ?? []) {
-      try {
-        cb(...args);
-      } catch (e) {
-        hostConsole()?.error?.(`[Widget] Error in '${event}' handler:`, e);
-      }
+      this._manager.invokeCallback(() => cb(...args));
     }
   }
 

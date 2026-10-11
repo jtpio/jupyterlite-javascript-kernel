@@ -67,6 +67,67 @@ for (const kernel of KERNELS) {
       expect(await page.notebook.getCellTextOutput(cell)).toEqual(['2']);
     });
 
+    test('Show the errors of the button handlers', async ({ page }) => {
+      const index = await runCode(
+        page,
+        [
+          'const { Button, HBox } = Jupyter.widgets;',
+          'const failing = new Button({ description: "Fail" });',
+          'failing.onClick(() => {',
+          'throw new Error("bad click");',
+          '});',
+          'const rejecting = new Button({ description: "Fail later" });',
+          'rejecting.onClick(async () => {',
+          'throw new Error("bad async click");',
+          '});',
+          'new HBox({ children: [failing, rejecting] })'
+        ].join('\n')
+      );
+      const outputs = await getOutputs(page, index);
+      const stderr = await getOutputs(
+        page,
+        index,
+        'application/vnd.jupyter.stderr'
+      );
+
+      // The errors are printed on stderr, one after the other
+      await outputs.getByRole('button', { name: 'Fail', exact: true }).click();
+      await expect(stderr).toContainText('Uncaught Error: bad click');
+      await expect(stderr).toContainText('at In[1]:4:');
+
+      await outputs.getByRole('button', { name: 'Fail later' }).click();
+      await expect(stderr).toContainText(
+        'Uncaught (in promise) Error: bad async click'
+      );
+
+      // The button still works
+      await outputs.getByRole('button', { name: 'Fail', exact: true }).click();
+      await expect(stderr).toHaveText(
+        /bad click[^]*bad async click[^]*bad click/
+      );
+    });
+
+    test('Show the errors of the callbacks captured by an Output', async ({
+      page
+    }) => {
+      const index = await runCode(
+        page,
+        [
+          'const { Output } = Jupyter.widgets;',
+          'const output = new Output();',
+          'const job = output.capture(async () => {',
+          'throw new Error("captured");',
+          '});',
+          'job();'
+        ].join('\n')
+      );
+
+      const outputArea = await page.notebook.getCellOutputLocator(index);
+      await expect(outputArea!).toContainText(
+        'Uncaught (in promise) Error: captured'
+      );
+    });
+
     test('Observe the changes made in the frontend', async ({ page }) => {
       const index = await runCode(
         page,

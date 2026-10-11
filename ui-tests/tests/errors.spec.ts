@@ -141,6 +141,52 @@ for (const kernel of KERNELS) {
       expect(lines).toContain('  ]');
     });
 
+    test('Show errors thrown later in callbacks', async ({ page }) => {
+      let index = await runCode(
+        page,
+        'setTimeout(() => { throw new Error("later") }, 0)'
+      );
+
+      const lines = await getErrorLines(page, index);
+      expect(lines[0]).toBe('In[1]:1');
+      expect(lines).toContain('Uncaught Error: later');
+      expect(lines).toContainEqual(
+        expect.stringMatching(/^ {4}at In\[1\]:1:\d+$/)
+      );
+
+      // The kernel keeps running
+      index = await runCode(page, '1 + 1');
+      expect(await page.notebook.getCellTextOutput(index)).toEqual(['2']);
+    });
+
+    test('Show unhandled promise rejections', async ({ page }) => {
+      let index = await runCode(page, 'Promise.reject(new Error("nope"));');
+      expect(await getErrorLines(page, index)).toContain(
+        'Uncaught (in promise) Error: nope'
+      );
+
+      // An async function called without await
+      index = await runCode(
+        page,
+        [
+          'async function load() {',
+          'throw new TypeError("not loaded")',
+          '}',
+          'load();'
+        ].join('\n')
+      );
+
+      const lines = await getErrorLines(page, index);
+      expect(lines[0]).toBe('In[2]:2');
+      expect(lines).toContain('Uncaught (in promise) TypeError: not loaded');
+      expect(lines).toContainEqual(
+        expect.stringMatching(/^ {4}at load \(In\[2\]:2:\d+\)$/)
+      );
+
+      index = await runCode(page, '1 + 1');
+      expect(await page.notebook.getCellTextOutput(index)).toEqual(['2']);
+    });
+
     test('Map the frames of logged and displayed errors', async ({ page }) => {
       let index = await runCode(
         page,

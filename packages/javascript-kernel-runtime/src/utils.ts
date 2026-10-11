@@ -125,3 +125,17 @@ const arrayBufferByteLength = Object.getOwnPropertyDescriptor(
 export function isArrayBuffer(value: unknown): boolean {
   return safe(() => (arrayBufferByteLength.call(value), true), false);
 }
+
+/**
+ * Whether a value is a thenable, like a promise of any realm.
+ */
+export function isThenable(value: unknown): value is PromiseLike<unknown> {
+  return (
+    (typeof value === 'object' || typeof value === 'function') &&
+    value !== null &&
+    safe(
+      () => typeof (value as PromiseLike<unknown>).then === 'function',
+      false
+    )
+  );
+}

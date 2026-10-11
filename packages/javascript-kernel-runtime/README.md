@@ -105,7 +105,10 @@ The methods of the evaluator:
   `handleCommMsg(commId, data, buffers?, parentMessageId?)` and
   `handleCommClose(commId, data, buffers?, parentMessageId?)` handle the comm
   messages of the frontend.
-- `dispose()` removes the globals of the evaluator.
+- `reportUncaught(error, inPromise?)` prints an error thrown outside of an
+  execution on stderr, as `Uncaught Error: ...`, or
+  `Uncaught (in promise) Error: ...` for the reason of a rejected promise.
+- `dispose()` removes the globals and the listeners of the evaluator.
 
 `onOutput` is called synchronously and in order, during `execute()` and also
 later, for the outputs of callbacks, timers and widget handlers: the host
@@ -202,16 +205,37 @@ Error: boom
     at In[3]:4:1
 ```
 
-To report the errors thrown outside of an execution, like in a timer, format
-them with the executor of the evaluator:
+The errors thrown outside of an execution, like in a timer, are printed on
+stderr, with the same locations:
+
+```
+In[4]:1
+setTimeout(() => { throw new Error("later") }, 0)
+                         ^
+
+Uncaught Error: later
+    at In[4]:1:26
+```
+
+- When `globalScope` has `addEventListener`, the evaluator listens for its
+  `error` and `unhandledrejection` events, and cancels them: in a Web Worker,
+  the errors it does not cancel reach the `onerror` handler of the `Worker`
+  in the page.
+- The errors of the comm handlers and of the callbacks of the widgets, and the
+  rejections of the promises they return, are caught by the runtime, since the
+  runtime may not run in the realm of the cells: in an iframe kernel, it runs
+  in the page.
+- An engine without these events calls `evaluator.reportUncaught(error)` with
+  the errors it catches, like the exceptions of its jobs, and
+  `evaluator.reportUncaught(reason, true)` for the promises rejected without a
+  handler (`JS_SetHostPromiseRejectionTracker` in QuickJS).
+
+To format the errors in another way, use the executor of the evaluator:
 
 ```javascript
-const { traceback } = evaluator.executor.formatError(error, {
-  prefix: 'Uncaught'
-});
-onOutput({
-  type: 'stream',
-  bundle: { name: 'stderr', text: traceback.join('\n') + '\n' }
+const { ename, evalue, traceback } = evaluator.executor.formatError(error, {
+  prefix: 'Uncaught',
+  colors: false
 });
 ```
 

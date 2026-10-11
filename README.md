@@ -243,6 +243,7 @@ Error: boom
 - Values thrown that are not errors are shown as is, like `Uncaught 'x'` for `throw "x"`.
 - The `cause` of an error and the errors of an `AggregateError` are shown nested, under `[cause]:` and `[errors]:`.
 - `console.error(error)`, `console.trace()` and the errors shown as values use the same locations.
+- The errors thrown later, in a timer, an event listener or the handler of a widget, are printed on stderr as `Uncaught Error: ...`, in the outputs of the last cell that ran. The promises rejected without a handler, like an async function called without `await`, are printed as `Uncaught (in promise) Error: ...`. The kernel keeps running. These errors are shown in the notebook instead of the console of the browser.
 
 The columns can differ slightly between browsers, which point at different parts of the expression that failed.
 
