@@ -21,6 +21,15 @@ See the docs on [hatch-nodejs-version](https://github.com/agoose77/hatch-nodejs-
 hatch version <new-version>
 ```
 
+`hatch version` alone only bumps the version in the root `package.json`. When
+you bump the versions of the npm packages without the Jupyter Releaser (for
+example with `jlpm bump:js:version`), also regenerate the version reported by
+the kernel:
+
+```bash
+jlpm version:sync
+```
+
 Make sure to clean up all the development files before building the package:
 
 ```bash

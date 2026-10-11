@@ -10,6 +10,8 @@ args = parser.parse_args()
 version = args.version
 
 run(f"jlpm bump:js:version {version}", shell=True, check=True)
+# Regenerate packages/javascript-kernel/src/version.ts from the new version
+run("jlpm version:sync", shell=True, check=True)
 
 root = Path(__file__).parent.parent
 version_file = root / "packages" / "javascript-kernel-extension" / "package.json"

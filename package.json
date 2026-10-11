@@ -31,13 +31,16 @@
     "clean:all": "lerna run clean && rimraf node_modules",
     "install:dev": "yarn run build:prod && yarn run develop",
     "install:extension": "jupyter-builder develop --overwrite .",
+    "ecmascript:check": "node scripts/ecmascript.mjs",
     "eslint": "eslint . --ext .ts,.tsx --fix",
     "eslint:check": "eslint . --ext .ts,.tsx",
     "lint": "yarn run eslint && yarn run prettier",
-    "lint:check": "yarn run eslint:check && yarn run prettier:check",
+    "lint:check": "yarn run eslint:check && yarn run prettier:check && yarn run version:check && yarn run ecmascript:check",
     "prettier": "prettier --write \"**/*{.ts,.tsx,.js,.jsx,.css,.json,.md}\"",
     "prettier:check": "prettier --list-different \"**/*{.ts,.tsx,.js,.jsx,.css,.json,.md}\"",
     "publish": "yarn run clean && yarn run build && lerna publish",
+    "version:check": "node scripts/version.mjs --check",
+    "version:sync": "node scripts/version.mjs",
     "watch": "lerna run watch"
   },
   "devDependencies": {

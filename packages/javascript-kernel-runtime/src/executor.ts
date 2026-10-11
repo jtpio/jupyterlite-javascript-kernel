@@ -25,6 +25,15 @@ import { escapeHtml, safe } from './utils';
 const RE_EVAL = /\beval\b/;
 
 /**
+ * The ECMAScript edition accepted by the kernel.
+ *
+ * The cells are parsed with the latest edition known to acorn, so this is
+ * the latest edition of the installed acorn: `jlpm lint:check` verifies it,
+ * bump it together with acorn. The browser decides which built-in APIs exist.
+ */
+export const ECMASCRIPT_EDITION = 2026;
+
+/**
  * Parse the code of a cell. Cells are parsed as modules, so that they can
  * use import declarations and top-level await.
  */

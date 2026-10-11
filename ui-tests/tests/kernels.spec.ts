@@ -6,6 +6,7 @@ import type { Locator } from '@playwright/test';
 
 import {
   IFRAME_KERNEL,
+  KERNEL_VERSION,
   KERNELS,
   WORKER_KERNEL,
   createNotebook,
@@ -59,8 +60,13 @@ for (const kernel of KERNELS) {
         .getByRole('button', { name: kernel.displayName })
         .click();
       const console = page.locator('.jp-CodeConsole');
-      await expect(console.locator('.jp-CodeConsole-banner')).toContainText(
-        `A JavaScript kernel running in the browser (${kernel.runtime})`
+      const banner = console.locator('.jp-CodeConsole-banner');
+      await expect(banner).toContainText(
+        `JavaScript kernel ${KERNEL_VERSION} for JupyterLite (${kernel.runtime} runtime)`
+      );
+      await expect(banner).toContainText('ECMAScript 20');
+      await expect(banner).toContainText(
+        kernel === WORKER_KERNEL ? 'without the DOM' : 'with access to the DOM'
       );
       await waitForKernelIdle(page, kernel);
 
@@ -73,6 +79,47 @@ for (const kernel of KERNELS) {
       await expect(
         console.locator('.jp-CodeConsole-content .jp-OutputArea-output')
       ).toHaveText(["'a and b'"]);
+    });
+
+    test('Show the kernel banner from the Help menu', async ({ page }) => {
+      await createNotebook(page, kernel);
+
+      // The item appears once JupyterLab has fetched the kernel info
+      const menu = await page.menu.openLocator('Help');
+      const about = menu!.getByRole('menuitem', { name: kernel.about });
+      await expect(about).toBeVisible();
+      await about.click();
+
+      const dialog = page.locator('.jp-Dialog');
+      await expect(dialog).toContainText(
+        `JavaScript kernel ${KERNEL_VERSION} for JupyterLite (${kernel.runtime} runtime)`
+      );
+      await dialog.getByRole('button', { name: 'Close' }).click();
+      await expect(dialog).toHaveCount(0);
+    });
+
+    test('Show the kernel help links in the Help menu', async ({ page }) => {
+      await page.route('https://github.com/**', route =>
+        route.fulfill({ contentType: 'text/html', body: '<html></html>' })
+      );
+      await createNotebook(page, kernel);
+
+      const menu = await page.menu.openLocator('Help');
+      for (const name of ['JavaScript Reference', 'Web APIs']) {
+        await expect(
+          menu!.getByRole('menuitem', { name, exact: true })
+        ).toBeVisible();
+      }
+      await menu!
+        .getByRole('menuitem', { name: 'JavaScript Kernel', exact: true })
+        .click();
+
+      const tab = page.activity.getTabLocator('JavaScript Kernel');
+      await expect(tab).toBeVisible();
+      await expect(page.locator('.jp-Help iframe')).toHaveAttribute(
+        'src',
+        'https://github.com/jupyterlite/javascript-kernel#readme'
+      );
     });
 
     test('Wait for the code to be complete in a console', async ({ page }) => {
@@ -147,3 +194,18 @@ for (const kernel of KERNELS) {
     });
   });
 }
+
+test.describe(`Kernel info (${IFRAME_KERNEL.displayName})`, () => {
+  test('Store the language info in the notebook metadata', async ({ page }) => {
+    await createNotebook(page, IFRAME_KERNEL);
+
+    await page.sidebar.openTab('jp-property-inspector');
+    const inspector = page.sidebar.getContentPanelLocator('right');
+    await inspector.getByText('Advanced Tools').click();
+
+    const metadata = inspector.locator('.jp-JSONEditor').last();
+    await expect(metadata).toContainText(/"version": "ES20\d\d"/);
+    await expect(metadata).toContainText('"nbconvert_exporter": "script"');
+    await expect(metadata).toContainText('"mimetype": "text/javascript"');
+  });
+});

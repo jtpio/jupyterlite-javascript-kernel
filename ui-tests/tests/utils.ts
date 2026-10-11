@@ -3,6 +3,18 @@
 
 import { expect, type IJupyterLabPageFixture } from '@jupyterlab/galata';
 import type { Locator } from '@playwright/test';
+import * as fs from 'fs';
+import * as path from 'path';
+
+/**
+ * The version of the kernel package, reported in the kernel banner.
+ */
+export const KERNEL_VERSION: string = JSON.parse(
+  fs.readFileSync(
+    path.resolve(__dirname, '../../packages/javascript-kernel/package.json'),
+    'utf-8'
+  )
+).version;
 
 /**
  * A JavaScript kernel registered by the extension.
@@ -22,6 +34,11 @@ export interface IKernel {
    * The name of the runtime in the kernel banner.
    */
   runtime: string;
+
+  /**
+   * The label of the Help menu item showing the kernel banner.
+   */
+  about: string;
 }
 
 /**
@@ -30,7 +47,8 @@ export interface IKernel {
 export const IFRAME_KERNEL: IKernel = {
   name: 'javascript',
   displayName: 'JavaScript (IFrame)',
-  runtime: 'IFrame'
+  runtime: 'IFrame',
+  about: 'About the JavaScript (IFrame) Kernel'
 };
 
 /**
@@ -39,7 +57,8 @@ export const IFRAME_KERNEL: IKernel = {
 export const WORKER_KERNEL: IKernel = {
   name: 'javascript-worker',
   displayName: 'JavaScript (Web Worker)',
-  runtime: 'Web Worker'
+  runtime: 'Web Worker',
+  about: 'About the JavaScript (Web Worker) Kernel'
 };
 
 /**

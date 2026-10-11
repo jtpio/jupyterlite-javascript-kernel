@@ -6,3 +6,4 @@ export * from './kernel';
 export * from './runtime_protocol';
 export * from './runtime_backends';
 export * from './startup';
+export * from './version';

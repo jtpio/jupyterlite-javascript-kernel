@@ -40,6 +40,21 @@ The extension currently registers two JavaScript kernelspecs:
 
 Pick either kernel from the notebook kernel selector in JupyterLite.
 
+### Kernel information
+
+The kernel banner shows the version of the kernel and the runtime it uses, for
+example `JavaScript kernel 0.4.0 for JupyterLite (Web Worker runtime)`. It is
+shown at the top of consoles, and in the dialog opened from **Help > About the
+JavaScript (IFrame) Kernel** or **Help > About the JavaScript (Web Worker)
+Kernel**.
+
+The language version in the kernel info, saved in the `language_info` of the
+notebook metadata, is the ECMAScript edition that the kernel parses, like
+`ES2026`. The browser decides which built-in APIs exist.
+
+While a JavaScript notebook or console is active, the **Help** menu also links
+to the MDN JavaScript Reference, the MDN Web APIs and this README.
+
 ### Kernel startup extensions
 
 Frontend extensions can register startup work that runs before user code in
@@ -384,6 +399,15 @@ By default, the `jlpm build` command generates the source maps for this extensio
 ```bash
 jupyter lab build --minimize=False
 ```
+
+The version reported by the kernel comes from
+`packages/javascript-kernel/src/version.ts`, generated from `package.json` by
+`jlpm version:sync`. `jlpm lint:check` verifies that it is up to date, and
+`scripts/bump-version.py` regenerates it during releases. `jlpm lint:check`
+also verifies that the ECMAScript edition reported by the kernel
+(`ECMASCRIPT_EDITION` in `packages/javascript-kernel-runtime/src/executor.ts`)
+is the latest edition of the installed `acorn` parser: update it together with
+`acorn`.
 
 ### Running the tests
 

@@ -6,6 +6,7 @@ import type { KernelMessage } from '@jupyterlab/services';
 import { BaseKernel, type IKernel } from '@jupyterlite/services';
 
 import {
+  ECMASCRIPT_EDITION,
   normalizeError as normalizeUnknownError,
   type JavaScriptExecutor,
   type RuntimeOutputMessage
@@ -17,6 +18,7 @@ import {
   WorkerRuntimeBackend
 } from './runtime_backends';
 import type { RuntimeMode } from './runtime_protocol';
+import { KERNEL_VERSION } from './version';
 
 /**
  * A kernel that executes JavaScript code in browser runtimes.
@@ -69,35 +71,61 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
    * Handle a kernel_info_request message.
    */
   async kernelInfoRequest(): Promise<KernelMessage.IInfoReplyMsg['content']> {
-    const runtimeName =
-      this._runtimeMode === 'worker' ? 'Web Worker' : 'IFrame';
-
-    const content: KernelMessage.IInfoReply = {
-      implementation: 'JavaScript',
-      implementation_version: '0.1.0',
+    return {
+      status: 'ok',
+      protocol_version: '5.3',
+      implementation: 'jupyterlite-javascript-kernel',
+      implementation_version: KERNEL_VERSION,
       language_info: {
+        name: 'javascript',
+        version: `ES${ECMASCRIPT_EDITION}`,
+        mimetype: 'text/javascript',
+        file_extension: '.js',
         codemirror_mode: {
           name: 'javascript'
         },
-        file_extension: '.js',
-        mimetype: 'text/javascript',
-        name: 'javascript',
-        nbconvert_exporter: 'javascript',
         pygments_lexer: 'javascript',
-        version: 'es2017'
+        // nbconvert has no javascript exporter: the script exporter writes
+        // the code cells to a file with the extension above
+        nbconvert_exporter: 'script'
       },
-      protocol_version: '5.3',
-      status: 'ok',
-      banner: `A JavaScript kernel running in the browser (${runtimeName})`,
+      banner: this.banner,
       help_links: [
         {
+          text: 'JavaScript Reference',
+          url: 'https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference'
+        },
+        {
+          text: 'Web APIs',
+          url: 'https://developer.mozilla.org/en-US/docs/Web/API'
+        },
+        {
           text: 'JavaScript Kernel',
-          url: 'https://github.com/jupyterlite/javascript-kernel'
+          url: 'https://github.com/jupyterlite/javascript-kernel#readme'
         }
       ]
     };
+  }
 
-    return content;
+  /**
+   * The name of the runtime shown in the kernel banner.
+   */
+  protected get runtimeName(): string {
+    return this._runtimeMode === 'worker' ? 'Web Worker' : 'IFrame';
+  }
+
+  /**
+   * The kernel banner, shown in consoles and in the Help menu.
+   */
+  protected get banner(): string {
+    const where =
+      this._runtimeMode === 'worker'
+        ? 'Code runs in a Web Worker, off the main thread, without the DOM.'
+        : 'Code runs in an iframe, with access to the DOM.';
+    return (
+      `JavaScript kernel ${KERNEL_VERSION} for JupyterLite (${this.runtimeName} runtime)\n` +
+      `ECMAScript ${ECMASCRIPT_EDITION}. ${where}`
+    );
   }
 
   /**
