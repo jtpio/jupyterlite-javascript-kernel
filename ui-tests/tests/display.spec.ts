@@ -2,6 +2,7 @@
 // Distributed under the terms of the Modified BSD License.
 
 import { expect, test } from '@jupyterlab/galata';
+import type { Locator } from '@playwright/test';
 
 import {
   IFRAME_KERNEL,
@@ -246,6 +247,69 @@ for (const kernel of KERNELS) {
       await expect(outputs).not.toHaveClass(/jp-RenderedJSON/);
     });
 
+    test('Show Vega-Lite charts and Mermaid diagrams', async ({ page }) => {
+      const spec = [
+        '({',
+        '  $schema: "https://vega.github.io/schema/vega-lite/v5.json",',
+        '  data: { values: [{ a: "A", b: 3 }, { a: "B", b: 5 }] },',
+        '  mark: "bar",',
+        '  encoding: {',
+        '    x: { field: "a", type: "nominal" },',
+        '    y: { field: "b", type: "quantitative" }',
+        '  }',
+        '})'
+      ].join('\n');
+      await runCode(page, `const spec = ${spec};`);
+      let index = await runCode(page, 'display.vegalite(spec);');
+      let outputs = await getOutputs(page, index);
+      await expect(
+        outputs.locator('.vega-embed').locator('canvas.marks, svg.marks')
+      ).toBeVisible();
+
+      // A spec with a Vega-Lite $schema is shown as a chart
+      index = await runCode(page, 'spec');
+      outputs = await getOutputs(page, index);
+      await expect(
+        outputs.locator('.vega-embed').locator('canvas.marks, svg.marks')
+      ).toBeVisible();
+      await expect(outputs).not.toHaveClass(/jp-RenderedJSON/);
+
+      index = await runCode(page, 'display.mermaid`graph TD; A-->B`;');
+      // The diagram is an SVG image
+      outputs = await getOutputs(page, index);
+      await expect(
+        outputs.getByRole('figure').getByRole('img')
+      ).toHaveAttribute('src', /^data:image\/svg\+xml/);
+    });
+
+    test('Keep the order of the outputs of an image being encoded', async ({
+      page
+    }) => {
+      const index = await runCode(
+        page,
+        [
+          'const c = new OffscreenCanvas(40, 30);',
+          'const g = c.getContext("2d");',
+          'g.fillStyle = "teal";',
+          'g.fillRect(0, 0, 40, 30);',
+          'display(c, { id: true });',
+          'console.log("after the image");'
+        ].join('\n')
+      );
+
+      const outputs = await getOutputs(page, index);
+      await expect(outputs).toHaveCount(2);
+      await expect(outputs.nth(0)).toHaveAttribute(
+        'data-mime-type',
+        'image/png'
+      );
+      await expect(outputs.nth(1)).toHaveText('after the image');
+      const image = outputs.nth(0).locator('img');
+      await expect
+        .poll(() => image.evaluate((img: HTMLImageElement) => img.naturalWidth))
+        .toBe(40);
+    });
+
     test('Format built-in objects', async ({ page }) => {
       let index = await runCode(page, 'new Date(0)');
       await expect(await getOutputs(page, index)).toContainText(
@@ -296,11 +360,18 @@ test.describe(`Rich display (${IFRAME_KERNEL.displayName})`, () => {
         'canvas'
       ].join('\n')
     );
-    const image = (await getOutputs(page, index, 'image/png')).locator('img');
+    let image = (await getOutputs(page, index, 'image/png')).locator('img');
     await expect(image).toBeVisible();
     await expect
       .poll(() => image.evaluate((img: HTMLImageElement) => img.naturalWidth))
       .toBe(40);
+
+    // The pixels of a canvas
+    index = await runCode(page, 'context.getImageData(0, 0, 20, 10)');
+    image = (await getOutputs(page, index, 'image/png')).locator('img');
+    await expect
+      .poll(() => image.evaluate((img: HTMLImageElement) => img.naturalWidth))
+      .toBe(20);
   });
 });
 
@@ -312,5 +383,47 @@ test.describe(`Rich display (${WORKER_KERNEL.displayName})`, () => {
     expect(await page.notebook.getCellTextOutput(index)).toEqual([
       "'undefined'"
     ]);
+  });
+
+  test('Show the drawings of an OffscreenCanvas as images', async ({
+    page
+  }) => {
+    await createNotebook(page, WORKER_KERNEL);
+    const naturalWidth = (image: Locator) =>
+      image.evaluate((img: HTMLImageElement) => img.naturalWidth);
+
+    let index = await runCode(
+      page,
+      [
+        'const c = new OffscreenCanvas(40, 30);',
+        'const g = c.getContext("2d");',
+        'g.fillStyle = "teal";',
+        'g.fillRect(0, 0, 40, 30);',
+        'c'
+      ].join('\n')
+    );
+    let image = (await getOutputs(page, index, 'image/png')).locator('img');
+    await expect.poll(() => naturalWidth(image)).toBe(40);
+
+    // A Blob of an image, an ImageData and an ImageBitmap
+    index = await runCode(
+      page,
+      [
+        'display(await c.convertToBlob());',
+        'display(g.getImageData(0, 0, 20, 10));',
+        'await createImageBitmap(c, 0, 0, 30, 10)'
+      ].join('\n')
+    );
+    const images = (await getOutputs(page, index, 'image/png')).locator('img');
+    await expect(images).toHaveCount(3);
+    await expect.poll(() => naturalWidth(images.nth(0))).toBe(40);
+    await expect.poll(() => naturalWidth(images.nth(1))).toBe(20);
+    await expect.poll(() => naturalWidth(images.nth(2))).toBe(30);
+
+    // The image helpers encode the drawings in their format
+    index = await runCode(page, 'display.jpeg(c, { width: 80 });');
+    image = (await getOutputs(page, index, 'image/jpeg')).locator('img');
+    await expect(image).toHaveAttribute('width', '80');
+    await expect.poll(() => naturalWidth(image)).toBe(40);
   });
 });

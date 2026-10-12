@@ -14,7 +14,7 @@ import {
 import { CommManager } from './comm';
 import type { CommTargetHandler } from './comm';
 import { createConsole, type KernelConsole } from './console';
-import { createDisplay, type IDisplay } from './display';
+import { createDisplay, imageBundle, type IDisplay } from './display';
 import { hostConsole } from './env';
 import { setPromiseStateResolver, type PromiseStateResolver } from './inspect';
 import { LoopGuard, TimerRegistry, defaultClock } from './interrupt';
@@ -25,7 +25,7 @@ import {
   type IOutputScope,
   type IParentMessage
 } from './output_router';
-import type { RuntimeOutputHandler } from './protocol';
+import type { RuntimeOutputHandler, RuntimeOutputMessage } from './protocol';
 import { safe, stripAnsi } from './utils';
 import {
   Widget,
@@ -131,6 +131,7 @@ export class JavaScriptRuntimeEvaluator {
       onTargetRegistered: options.onCommTargetRegistered,
       reportError: (error, inPromise) => this.reportUncaught(error, inPromise),
       mimeBundle: value => this._mimeBundle(value),
+      display: value => this._display(value),
       router: this._router,
       flushOutputs: sink =>
         this._outputs.flush(header => this._router.sinkOf(header) === sink),
@@ -138,14 +139,22 @@ export class JavaScriptRuntimeEvaluator {
     });
     registerWidgetControlTarget(this._commManager);
     this._display = createDisplay({
-      publish: (data, metadata, transient, update) => {
-        const bundle = { data, metadata, transient } as any;
-        if (update) {
-          this._onOutput({ type: 'update_display_data', bundle });
+      publish: (data, metadata, transient, update, ready) => {
+        const bundle = { data, metadata, transient };
+        const message = {
+          type: update ? 'update_display_data' : 'display_data',
+          bundle
+        } as RuntimeOutputMessage;
+        if (ready) {
+          this._sendLater(
+            message,
+            ready.then(output => ({ ...bundle, ...output }))
+          );
         } else {
-          this._onOutput({ type: 'display_data', bundle });
+          this._onOutput(message);
         }
       },
+      encodeImage: (value, type) => this._executor.encodeImage(value, type),
       clear: wait => {
         this._onOutput({ type: 'clear_output', bundle: { wait } });
       },
@@ -263,10 +272,14 @@ export class JavaScriptRuntimeEvaluator {
    * `interruptBuffer`. The async callbacks captured by the Output widgets
    * stop capturing the outputs, and the waits for the changes of the
    * widgets, like `slider.changed()`, stop: their promises never settle.
+   * The outputs waiting for an image being encoded are sent, with the text
+   * of the image.
    */
   interrupt(): void {
     this._guard.interrupt();
     this._timers.clearAll();
+    // The images being encoded are shown as text
+    this._outputs.releaseHeld();
     this._router.endHeld();
     this._commManager.cancelWaits();
   }
@@ -385,16 +398,29 @@ export class JavaScriptRuntimeEvaluator {
         this._router.runInScope(cell, () => {
           if (result instanceof Widget) {
             this._commManager.displayWidget(result.commId);
+            return;
+          }
+          const message: RuntimeOutputMessage = {
+            type: 'execute_result',
+            bundle: {
+              execution_count: executionCount,
+              data: this._mimeBundle(result),
+              metadata: {}
+            }
+          };
+          // An OffscreenCanvas, an ImageBitmap, an ImageData or a Blob of
+          // an image, shown as an image once encoded
+          const image = this._executor.encodeImage(result);
+          if (image) {
+            this._sendLater(
+              message,
+              image.then(encoded => ({
+                ...message.bundle,
+                data: imageBundle(encoded)
+              }))
+            );
           } else {
-            const data = this._mimeBundle(result);
-            this._onOutput({
-              type: 'execute_result',
-              bundle: {
-                execution_count: executionCount,
-                data,
-                metadata: {}
-              }
-            });
+            this._onOutput(message);
           }
         });
       }
@@ -415,8 +441,31 @@ export class JavaScriptRuntimeEvaluator {
       this._executor.introspection.registerDocs(docs);
       // document.open() removes the listeners of the window, add them back
       this._listenForUncaughtErrors();
-      // The outputs of the cell are sent before its reply
+      // The outputs of the cell are sent before its reply, after the images
+      // being encoded, like the ones of display(canvas)
+      await this._outputs.settled();
       this._outputs.flush();
+    }
+  }
+
+  /**
+   * Send an output message once its bundle is ready, like the image of an
+   * OffscreenCanvas being encoded: it goes to the parent of the outputs sent
+   * now, and keeps its place, as the outputs sent after it wait for it. It
+   * is sent as is when the bundle fails.
+   */
+  private _sendLater(
+    message: RuntimeOutputMessage,
+    bundle: Promise<unknown>
+  ): void {
+    const routed = this._router.route(message);
+    if (routed) {
+      this._outputs.pushLater(
+        routed,
+        bundle.then(
+          ready => ({ ...routed, bundle: ready }) as RuntimeOutputMessage
+        )
+      );
     }
   }
 
@@ -626,8 +675,9 @@ export class JavaScriptRuntimeEvaluator {
    * The returned promise resolves at the next timer of the scheduler, once
    * the jobs queued by the handler ran: the outputs of an async callback
    * captured by the handler, like after an `await null`, still go to
-   * `parentHeader` until then. Without a scheduler, it resolves at once, and
-   * the host calls flushOutputs() once it ran the jobs.
+   * `parentHeader` until then, and so do the images still being encoded,
+   * which it waits for. Without a scheduler, it resolves at once, and the
+   * host calls flushOutputs() once it ran the jobs.
    */
   handleCommOpen(
     commId: string,
@@ -720,7 +770,15 @@ export class JavaScriptRuntimeEvaluator {
         resolve();
       };
       this._openRequests.add(end);
-      scheduler.setTimeout(end, 0);
+      // The images being encoded are sent before the reply, like the one of
+      // display(canvas) in a click captured by an Output widget
+      scheduler.setTimeout(() => {
+        void this._outputs.settled().then(() => {
+          if (this._openRequests.has(end)) {
+            end();
+          }
+        });
+      }, 0);
     });
   }
 

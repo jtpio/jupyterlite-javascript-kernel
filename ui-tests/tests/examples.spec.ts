@@ -140,10 +140,12 @@ test.describe('Examples', () => {
     ).toBeVisible();
     await expect(outputs.getByRole('tab', { name: 'Slider' })).toBeVisible();
     await expect(outputs.getByText('Comm ID:')).toBeVisible();
-    await expect(outputs.getByRole('img').first()).toHaveAttribute(
-      'width',
-      '240'
-    );
+    // The image of the canvas drawn by the cell
+    const image = outputs.locator('.widget-image').first();
+    await expect(image).toHaveAttribute('width', '240');
+    await expect
+      .poll(() => image.evaluate((img: HTMLImageElement) => img.naturalWidth))
+      .toBe(240);
     // The controls of a function
     await expect(
       outputs.getByText("'A tomato circle of radius 52'")

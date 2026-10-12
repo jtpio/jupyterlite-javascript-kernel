@@ -4,6 +4,7 @@
 import type { IMimeBundle } from '@jupyterlab/nbformat';
 
 import { decodeUtf8 } from './env';
+import type { IEncodedImage } from './images';
 import {
   inspect,
   isBoxedPrimitive,
@@ -17,7 +18,13 @@ import {
   nativeGetterNames
 } from './inspect';
 import { setDoc } from './introspection';
-import { bytesToBase64, isArrayBuffer, isPlainObject, toBytes } from './utils';
+import {
+  bytesToBase64,
+  isArrayBuffer,
+  isPlainObject,
+  safe,
+  toBytes
+} from './utils';
 
 /**
  * Options of display() and of its helpers.
@@ -49,17 +56,32 @@ export interface IImageOptions extends IDisplayOptions {
 }
 
 /**
+ * The data and the metadata of an output.
+ */
+export interface IDisplayData {
+  data: IMimeBundle;
+  metadata: Record<string, unknown>;
+}
+
+/**
  * What display() needs from the kernel.
  */
 export interface IDisplayHost {
   /**
    * Publish a display_data message, or an update_display_data message.
+   *
+   * @param ready - The data of the output once it is ready, like the image
+   * of an OffscreenCanvas being encoded. The host sends the output with it,
+   * in the place of the output: the outputs sent after it wait for it, and
+   * it is sent with `data` and `metadata` when the promise rejects. A host
+   * which can not wait ignores it.
    */
   publish(
     data: IMimeBundle,
     metadata: Record<string, unknown>,
     transient: { display_id?: string },
-    update: boolean
+    update: boolean,
+    ready?: Promise<IDisplayData>
   ): void;
 
   /**
@@ -77,6 +99,17 @@ export interface IDisplayHost {
    * the kernel can read files.
    */
   readFile?(path: string): Uint8Array;
+
+  /**
+   * Encode the images which can only be encoded asynchronously, like an
+   * OffscreenCanvas, an ImageBitmap, an ImageData or a Blob of an image, or
+   * return null for the other values, with encodeImage(). Without it, these
+   * values are shown as text.
+   *
+   * @param type - The MIME type of the image, for display.png() and
+   * display.jpeg().
+   */
+  encodeImage?(value: unknown, type?: string): Promise<IEncodedImage> | null;
 }
 
 /**
@@ -105,6 +138,12 @@ export interface IDisplay {
     ...rest: unknown[]
   ): DisplayHandle | undefined;
   json(content: unknown, options?: IDisplayOptions): DisplayHandle | undefined;
+  vegalite(spec: unknown, options?: IDisplayOptions): DisplayHandle | undefined;
+  vega(spec: unknown, options?: IDisplayOptions): DisplayHandle | undefined;
+  mermaid(
+    content: string | TemplateStringsArray,
+    ...rest: unknown[]
+  ): DisplayHandle | undefined;
   png(content: unknown, options?: IImageOptions): DisplayHandle | undefined;
   jpeg(content: unknown, options?: IImageOptions): DisplayHandle | undefined;
   image?(
@@ -387,6 +426,103 @@ export function normalizeBundle(bundle: unknown): IMimeBundle {
   return data;
 }
 
+/**
+ * The MIME type of the Vega 5 charts.
+ */
+const VEGA_MIME_TYPE = 'application/vnd.vega.v5+json';
+
+/**
+ * The MIME type of the Vega-Lite 5 charts.
+ */
+const VEGA_LITE_MIME_TYPE = 'application/vnd.vegalite.v5+json';
+
+const VEGA_LITE_SCHEMA =
+  /^https?:\/\/vega\.github\.io\/schema\/vega-lite\/v(\d+)(?:\.[\w.-]*)?\.json$/;
+const VEGA_SCHEMA =
+  /^https?:\/\/vega\.github\.io\/schema\/vega\/v(\d+)(?:\.[\w.-]*)?\.json$/;
+
+/**
+ * The MIME type of a chart spec, from its `$schema`, like
+ * `application/vnd.vegalite.v5+json` for
+ * `https://vega.github.io/schema/vega-lite/v5.json`, or null when it is not
+ * a version JupyterLab renders: Vega-Lite 3 to 5, and Vega 5.
+ */
+export function chartMimeType(spec: unknown): string | null {
+  if (typeof spec !== 'object' || spec === null) {
+    return null;
+  }
+  const schema = safe(() => (spec as Record<string, unknown>).$schema);
+  if (typeof schema !== 'string') {
+    return null;
+  }
+  const lite = VEGA_LITE_SCHEMA.exec(schema);
+  if (lite && Number(lite[1]) >= 3 && Number(lite[1]) <= 5) {
+    return `application/vnd.vegalite.v${lite[1]}+json`;
+  }
+  return VEGA_SCHEMA.exec(schema)?.[1] === '5' ? VEGA_MIME_TYPE : null;
+}
+
+/**
+ * The MIME bundle of a plain object which is a Vega-Lite or a Vega spec,
+ * with a `$schema` of a version JupyterLab renders, or null: the result of
+ * a cell which is a chart spec shows the chart.
+ */
+export function chartBundle(spec: unknown): IMimeBundle | null {
+  const mimeType = isPlainObject(spec) ? chartMimeType(spec) : null;
+  if (!mimeType) {
+    return null;
+  }
+  const data = safe(() => chartJson(spec), undefined);
+  return data === undefined
+    ? null
+    : { [mimeType]: data, 'text/plain': chartText(mimeType) };
+}
+
+/**
+ * The JSON data of a chart spec, like JSON.stringify() makes it: the dates
+ * of the data are ISO strings, which Vega parses.
+ */
+function chartJson(spec: unknown): any {
+  return JSON.parse(JSON.stringify(spec));
+}
+
+/**
+ * The plain text of a chart.
+ */
+function chartText(mimeType: string): string {
+  return mimeType === VEGA_MIME_TYPE ? '<Vega chart>' : '<Vega-Lite chart>';
+}
+
+/**
+ * The MIME bundle of an image encoded by encodeImage(): its base64 data,
+ * or the source of an SVG image, with a short description as plain text.
+ */
+export function imageBundle(image: IEncodedImage): IMimeBundle {
+  return {
+    [image.mimeType]:
+      image.mimeType === 'image/svg+xml'
+        ? decodeUtf8(image.bytes)
+        : bytesToBase64(image.bytes),
+    'text/plain': image.description
+  };
+}
+
+/**
+ * The output of a value which the host encodes asynchronously, like an
+ * OffscreenCanvas, or undefined.
+ */
+function encodedOutput(
+  host: IDisplayHost,
+  value: unknown,
+  metadata: Record<string, unknown>
+): Promise<IDisplayData> | undefined {
+  return (
+    host
+      .encodeImage?.(value)
+      ?.then(image => ({ data: imageBundle(image), metadata })) ?? undefined
+  );
+}
+
 let displayCount = 0;
 
 function newDisplayId(): string {
@@ -401,18 +537,21 @@ function newDisplayId(): string {
  * A handle on the outputs of a display id, to update them.
  */
 export class DisplayHandle {
+  /**
+   * @param format - The MIME bundle of the values given to the handle, like
+   * the HTML of a string for display.html(), or undefined to show a value
+   * like display() does.
+   */
   constructor(
     host: IDisplayHost,
     id: string,
-    mimeType?: string,
-    placeholder?: string
+    format?: (value: unknown) => IMimeBundle | undefined
   ) {
     this.id = id;
     // Not enumerable, so that the handle shows only its id
     Object.defineProperties(this, {
       _host: { value: host },
-      _mimeType: { value: mimeType },
-      _placeholder: { value: placeholder }
+      _format: { value: format }
     });
   }
 
@@ -441,28 +580,18 @@ export class DisplayHandle {
     options: IDisplayOptions,
     update: boolean
   ): void {
-    let data: IMimeBundle;
-    if (options.raw) {
-      data = normalizeBundle(value);
-    } else if (this._mimeType && typeof value === 'string') {
-      data = {
-        [this._mimeType]: value,
-        'text/plain': this._placeholder || value
-      };
-    } else {
+    const metadata = options.metadata ?? {};
+    let data = options.raw ? normalizeBundle(value) : this._format?.(value);
+    let ready: Promise<IDisplayData> | undefined;
+    if (!data) {
       data = this._host.mimeBundle(value);
+      ready = encodedOutput(this._host, value, metadata);
     }
-    this._host.publish(
-      data,
-      options.metadata ?? {},
-      { display_id: this.id },
-      update
-    );
+    this._host.publish(data, metadata, { display_id: this.id }, update, ready);
   }
 
   private _host!: IDisplayHost;
-  private _mimeType?: string;
-  private _placeholder?: string;
+  private _format?: (value: unknown) => IMimeBundle | undefined;
 }
 
 /**
@@ -471,7 +600,10 @@ export class DisplayHandle {
 export function createDisplay(host: IDisplayHost): IDisplay {
   const show = (
     value: unknown,
-    options: IDisplayOptions & { mimeType?: string; placeholder?: string } = {}
+    options: IDisplayOptions & {
+      format?: (value: unknown) => IMimeBundle | undefined;
+      ready?: Promise<IDisplayData>;
+    } = {}
   ): DisplayHandle | undefined => {
     let id: string | undefined;
     if (options.id === true) {
@@ -479,16 +611,13 @@ export function createDisplay(host: IDisplayHost): IDisplay {
     } else if (options.id !== undefined && options.id !== false) {
       id = String(options.id);
     }
+    const metadata = options.metadata ?? {};
     const data = options.raw ? normalizeBundle(value) : host.mimeBundle(value);
-    host.publish(
-      data,
-      options.metadata ?? {},
-      id ? { display_id: id } : {},
-      false
-    );
-    return id
-      ? new DisplayHandle(host, id, options.mimeType, options.placeholder)
-      : undefined;
+    const ready = options.raw
+      ? options.ready
+      : encodedOutput(host, value, metadata);
+    host.publish(data, metadata, id ? { display_id: id } : {}, false, ready);
+    return id ? new DisplayHandle(host, id, options.format) : undefined;
   };
 
   const display = ((value: unknown, options: IDisplayOptions = {}) =>
@@ -520,14 +649,54 @@ export function createDisplay(host: IDisplayHost): IDisplay {
       content: string | TemplateStringsArray,
       ...rest: unknown[]
     ): DisplayHandle | undefined => {
+      const format = (value: unknown): IMimeBundle | undefined => {
+        if (typeof value !== 'string') {
+          return undefined;
+        }
+        const data: IMimeBundle = { [mimeType]: value };
+        if (mimeType !== 'text/plain') {
+          data['text/plain'] = `<${description}>`;
+        }
+        return data;
+      };
       const { text, options } = templateContent(content, rest);
-      const placeholder =
-        mimeType === 'text/plain' ? undefined : `<${description}>`;
-      const data: Record<string, string> = { [mimeType]: text };
-      if (placeholder) {
-        data['text/plain'] = placeholder;
+      return show(format(text), { ...options, raw: true, format });
+    };
+
+  const chartHelper =
+    (lite: boolean) =>
+    (
+      spec: unknown,
+      options: IDisplayOptions = {}
+    ): DisplayHandle | undefined => {
+      const format = (value: unknown): IMimeBundle | undefined => {
+        if (
+          typeof value !== 'object' ||
+          value === null ||
+          Array.isArray(value)
+        ) {
+          return undefined;
+        }
+        const detected = chartMimeType(value);
+        let mimeType = lite ? VEGA_LITE_MIME_TYPE : VEGA_MIME_TYPE;
+        if (lite && detected && detected !== VEGA_MIME_TYPE) {
+          // Vega-Lite 3 and 4
+          mimeType = detected;
+        }
+        return {
+          [mimeType]: chartJson(value),
+          'text/plain': chartText(mimeType)
+        };
+      };
+      const data = format(spec);
+      if (!data) {
+        throw new TypeError(
+          lite
+            ? "A Vega-Lite spec must be an object, like { mark: 'bar', data: { values: [...] }, encoding: { ... } }"
+            : 'A Vega spec must be an object'
+        );
       }
-      return show(data, { ...options, raw: true, mimeType, placeholder });
+      return show(data, { ...options, raw: true, format });
     };
 
   const imageHelper =
@@ -536,22 +705,38 @@ export function createDisplay(host: IDisplayHost): IDisplay {
       content: unknown,
       options: IImageOptions = {}
     ): DisplayHandle | undefined => {
+      const withSize = (type: string): Record<string, unknown> => {
+        const metadata: Record<string, unknown> = { ...options.metadata };
+        if (options.width || options.height) {
+          const size: Record<string, unknown> = {};
+          if (options.width) {
+            size.width = options.width;
+          }
+          if (options.height) {
+            size.height = options.height;
+          }
+          metadata[type] = size;
+        }
+        return metadata;
+      };
+      // A Blob, an OffscreenCanvas, an ImageBitmap or an ImageData
+      const encoded = host.encodeImage?.(content, mimeType);
+      if (encoded) {
+        return show(host.mimeBundle(content), {
+          ...options,
+          raw: true,
+          metadata: withSize(mimeType),
+          ready: encoded.then(image => ({
+            data: imageBundle(image),
+            metadata: withSize(image.mimeType)
+          }))
+        });
+      }
       const bytes = toBytes(content);
       const data = bytes !== null ? bytesToBase64(bytes) : String(content);
-      const metadata: Record<string, unknown> = { ...options.metadata };
-      if (options.width || options.height) {
-        const size: Record<string, unknown> = {};
-        if (options.width) {
-          size.width = options.width;
-        }
-        if (options.height) {
-          size.height = options.height;
-        }
-        metadata[mimeType] = size;
-      }
       return show(
         { [mimeType]: data, 'text/plain': `<${mimeType} image>` },
-        { ...options, raw: true, metadata }
+        { ...options, raw: true, metadata: withSize(mimeType) }
       );
     };
 
@@ -588,14 +773,39 @@ export function createDisplay(host: IDisplayHost): IDisplay {
       'The values JSON can not show as they are, like NaN or undefined, and the large\n' +
       'ones, more than 10,000 values or 1 MB, are shown as text.'
   );
+  display.vegalite = setDoc(
+    chartHelper(true),
+    'Displays a Vega-Lite chart from its spec.\n\n' +
+      'display.vegalite(spec, options?)\n\n' +
+      '    display.vegalite({\n' +
+      "      data: { values: [{ a: 'A', b: 3 }, { a: 'B', b: 5 }] },\n" +
+      "      mark: 'bar',\n" +
+      "      encoding: { x: { field: 'a', type: 'nominal' }, y: { field: 'b', type: 'quantitative' } }\n" +
+      '    });\n\n' +
+      'A cell whose result is a spec with a Vega-Lite $schema shows the chart too.\n' +
+      'See https://vega.github.io/vega-lite/examples/'
+  );
+  display.vega = setDoc(
+    chartHelper(false),
+    'Displays a Vega chart from its spec.\n\ndisplay.vega(spec, options?)\n\n' +
+      'See https://vega.github.io/vega/examples/'
+  );
+  display.mermaid = setDoc(
+    mimeHelper('text/vnd.mermaid', 'Mermaid diagram'),
+    'Displays a Mermaid diagram from its source.\n\n' +
+      'display.mermaid(source, options?) or display.mermaid`graph LR; A-->B`\n\n' +
+      'See https://mermaid.js.org/intro/'
+  );
   display.png = setDoc(
     imageHelper('image/png'),
-    'Displays a PNG image from its bytes (Uint8Array, ArrayBuffer) or base64 data.\n\n' +
+    'Displays a PNG image from its bytes (Uint8Array, ArrayBuffer), base64 data, a Blob,\n' +
+      'an OffscreenCanvas, an ImageBitmap or an ImageData.\n\n' +
       'display.png(data, { width?, height? })'
   );
   display.jpeg = setDoc(
     imageHelper('image/jpeg'),
-    'Displays a JPEG image from its bytes (Uint8Array, ArrayBuffer) or base64 data.\n\n' +
+    'Displays a JPEG image from its bytes (Uint8Array, ArrayBuffer), base64 data, a Blob,\n' +
+      'an OffscreenCanvas, an ImageBitmap or an ImageData.\n\n' +
       'display.jpeg(data, { width?, height? })'
   );
   if (host.readFile) {
@@ -633,12 +843,15 @@ export function createDisplay(host: IDisplayHost): IDisplay {
     display,
     'Displays a value with its richest representation.\n\n' +
       'display(value, { id?, metadata? })\n\n' +
+      'An OffscreenCanvas, an ImageBitmap, an ImageData or a Blob of an image is shown as an\n' +
+      'image, and a Vega-Lite spec with a $schema as a chart.\n\n' +
       'Objects can define _toHtml(), _toMarkdown(), _toSvg(), _toPng(), _toJpeg(), _toLatex(),\n' +
       '_toJson() or _toMime() methods, or a [Symbol.for("Jupyter.display")]() method returning\n' +
       'a MIME bundle. With { id: true } (or a string), returns a handle to update the output:\n\n' +
       '    const handle = display("Loading...", { id: true });\n' +
       '    handle.update("Done!");\n\n' +
       'See also display.html, display.markdown, display.svg, display.png, display.latex,\n' +
-      'display.json, display.mime and display.clear.'
+      'display.json, display.vegalite, display.vega, display.mermaid, display.mime and\n' +
+      'display.clear.'
   );
 }

@@ -144,7 +144,7 @@ banner, in consoles and in the **Help** menu, shows the reason too.
 
 ### Worker mode limitations
 
-Web Workers do not expose DOM APIs. In `JavaScript (Web Worker)`, APIs such as `document`, direct element access, and other main-thread-only browser APIs are unavailable.
+Web Workers do not expose DOM APIs. In `JavaScript (Web Worker)`, APIs such as `document`, direct element access, and other main-thread-only browser APIs are unavailable. To draw, use an `OffscreenCanvas`, shown as an [image](#images), and for charts the [Vega-Lite helpers](#charts-and-diagrams), which the page renders.
 
 When the code of a cell does not stop after an interrupt, the kernel restarts the Web Worker, and the variables, functions, imports and widgets of the previous cells are lost. See [Interrupting code and loop protection](#interrupting-code-and-loop-protection). After `close()`, which stops the Web Worker, the cells fail with `The JavaScript runtime stopped: ... Restart the kernel.` instead of running forever.
 
@@ -298,7 +298,8 @@ The helpers of `display` show content for the common MIME types:
 
 - `display.html`, `display.markdown`, `display.svg`, `display.latex` and `display.text` take a string, or are used as tagged templates: ``display.markdown`**${name}**` ``
 - `display.json(value)` shows an interactive JSON tree, or the text of the values JSON can not represent, like above
-- `display.png(bytes, { width, height })` and `display.jpeg(...)` show images, from their bytes or base64
+- `display.png(bytes, { width, height })` and `display.jpeg(...)` show images, from their bytes, base64, a `Blob`, or a drawing, an `OffscreenCanvas`, an `ImageBitmap` or an `ImageData`, encoded in their format
+- `display.vegalite(spec)`, `display.vega(spec)` and `display.mermaid` show [charts and diagrams](#charts-and-diagrams)
 - `display.mime(bundle)` shows a MIME bundle, like `{ 'text/html': '<b>Hi</b>', 'text/plain': 'Hi' }`. A value with a `data` object of MIME types, like `{ data: { 'text/html': '<b>Hi</b>' } }` or `{ data: { 'text/vnd.mermaid': 'graph TD; A-->B' } }`, is also shown as its MIME bundle, while `{ data: { '2024/01': 5 } }` is shown as data
 
 `clearOutput(wait)` clears the outputs of the cell. With `wait` set to `true`, they are cleared when the next output arrives, to avoid flickering.
@@ -323,6 +324,70 @@ new Temperature(21);
 ```
 
 > **Note:** the second argument of `display()` used to be the metadata of the output. It is now an object of options, with the metadata under `metadata`.
+
+### Images
+
+An `OffscreenCanvas`, an `ImageBitmap`, an `ImageData`, like the pixels of `getImageData()`, and a `Blob` of a PNG, JPEG, GIF, WebP or SVG image are shown as images, as the result of a cell or with `display()`. The drawings are encoded as PNG, and the text of the output describes them, like `<OffscreenCanvas 240x80>`. In `JavaScript (Web Worker)`, which has no DOM, an `OffscreenCanvas` is the way to draw:
+
+```javascript
+const canvas = new OffscreenCanvas(240, 80);
+const context = canvas.getContext('2d');
+context.fillStyle = 'teal';
+context.fillRect(20, 20, 200, 40);
+canvas;
+```
+
+```javascript
+const logo = await (await fetch('https://example.com/logo.png')).blob();
+display(logo);
+```
+
+The images are encoded asynchronously, from the pixels of the drawing when it is displayed: the outputs displayed after an image wait for it, so they keep their order, and the cell finishes once its images are shown. A `prompt()` called while an image is still being encoded shows its input box first: the image, and the text printed after it, show up once the user answered. `display.png()` and `display.jpeg()` encode the drawings in their format, like `display.jpeg(canvas, { width: 120 })`, and the [`Image` widget](#files-dates-and-tags) takes them too. In `JavaScript (IFrame)`, a canvas element is shown as an image as well.
+
+### Charts and diagrams
+
+The page renders [Vega-Lite](https://vega.github.io/vega-lite/) and [Vega](https://vega.github.io/vega/) charts, and [Mermaid](https://mermaid.js.org/) diagrams: the kernel only sends their spec, so they work in both kernels, also in `JavaScript (Web Worker)` without a DOM, and without importing a library. `display.vegalite(spec)` shows a Vega-Lite chart, like a bar chart of an array of records, with a tooltip:
+
+```javascript
+const sales = [
+  { month: 'Jan', amount: 28 },
+  { month: 'Feb', amount: 55 },
+  { month: 'Mar', amount: 43 }
+];
+
+display.vegalite({
+  data: { values: sales },
+  mark: 'bar',
+  encoding: {
+    x: { field: 'month', type: 'nominal', sort: null },
+    y: { field: 'amount', type: 'quantitative' },
+    tooltip: [{ field: 'month' }, { field: 'amount' }]
+  }
+});
+```
+
+The page can also load the data of a chart from a URL, like a CSV file:
+
+```javascript
+display.vegalite({
+  data: {
+    url: 'https://cdn.jsdelivr.net/npm/vega-datasets@2/data/seattle-weather.csv'
+  },
+  mark: 'line',
+  encoding: {
+    x: { field: 'date', timeUnit: 'yearmonth', type: 'temporal' },
+    y: { field: 'temp_max', aggregate: 'mean', type: 'quantitative' }
+  }
+});
+```
+
+- a cell whose result is a spec with the `$schema` of Vega-Lite 3 to 5, like `https://vega.github.io/schema/vega-lite/v5.json`, or of Vega 5, is shown as a chart too
+- `display.vega(spec)` shows a Vega chart
+- the specs are sent as JSON: the dates of the data become ISO strings, which Vega-Lite reads with `type: 'temporal'`
+- with `{ id: true }`, the handle updates the chart with a new spec, like `handle.update(newSpec)`
+- `display.mermaid(source)` shows a Mermaid diagram, also as a tagged template: ``display.mermaid`graph LR; Fetch-->Parse-->Chart` ``
+
+The renderers of other charts, like the one of Plotly (`application/vnd.plotly.v1+json`), need their JupyterLab extension in the JupyterLite deployment: `display.mime()` then shows them.
 
 ## Console
 
@@ -447,7 +512,7 @@ display(out);
 ```
 
 - `out.capture(callback, options?)`, or `out.capture(options)(callback)`, returns a function which runs `callback` with its outputs (the `console`, `display()`, `clearOutput()`) shown in the widget. The outputs of an async callback after an `await` are captured too, until its promise settles, and so are the ones of the timers it creates, like a `setTimeout()` callback: while it runs, the outputs of the other code running outside of the cells, after an `await`, also go to the widget, but not the ones of a cell running. An async callback started by a cell stops capturing when the next cell runs, and any async callback when the kernel is interrupted: its outputs then go to the cell that ran last. To update a widget from an endless loop, capture each step instead, like `setInterval(out.capture(() => console.log(new Date())), 1000)`. When a callback runs again before the previous run ended, like a button clicked twice, the widget shows the outputs of both. With the `clearOutput` option, the outputs of the widget are removed first, when the next output arrives with `wait`. The errors of the callback go to the cell which registered it.
-- `out.appendStdout(text)` and `out.appendStderr(text)` add some text, and `out.appendDisplayData(value, metadata?)` adds a value shown like `display()` shows it, like a widget, or a MIME bundle like `{ 'text/html': '<b>Hi</b>' }`
+- `out.appendStdout(text)` and `out.appendStderr(text)` add some text, and `out.appendDisplayData(value, metadata?)` adds a value shown like `display()` shows it, like a widget, or a MIME bundle like `{ 'text/html': '<b>Hi</b>' }`. The images which are encoded asynchronously, like an `OffscreenCanvas`, are shown as their text there: show them with `display()` in `out.capture()`
 - `out.clearOutput({ wait })` removes the outputs of the widget, with `wait` when the next output arrives
 
 The kernel handles the messages of the widgets, like the clicks of a button or the new value of a slider moved by the user, between the cells: JupyterLite gives the messages of the frontend to the kernel one at a time, in order, so they wait while a cell runs, also while it waits in an `await`. A cell looping over the value of a widget does not see the slider move until it ends:
@@ -596,6 +661,16 @@ Video.fromUrl('https://example.com/movie.mp4', {
 });
 ```
 
+The media widgets also take a `Blob`, like the one of `await (await fetch(url)).blob()`, and `Image` takes a drawing, an `OffscreenCanvas`, an `ImageBitmap` or an `ImageData`, encoded in its `format`, PNG by default, like [`display()`](#images) does. The widget shows it once read or encoded, with the format of the `Blob`, and keeps its previous value meanwhile:
+
+```javascript
+const canvas = new OffscreenCanvas(240, 80);
+canvas.getContext('2d').fillRect(20, 20, 200, 40);
+// Not destructured, to keep the Image constructor of the DOM
+const image = new Jupyter.widgets.Image({ value: canvas, width: '240' });
+image;
+```
+
 ### Buttons and custom messages
 
 `button.onClick(callback)` calls the callback with the button, like `button.onClick(b => { b.description = 'Clicked'; })`, and `button.offClick(callback)` removes it.
@@ -724,7 +799,7 @@ Breaking out of the loop stops listening, and the loop ends when the widget is c
 - **Date and time**: `DatePicker`, `TimePicker`, `DatetimePicker`, `NaiveDatetimePicker`
 - **Tags**: `TagsInput`, `ColorsInput`, `IntsInput`, `FloatsInput`
 - **Files**: `FileUpload` (the contents of the files are sent as binary buffers)
-- **Media**: `Image`, `Video`, `Audio` (from bytes, sent as binary buffers, or from a URL with `fromUrl()`)
+- **Media**: `Image`, `Video`, `Audio` (from bytes, sent as binary buffers, a `Blob` or, for `Image`, a drawing, or from a URL with `fromUrl()`)
 - **Layout / Style**: `Layout`, `DescriptionStyle`, `SliderStyle`, `ProgressStyle`, `ButtonStyle`, `CheckboxStyle`, `ToggleButtonStyle`, `ToggleButtonsStyle`, `TextStyle`, `HTMLStyle`, `HTMLMathStyle`, `LabelStyle`
 - **Containers**: `Box`, `HBox`, `VBox`, `GridBox`, `Accordion`, `Tab`, `Stack`
 - **Helpers**: `jslink`, `jsdlink`, `link`, `dlink`, `interact`, `interact_manual`, `interactive`, `interactive_output`, `fixed`

@@ -9,8 +9,14 @@ import { generate, GENERATOR } from 'astring';
 
 import type { IMimeBundle } from '@jupyterlab/nbformat';
 
-import { isKnownMimeType, normalizeBundle, toJsonTree } from './display';
+import {
+  chartBundle,
+  isKnownMimeType,
+  normalizeBundle,
+  toJsonTree
+} from './display';
 import { resolveUrl } from './env';
+import { encodeImage, type IEncodedImage } from './images';
 import { inspect, isError } from './inspect';
 import {
   LOOP_GUARD_NAME,
@@ -1206,7 +1212,11 @@ export class JavaScriptExecutor {
    *
    * The plain text representation is formatted like util.inspect in Node.js,
    * and the data with a faithful JSON representation, within the limits of
-   * toJsonTree(), is also shown as a tree.
+   * toJsonTree(), is also shown as a tree. A plain object with the
+   * `$schema` of a Vega-Lite or a Vega spec is shown as a chart.
+   *
+   * The images which can only be encoded asynchronously, like an
+   * OffscreenCanvas, are shown as text: encodeImage() encodes them.
    *
    * @param value - The value to convert to a MIME bundle.
    * @returns The MIME bundle representation of the value.
@@ -1261,6 +1271,12 @@ export class JavaScriptExecutor {
       return this._getDOMElementMimeBundle(value);
     }
 
+    // A Vega-Lite or a Vega spec, like the charts of Altair
+    const chart = chartBundle(value);
+    if (chart) {
+      return chart;
+    }
+
     // Objects which are already a MIME bundle, with MIME types in their data,
     // like { data: { 'text/html': '<b>Hi</b>' } }, but not { data: { '2024/01': 5 } }
     const bundle = this._mimeBundleData(value);
@@ -1274,6 +1290,19 @@ export class JavaScriptExecutor {
       return { 'application/json': json, 'text/plain': text() };
     }
     return { 'text/plain': text() };
+  }
+
+  /**
+   * Encode an image which can only be encoded asynchronously: an
+   * OffscreenCanvas, an ImageBitmap, an ImageData or a Blob of an image,
+   * drawn with the OffscreenCanvas of the global scope. Returns null for the
+   * other values, which getMimeBundle() shows. See encodeImage().
+   *
+   * @param type - The MIME type of the image, `image/png` by default for
+   * the drawings.
+   */
+  encodeImage(value: unknown, type?: string): Promise<IEncodedImage> | null {
+    return encodeImage(value, this._globalScope ?? {}, type);
   }
 
   /**

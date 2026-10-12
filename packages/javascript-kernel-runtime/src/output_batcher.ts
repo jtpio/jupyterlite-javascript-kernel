@@ -9,6 +9,17 @@ import type { RuntimeOutputHandler, RuntimeOutputMessage } from './protocol';
 type StreamMessage = Extract<RuntimeOutputMessage, { type: 'stream' }>;
 
 /**
+ * An output message waiting for its content, with the outputs after it.
+ */
+interface IHeldOutput {
+  // null until the content is ready
+  message: RuntimeOutputMessage | null;
+  fallback: RuntimeOutputMessage;
+  // Called once the message is sent, for settled()
+  sent?: (() => void)[];
+}
+
+/**
  * The number of characters printed for a parent message.
  */
 interface IStreamCount {
@@ -29,6 +40,10 @@ interface IStreamCount {
  * timers. The frontend merges the consecutive stream outputs anyway, so the
  * notebook shows the same text, with one message instead of one per
  * console.log().
+ *
+ * An output whose content is not ready yet, like an image being encoded,
+ * keeps its place with pushLater(): the outputs pushed after it wait for
+ * it.
  */
 export class OutputBatcher {
   /**
@@ -56,6 +71,79 @@ export class OutputBatcher {
    * pending text and then the message.
    */
   push(message: RuntimeOutputMessage): void {
+    if (this._held.length > 0) {
+      this._held.push({ message, fallback: message });
+      return;
+    }
+    this._pushNow(message);
+  }
+
+  /**
+   * Send an output message once its content is ready, in its place: the
+   * outputs pushed after it, and the pending text, are sent after it.
+   *
+   * @param fallback - The message sent when `ready` rejects, or when
+   * releaseHeld() is called first.
+   * @param ready - The message with its content.
+   */
+  pushLater(
+    fallback: RuntimeOutputMessage,
+    ready: PromiseLike<RuntimeOutputMessage>
+  ): void {
+    if (this._isDisposed) {
+      this.push(fallback);
+      return;
+    }
+    const held: IHeldOutput = { message: null, fallback };
+    if (this._held.length === 0) {
+      this.flush();
+    }
+    this._held.push(held);
+    const release = (message: RuntimeOutputMessage) => {
+      if (held.message === null) {
+        held.message = message;
+        this._release();
+      }
+    };
+    Promise.resolve(ready)
+      .then(release, () => release(fallback))
+      .catch(() => {
+        // The handler of the host failed: keep the error out of the realm,
+        // like for the timer
+      });
+  }
+
+  /**
+   * Send the outputs waiting for their content now, with their fallback,
+   * like on interrupt: the content of an image could never come.
+   */
+  releaseHeld(): void {
+    for (const held of this._held) {
+      held.message ??= held.fallback;
+    }
+    this._release();
+  }
+
+  /**
+   * Wait until the outputs pushed until now are sent to the handler, or are
+   * pending text, after the ones pushed with pushLater(). The outputs pushed
+   * later are not waited for, like the frames of an animation.
+   */
+  settled(): Promise<void> {
+    const last = this._held[this._held.length - 1];
+    if (!last) {
+      return Promise.resolve();
+    }
+    return new Promise(resolve => {
+      last.sent ??= [];
+      last.sent.push(resolve);
+    });
+  }
+
+  /**
+   * Handle an output message, which no held output waits for.
+   */
+  private _pushNow(message: RuntimeOutputMessage): void {
     if (message.type === 'stream') {
       this._pushStream(message);
       return;
@@ -138,9 +226,34 @@ export class OutputBatcher {
       return;
     }
     try {
+      this.releaseHeld();
       this.flush();
     } finally {
       this._isDisposed = true;
+    }
+  }
+
+  /**
+   * Send the ready outputs at the head of the held outputs.
+   */
+  private _release(): void {
+    if (this._releasing) {
+      return;
+    }
+    this._releasing = true;
+    try {
+      while (this._held.length > 0 && this._held[0].message !== null) {
+        const held = this._held.shift()!;
+        try {
+          this._pushNow(held.message!);
+        } finally {
+          for (const resolve of held.sent ?? []) {
+            resolve();
+          }
+        }
+      }
+    } finally {
+      this._releasing = false;
     }
   }
 
@@ -287,6 +400,8 @@ export class OutputBatcher {
   private _counts = new WeakMap<object, IStreamCount>();
   private _count: IStreamCount | null = null;
   private _isDisposed = false;
+  private _held: IHeldOutput[] = [];
+  private _releasing = false;
 }
 
 /**

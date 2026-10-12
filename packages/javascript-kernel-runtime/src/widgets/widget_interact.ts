@@ -448,14 +448,7 @@ export class _InteractRunner {
       }
       this.result = value;
       if (this.autoDisplay && value !== undefined && value !== null) {
-        this._manager.publish({
-          type: 'display_data',
-          bundle: {
-            data: this._manager.mimeBundle(value),
-            metadata: {},
-            transient: {}
-          }
-        });
+        this._manager.display(value);
       }
     };
     const captured = this._out.capture(

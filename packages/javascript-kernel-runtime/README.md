@@ -170,15 +170,18 @@ The methods of the evaluator:
   the jobs queued by the handler ran, like the code of an async callback after
   an `await null`: the host replies to the message after it, so that the
   frontend still shows the outputs of these jobs captured in an `Output`
-  widget. Without a scheduler, the promise resolves at once: the host runs the
-  jobs of the engine, then calls `flushOutputs()`, which ends the comm
-  request.
+  widget. It also waits for the images the handler is still encoding, like
+  a `display()` of an `OffscreenCanvas`. Without a scheduler, the promise
+  resolves at once: the host runs the jobs of the engine, then calls
+  `flushOutputs()`, which ends the comm request.
 - `flushOutputs()` sends the text written to stdout and stderr and not sent
   yet, see below.
 - `interrupt()` stops the running cell, if any, with a `KeyboardInterrupt`,
   clears the timers of the cells, ends the captures of the async
   callbacks of the `Output` widgets, and stops the waits for the changes of
-  the widgets, like `slider.changed()`, with `commManager.cancelWaits()`. `loopTimeout` gets and sets the loop
+  the widgets, like `slider.changed()`, with `commManager.cancelWaits()`,
+  and sends the outputs waiting for an image being encoded, with the text of
+  the image. `loopTimeout` gets and sets the loop
   timeout. See [Interrupts and loop timeout](#interrupts-and-loop-timeout).
 - `reportUncaught(error, inPromise?)` prints an error thrown outside of an
   execution on stderr, as `Uncaught Error: ...`, or
@@ -290,8 +293,16 @@ into one `stream` message, sent:
 - when the pending text reaches `maxStreamBufferSize`.
 
 A `clear_output` without `wait` drops the pending text of the cell, which
-would be cleared at once. The frontend merges the consecutive stream outputs
-anyway, so the notebook shows the same text, with far fewer messages.
+would be cleared at once. An image encoded asynchronously, like the result
+of a cell or a `display()` of an `OffscreenCanvas`, keeps its place: the
+outputs sent after it wait for it (`OutputBatcher.pushLater()`), and
+`execute()` and the comm handlers wait for them before the reply. In an
+engine without the promises of the web APIs, these values are not images
+and nothing waits. The text printed after an image still being encoded and
+before a `prompt()` is shown after the input box, with the image: the input
+request blocks the runtime before the image is ready. The frontend merges
+the consecutive stream outputs anyway, so the notebook shows the same text,
+with far fewer messages.
 
 An engine whose timers would keep the cell running passes `scheduler: null`,
 and calls `evaluator.flushOutputs()` when the cell, its timers and its jobs
@@ -418,6 +429,21 @@ DOM elements and an image of the canvases, and else its text, formatted by
   (`maxLength`). Dates
   are ISO strings, maps with string keys objects, and sets arrays.
   `display.json()` uses it too, and shows the text alone without a tree.
+- `executor.encodeImage(value, type?)` encodes the images which can only be
+  encoded asynchronously, with `encodeImage(value, scope, type?)`: an
+  `OffscreenCanvas` (a value with `convertToBlob()`), an `ImageBitmap` and an
+  `ImageData`, drawn on an `OffscreenCanvas` of the global scope, and a
+  `Blob` of a PNG, JPEG, GIF, WebP or SVG image (`IMAGE_BLOB_TYPES`). It
+  returns the promise of an `IEncodedImage`,
+  `{ mimeType, bytes, description }`, or `null` for the other values, which
+  `getMimeBundle()` shows as text: the values are recognized from their tag
+  and their methods, so an engine without these APIs never has them. The evaluator
+  shows the result of a cell and the values of `display()` with it, and
+  `display()` takes an `encodeImage(value, type?)` method in its host, with
+  a `ready` promise of the output given to `publish()`.
+- A plain object with the `$schema` of a Vega-Lite 3 to 5 or a Vega 5 spec
+  is shown as a chart, `application/vnd.vegalite.v5+json` for
+  `https://vega.github.io/schema/vega-lite/v5.json`, with `chartBundle()`.
 - An object with a `data` object whose keys are all MIME types of the
   outputs, checked with `isKnownMimeType(mimeType)`, like `text/html` or
   the vendor types like `text/vnd.mermaid`, is shown as this MIME bundle: `{ data: { 'text/html': '<b>Hi</b>' } }` shows bold text, and

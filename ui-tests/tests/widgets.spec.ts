@@ -2,6 +2,7 @@
 // Distributed under the terms of the Modified BSD License.
 
 import { expect, test } from '@jupyterlab/galata';
+import type { Locator } from '@playwright/test';
 
 import {
   KERNELS,
@@ -202,6 +203,58 @@ for (const kernel of KERNELS) {
         await getOutputs(page, index, 'application/vnd.jupyter.stdout')
       ).toHaveText(['clicked\nloading\nready\nloaded\n']);
       await expect(await getOutputs(page, later)).toHaveText(['later\n']);
+    });
+
+    test('Show the drawings of the button callbacks and of interact as images', async ({
+      page
+    }) => {
+      const index = await runCode(
+        page,
+        [
+          'const { Button, Output, interact } = Jupyter.widgets;',
+          'const out = new Output();',
+          'const draw = new Button({ description: "Draw" });',
+          'draw.onClick(out.capture(() => {',
+          'const canvas = new OffscreenCanvas(400, 300);',
+          'canvas.getContext("2d").fillRect(0, 0, 400, 300);',
+          'display(canvas);',
+          'console.log("drawn");',
+          '}));',
+          'display(draw);',
+          'out'
+        ].join('\n')
+      );
+      const outputs = await getOutputs(page, index);
+      const widget = outputs.locator('.widget-output');
+      const naturalWidth = (img: Locator) => () =>
+        img.evaluate(element => (element as HTMLImageElement).naturalWidth);
+
+      // The image is shown in the Output widget, before the text printed
+      // after it
+      await outputs.getByRole('button', { name: 'Draw' }).click();
+      await expect(widget).toContainText('drawn');
+      const drawing = widget.getByRole('img');
+      await expect(drawing).toHaveCount(1);
+      await expect.poll(naturalWidth(drawing)).toBe(400);
+      await expect(outputs.getByRole('img')).toHaveCount(1);
+
+      // The result of an interact function
+      const cell = await runCode(
+        page,
+        [
+          'interact(({ size }) => {',
+          'const canvas = new OffscreenCanvas(size, size);',
+          'canvas.getContext("2d").fillRect(0, 0, size, size);',
+          'return canvas;',
+          '}, { size: [10, 50, 10] })'
+        ].join('\n')
+      );
+      const controls = await getOutputs(page, cell);
+      const result = controls.locator('.widget-output').getByRole('img');
+      await expect.poll(naturalWidth(result)).toBe(30);
+      await controls.getByRole('slider').click();
+      await page.keyboard.press('ArrowRight');
+      await expect.poll(naturalWidth(result)).toBe(40);
     });
 
     test('Show the outputs of overlapping clicks in an Output widget', async ({
@@ -588,6 +641,24 @@ for (const kernel of KERNELS) {
         ].join('\n')
       );
       await expect.poll(naturalWidth).toBe(5);
+
+      // A drawing is encoded as PNG, and a Blob keeps its type
+      let cell = await runCode(
+        page,
+        [
+          'const canvas = new OffscreenCanvas(7, 6);',
+          'canvas.getContext("2d").fillRect(0, 0, 7, 6);',
+          'image.value = canvas;'
+        ].join('\n')
+      );
+      await expect.poll(naturalWidth).toBe(7);
+      cell = await runCode(page, 'image.format');
+      expect(await page.notebook.getCellTextOutput(cell)).toEqual(["'png'"]);
+      await runCode(
+        page,
+        'image.value = new Blob([svg.replace(/5/g, "9")], { type: "image/svg+xml" });'
+      );
+      await expect.poll(naturalWidth).toBe(9);
     });
 
     test('Select the options by value, with labelled options', async ({
@@ -1124,6 +1195,26 @@ for (const kernel of KERNELS) {
       expect(await page.notebook.getCellTextOutput(cell)).toEqual([
         "'true url false https://example.com/cat.png'"
       ]);
+
+      // A Blob keeps its format: the same samples played at 4 kHz
+      const blob = await runCode(
+        page,
+        [
+          'const slow = wav.slice();',
+          'new DataView(slow.buffer).setUint32(24, 4000, true);',
+          'new DataView(slow.buffer).setUint32(28, 4000, true);',
+          'audio.format = "mp3";',
+          'audio.value = new Blob([slow], { type: "audio/wav" });',
+          'await audio.changed("value");',
+          'audio.format'
+        ].join('\n')
+      );
+      expect(await page.notebook.getCellTextOutput(blob)).toEqual(["'wav'"]);
+      await expect
+        .poll(() =>
+          player.evaluate(element => (element as HTMLAudioElement).duration)
+        )
+        .toBe(1);
     });
 
     test('Make controls for a function with interact', async ({ page }) => {

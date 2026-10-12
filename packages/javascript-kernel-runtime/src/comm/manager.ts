@@ -4,6 +4,7 @@
 import type { IMimeBundle } from '@jupyterlab/nbformat';
 
 import { hostConsole, uuid } from '../env';
+import { encodeImage, type IEncodedImage } from '../images';
 import {
   OutputRouter,
   type IOutputSink,
@@ -65,6 +66,7 @@ export class CommManager {
     this._onTargetRegistered = options.onTargetRegistered;
     this._reportError = options.reportError;
     this._mimeBundle = options.mimeBundle;
+    this._display = options.display;
     this._flushOutputs = options.flushOutputs;
     this._globalScope = options.globalScope ?? null;
     this.router = options.router ?? new OutputRouter();
@@ -209,6 +211,17 @@ export class CommManager {
   }
 
   /**
+   * Encode an image which can only be encoded asynchronously, like an
+   * OffscreenCanvas, for the Image widget, with the OffscreenCanvas of the
+   * realm of the cells. See encodeImage().
+   *
+   * @internal
+   */
+  encodeImage(value: unknown, type?: string): Promise<IEncodedImage> | null {
+    return encodeImage(value, this._globalScope ?? {}, type);
+  }
+
+  /**
    * The MIME bundle of a value, like display() shows it.
    *
    * @internal
@@ -218,6 +231,23 @@ export class CommManager {
       return this._mimeBundle(value);
     }
     return { 'text/plain': String(value) };
+  }
+
+  /**
+   * Show a value like display() shows it, with the images encoded
+   * asynchronously, like an OffscreenCanvas.
+   *
+   * @internal
+   */
+  display(value: unknown): void {
+    if (this._display) {
+      this._display(value);
+      return;
+    }
+    this._onOutput({
+      type: 'display_data',
+      bundle: { data: this.mimeBundle(value), metadata: {}, transient: {} }
+    });
   }
 
   /**
@@ -492,6 +522,7 @@ export class CommManager {
   private _onTargetRegistered?: (targetName: string) => void;
   private _reportError?: (error: unknown, inPromise: boolean) => void;
   private _mimeBundle?: (value: unknown) => IMimeBundle;
+  private _display?: (value: unknown) => void;
   private _flushOutputs?: (sink: IOutputSink) => void;
   private _globalScope: Record<string, any> | null;
   private _comms = new Map<string, IComm>();
@@ -526,6 +557,12 @@ export namespace CommManager {
      * its text.
      */
     mimeBundle?: (value: unknown) => IMimeBundle;
+
+    /**
+     * Show a value like display() shows it, for the result of interact().
+     * Defaults to a display_data message of its MIME bundle.
+     */
+    display?: (value: unknown) => void;
 
     /**
      * The router of the outputs, shared with the timers of the runtime.

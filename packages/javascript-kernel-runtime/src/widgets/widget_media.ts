@@ -1,9 +1,25 @@
 // Copyright (c) Jupyter Development Team.
 // Distributed under the terms of the Modified BSD License.
 
-import { encodeUtf8 } from '../utils';
+import { blobBytes, isBlob } from '../images';
+import { encodeUtf8, safe } from '../utils';
 
 import { DOMWidget } from './widget_dom';
+
+/**
+ * The bytes of a media and their format, like png or mp4.
+ */
+interface IEncodedMedia {
+  bytes: Uint8Array;
+  format: string;
+}
+
+/**
+ * The number of values given to each media widget, so that a value being
+ * encoded does not replace a newer one. Not a field, which would be set
+ * after the constructor of the base class validated the first value.
+ */
+const valueCounts = new WeakMap<object, number>();
 
 /**
  * The base class of the media widgets, `Image`, `Video` and `Audio`, shown
@@ -33,12 +49,13 @@ export class _Media extends DOMWidget {
 
   /**
    * The bytes of the media, or the URL of the media, in UTF-8, with the
-   * `url` format.
+   * `url` format. A Blob, like the one of `await (await fetch(url)).blob()`,
+   * is read: the widget shows it once read, with the format of its type.
    */
   get value(): Uint8Array {
     return this.get('value') as Uint8Array;
   }
-  set value(v: Uint8Array | ArrayBuffer | ArrayBufferView) {
+  set value(v: Uint8Array | ArrayBuffer | ArrayBufferView | object) {
     this.set('value', v);
   }
 
@@ -57,20 +74,65 @@ export class _Media extends DOMWidget {
     names: ReadonlySet<string>
   ): void {
     super._validate(state, names);
+    if (names.has('value')) {
+      const count = (valueCounts.get(this) ?? 0) + 1;
+      valueCounts.set(this, count);
+      const encoded = this._encode(state.value, String(state.format));
+      if (encoded) {
+        // The widget keeps its value until the new one is encoded
+        const current = (this._state as Record<string, unknown> | undefined)
+          ?.value;
+        state.value = current ?? new Uint8Array(0);
+        encoded
+          .then(({ bytes, format }) => {
+            if (valueCounts.get(this) === count) {
+              this.set({ value: bytes, format });
+            }
+          })
+          .catch(error => this._manager.reportError(error, true));
+      }
+    }
     // Like the CByteMemoryView trait of ipywidgets: the bytes of any binary
     // value, as a Uint8Array
     const bytes = this._toBytes(state.value);
     if (bytes === null) {
-      throw new TypeError(
-        'The value of a media widget must be bytes: a Uint8Array, an ArrayBuffer or a typed array'
-      );
+      throw new TypeError(this._valueError);
     }
     state.value = bytes;
+  }
+
+  /**
+   * The message of the error thrown for a value which is not a media.
+   */
+  protected get _valueError(): string {
+    return 'The value of a media widget must be bytes: a Uint8Array, an ArrayBuffer or a typed array, or a Blob';
+  }
+
+  /**
+   * Encode a value which can only be encoded asynchronously, a Blob, or
+   * return null for the other values.
+   *
+   * @param format - The format of the widget, kept for a Blob without type.
+   */
+  protected _encode(
+    value: unknown,
+    format: string
+  ): Promise<IEncodedMedia> | null {
+    if (!isBlob(value)) {
+      return null;
+    }
+    const type = safe(() => String((value as { type: unknown }).type), '');
+    return blobBytes(value).then(bytes => ({
+      bytes,
+      // Like video/mp4 or image/svg+xml
+      format: type.includes('/') ? type.slice(type.indexOf('/') + 1) : format
+    }));
   }
 }
 
 /**
- * An image, from its bytes.
+ * An image, from its bytes, a Blob, or a drawing: an OffscreenCanvas, an
+ * ImageBitmap or an ImageData.
  */
 export class Image extends _Media {
   static override modelName = 'ImageModel';
@@ -78,6 +140,27 @@ export class Image extends _Media {
 
   protected override _defaults() {
     return { ...super._defaults(), format: 'png', width: '', height: '' };
+  }
+
+  protected override get _valueError(): string {
+    return 'The value of an image must be bytes: a Uint8Array, an ArrayBuffer or a typed array, a Blob, an OffscreenCanvas, an ImageBitmap or an ImageData';
+  }
+
+  /**
+   * Encode a Blob, or a drawing in the format of the widget, PNG by
+   * default, or return null for the other values.
+   */
+  protected override _encode(
+    value: unknown,
+    format: string
+  ): Promise<IEncodedMedia> | null {
+    const image = this._manager.encodeImage(value, `image/${format}`);
+    return image
+      ? image.then(({ bytes, mimeType }) => ({
+          bytes,
+          format: mimeType.slice('image/'.length)
+        }))
+      : null;
   }
 
   get width(): string {
