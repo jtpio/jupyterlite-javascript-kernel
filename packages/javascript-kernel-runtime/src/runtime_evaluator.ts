@@ -729,6 +729,7 @@ export class JavaScriptRuntimeEvaluator {
       configurable: true
     });
     scope.Jupyter = jupyter;
+    this._installRequireStub();
 
     // The timers keep the cell which created them, for their outputs
     const router = this._router;
@@ -739,6 +740,37 @@ export class JavaScriptRuntimeEvaluator {
         router.leave(previous as IParentMessage | null, threw)
     });
     this._wrapBlockingFunctions();
+  }
+
+  /**
+   * Install a `require()` which explains that the cells use `import`, like
+   * ES modules, unless the runtime has its own, like RequireJS in the page.
+   * It throws a ReferenceError, like a `require` which is not defined, so the
+   * code checking for CommonJS with a try/catch keeps working.
+   */
+  private _installRequireStub(): void {
+    const scope = this._globalScope;
+    if (safe(() => 'require' in scope, true)) {
+      return;
+    }
+    this._previousGlobals.set('require', undefined);
+    const scopeReferenceError = safe(() => scope.ReferenceError);
+    const ReferenceErrorConstructor: ReferenceErrorConstructor =
+      typeof scopeReferenceError === 'function'
+        ? scopeReferenceError
+        : ReferenceError;
+    const require = setDoc((name?: unknown) => {
+      const source = typeof name === 'string' ? name : 'package-name';
+      throw new ReferenceErrorConstructor(
+        `require() is not available, the cells run like ES modules: use import x from '${source}' or await import('${source}') instead`
+      );
+    }, "require() is not available, the cells run like ES modules: use import x from 'package-name' or await import('package-name') instead.");
+    Object.defineProperty(scope, 'require', {
+      value: require,
+      writable: true,
+      configurable: true,
+      enumerable: false
+    });
   }
 
   /**

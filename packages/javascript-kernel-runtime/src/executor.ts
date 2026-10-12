@@ -5,7 +5,7 @@ import type { KernelMessage } from '@jupyterlab/services';
 
 import { Parser, type Comment } from 'acorn';
 import { simple as walkSimple } from 'acorn-walk';
-import { generate } from 'astring';
+import { generate, GENERATOR } from 'astring';
 
 import type { IMimeBundle } from '@jupyterlab/nbformat';
 
@@ -65,10 +65,26 @@ const MAX_CELLS = 500;
 const DEFINE_GLOBAL_NAME = '__jsKernelDefine__';
 
 /**
- * The names of the parameters of the compiled cells, for the helpers the
- * kernel passes to them: the loop guard and the definition of the globals.
+ * The name of the helper resolving the sources of the dynamic imports which
+ * are not strings in the code, like `import(name)`, with the magic imports.
  */
-const HELPER_PARAMETERS = [LOOP_GUARD_NAME, DEFINE_GLOBAL_NAME];
+const IMPORT_SOURCE_NAME = '__jsKernelImportSource__';
+
+/**
+ * The names of the parameters of the compiled cells, for the helpers the
+ * kernel passes to them: the loop guard, the definition of the globals and
+ * the resolution of the dynamic imports.
+ */
+const HELPER_PARAMETERS = [
+  LOOP_GUARD_NAME,
+  DEFINE_GLOBAL_NAME,
+  IMPORT_SOURCE_NAME
+];
+
+/**
+ * A dynamic import in the source of a function.
+ */
+const DYNAMIC_IMPORT_RE = /\bimport\s*\(/;
 
 /**
  * The minimum number of frames of the stack traces: the frames of the kernel
@@ -257,6 +273,87 @@ function unwrapExport(node: any): any | null {
 }
 
 /**
+ * The name imported by an import specifier: `default` for a default import,
+ * and the string of `import { "a-b" as ab }`.
+ */
+function importedName(specifier: any): string {
+  if (specifier.type === 'ImportDefaultSpecifier') {
+    return 'default';
+  }
+  const imported = specifier.imported;
+  return imported.type === 'Literal' ? String(imported.value) : imported.name;
+}
+
+/**
+ * The message of the error for an imported name which the module does not
+ * export, like the one of the browsers for an ES module.
+ */
+function missingExportMessage(source: string, name: string): string {
+  return `The requested module '${source}' does not provide an export named '${name}'`;
+}
+
+/**
+ * The attributes of an import statement, like `{ type: 'json' }` for
+ * `import data from './data.json' with { type: 'json' }`. Undefined when the
+ * statement has none.
+ */
+function importAttributes(
+  attributes: any[] | undefined
+): Record<string, string> | undefined {
+  if (!attributes || attributes.length === 0) {
+    return undefined;
+  }
+  const entries = attributes.map((attribute: any) => [
+    attribute.key.type === 'Literal'
+      ? String(attribute.key.value)
+      : attribute.key.name,
+    String(attribute.value.value)
+  ]);
+  return Object.fromEntries(entries);
+}
+
+/**
+ * The options argument of the dynamic import for the attributes of an import
+ * statement, like `, { with: {"type":"json"} }`.
+ */
+function importOptionsCode(
+  attributes: Record<string, string> | undefined
+): string {
+  return attributes ? `, { with: ${JSON.stringify(attributes)} }` : '';
+}
+
+/**
+ * The code generator of astring, which also writes the options of the
+ * dynamic imports, like `import('./data.json', { with: { type: 'json' } })`.
+ */
+const CODE_GENERATOR = {
+  ...GENERATOR,
+  ImportExpression(node: any, state: any) {
+    state.write('import(');
+    this[node.source.type](node.source, state);
+    if (node.options) {
+      state.write(', ');
+      this[node.options.type](node.options, state);
+    }
+    state.write(')');
+  }
+} as typeof GENERATOR;
+
+/**
+ * The value of a node which is a string written in the code: a string
+ * literal, or a template literal without expressions. Null for the others.
+ */
+function staticString(node: any): string | null {
+  if (node.type === 'Literal' && typeof node.value === 'string') {
+    return node.value;
+  }
+  if (node.type === 'TemplateLiteral' && node.expressions.length === 0) {
+    return node.quasis[0].value.cooked ?? null;
+  }
+  return null;
+}
+
+/**
  * The message of the error for a declaration of a global which can not be
  * replaced, like `location` in a window.
  */
@@ -390,6 +487,8 @@ export interface IImportInfo {
   namespaceImport?: string;
   /** Named imports: { importedName: localName } */
   namedImports: Record<string, string>;
+  /** The import attributes, like { type: 'json' } */
+  attributes?: Record<string, string>;
 }
 
 type JSCallable = (...args: any[]) => any;
@@ -578,11 +677,8 @@ export class JavaScriptExecutor {
       });
     }
 
-    const { edited, map, hoisted, withReturn } = this._rewriteCell(
-      code,
-      ast,
-      options.name
-    );
+    const { edited, map, hoisted, withReturn, hasDynamicImports } =
+      this._rewriteCell(code, ast, options.name);
 
     // The hoisted code goes on a line of its own, before the code of the
     // cell, whose lines are kept. The ";" stops a "use strict" directive,
@@ -602,7 +698,7 @@ export class JavaScriptExecutor {
       })
     );
 
-    if (edited.includes(LOOP_GUARD_NAME)) {
+    if (edited.includes(LOOP_GUARD_NAME) || hasDynamicImports) {
       this._editedCode.set(name, edited);
     }
 
@@ -611,9 +707,10 @@ export class JavaScriptExecutor {
     const compiled = this._compile(body);
     const guard = this._loopGuard?.fn;
     const defineGlobal = this._defineGlobal;
+    const resolveImportSource = this._resolveImportSource;
     return {
       asyncFunction: function (this: unknown) {
-        return compiled.call(this, guard, defineGlobal);
+        return compiled.call(this, guard, defineGlobal, resolveImportSource);
       },
       withReturn,
       docs: this._declarationDocs(code, ast, comments),
@@ -623,13 +720,14 @@ export class JavaScriptExecutor {
 
   /**
    * The source code of a function, as written in its cell: without the
-   * calls to the loop guard added by the kernel.
+   * calls to the loop guard added by the kernel, and with the sources of its
+   * dynamic imports as written.
    *
    * @param fn - The function.
    */
   functionSource(fn: unknown): string {
     const source = safe(() => Function.prototype.toString.call(fn), '');
-    if (!source.includes(LOOP_GUARD_NAME)) {
+    if (!source.includes(LOOP_GUARD_NAME) && !DYNAMIC_IMPORT_RE.test(source)) {
       return source;
     }
     // The function is in the edited code of a cell, from the newest
@@ -706,6 +804,10 @@ export class JavaScriptExecutor {
             url,
             namedImports: {}
           };
+          const attributes = importAttributes(node.attributes);
+          if (attributes) {
+            importInfo.attributes = attributes;
+          }
 
           for (const specifier of node.specifiers) {
             if (specifier.type === 'ImportDefaultSpecifier') {
@@ -713,11 +815,11 @@ export class JavaScriptExecutor {
             } else if (specifier.type === 'ImportNamespaceSpecifier') {
               importInfo.namespaceImport = specifier.local.name;
             } else if (specifier.type === 'ImportSpecifier') {
-              if (specifier.imported.name === 'default') {
+              const name = importedName(specifier);
+              if (name === 'default') {
                 importInfo.defaultImport = specifier.local.name;
               } else {
-                importInfo.namedImports[specifier.imported.name] =
-                  specifier.local.name;
+                importInfo.namedImports[name] = specifier.local.name;
               }
             }
           }
@@ -747,7 +849,9 @@ export class JavaScriptExecutor {
     const lines: string[] = [];
 
     for (const imp of imports) {
-      const importCall = `import(${JSON.stringify(imp.url)})`;
+      const importCall = `import(${JSON.stringify(imp.url)}${importOptionsCode(
+        imp.attributes
+      )})`;
 
       if (imp.defaultImport) {
         lines.push(
@@ -769,7 +873,9 @@ export class JavaScriptExecutor {
       if (namedKeys.length > 0) {
         const destructure = namedKeys
           .map(k =>
-            k === imp.namedImports[k] ? k : `${k}: ${imp.namedImports[k]}`
+            k === imp.namedImports[k]
+              ? k
+              : `${JSON.stringify(k)}: ${imp.namedImports[k]}`
           )
           .join(', ');
         lines.push(`const { ${destructure} } = await ${importCall};`);
@@ -819,7 +925,8 @@ export class JavaScriptExecutor {
   /**
    * Register code from executed cells into the registry.
    * Later definitions of the same name will override earlier ones.
-   * Import declarations are skipped (handled separately).
+   * Import declarations are skipped (handled separately). The string sources
+   * of the dynamic imports go through the magic imports, like in the cells.
    *
    * @param code - The code to register.
    * @param registry - The registry to add declarations to.
@@ -831,6 +938,22 @@ export class JavaScriptExecutor {
 
     try {
       const ast = parseCode(code);
+
+      // Load the package names of the dynamic imports from the CDN, like the
+      // cells. The other sources are kept as written.
+      walkSimple(ast, {
+        ImportExpression: (node: any) => {
+          const value = staticString(node.source);
+          if (value !== null) {
+            const url = this._transformImportSource(value);
+            node.source = {
+              type: 'Literal',
+              value: url,
+              raw: JSON.stringify(url)
+            };
+          }
+        }
+      });
 
       for (const statement of ast.body) {
         // The declarations of the export statements are kept, the other
@@ -935,7 +1058,9 @@ export class JavaScriptExecutor {
 
       // For destructuring, only add once per actual declaration
       if (node._destructuredName) {
-        const declKey = generate(node.declarations[0]);
+        const declKey = generate(node.declarations[0], {
+          generator: CODE_GENERATOR
+        });
         if (seenDestructuringDecls.has(declKey)) {
           continue;
         }
@@ -974,7 +1099,7 @@ export class JavaScriptExecutor {
     };
 
     // Generate the code and append globalThis assignments
-    const generatedCode = generate(program);
+    const generatedCode = generate(program, { generator: CODE_GENERATOR });
 
     if (globalAssignments.length > 0) {
       return generatedCode + '\n' + globalAssignments.join('\n');
@@ -1515,7 +1640,8 @@ export class JavaScriptExecutor {
 
   /**
    * Rewrite the code of a cell to run in the body of an async function:
-   * import statements to dynamic imports, top-level declarations to
+   * import statements to dynamic imports, the package names of the dynamic
+   * imports to their URL, top-level declarations to
    * assignments to the global scope, and the last expression to a return.
    * The export keywords are removed, keeping the declarations.
    *
@@ -1531,11 +1657,13 @@ export class JavaScriptExecutor {
     map: PositionMap;
     hoisted: string;
     withReturn: boolean;
+    hasDynamicImports: boolean;
   } {
     const edits = new SourceEdits(code);
     // First, so that the end of a loop goes before the texts inserted after
     // the statement
     this._instrumentLoops(edits, ast, cellName);
+    const hasDynamicImports = this._rewriteDynamicImports(edits, ast);
     // The var declarations are hoisted first, then the functions
     const hoistedVars: string[] = [];
     const hoisted: string[] = [];
@@ -1625,7 +1753,8 @@ export class JavaScriptExecutor {
       edited,
       map,
       hoisted: [...hoistedVars, ...hoisted].join(' '),
-      withReturn
+      withReturn,
+      hasDynamicImports
     };
   }
 
@@ -1718,65 +1847,120 @@ export class JavaScriptExecutor {
   }
 
   /**
-   * Rewrite an import statement to a dynamic import, on one line followed by
-   * the line breaks of the statement, with the copies of the imported names
-   * to the global scope.
+   * Rewrite an import statement to a dynamic import, with the copies of the
+   * imported names to the global scope. Each part of the statement is
+   * replaced with one line followed by its line breaks: the import of the
+   * module, then the check of each imported name, which throws a SyntaxError
+   * at the name when the module does not export it, like an ES module, and
+   * finally the bindings.
    */
   private _rewriteImport(edits: SourceEdits, node: any, index: number): void {
     const code = edits.source;
-    const importSource = this._transformImportSource(node.source.value);
-    const importSourceCode = JSON.stringify(importSource);
-    const lineBreaks = '\n'.repeat(
-      lineStarts(code.slice(node.start, node.end)).length - 1
-    );
+    const source = String(node.source.value);
+    const importCall = `import(${JSON.stringify(
+      this._transformImportSource(source)
+    )}${importOptionsCode(importAttributes(node.attributes))})`;
+    const replace = (start: number, end: number, text: string) => {
+      const lineBreaks = lineStarts(code.slice(start, end)).length - 1;
+      edits.replace(start, end, text + '\n'.repeat(lineBreaks));
+    };
 
-    if (node.specifiers.length === 0) {
+    const specifiers = node.specifiers;
+    if (specifiers.length === 0) {
       // Side-effect import: import 'module'
-      edits.replace(
-        node.start,
-        node.end,
-        `await import(${importSourceCode});${lineBreaks}`
-      );
+      replace(node.start, node.end, `await ${importCall};`);
       return;
     }
 
     const importBinding = `__jsKernelImport${index}`;
-    const statements = [
-      `const ${importBinding} = await import(${importSourceCode});`
-    ];
+    replace(
+      node.start,
+      specifiers[0].start,
+      `const ${importBinding} = await ${importCall};`
+    );
     const destructuredNames: string[] = [];
     const localNames: string[] = [];
     let namespaceImportName = '';
-    for (const specifier of node.specifiers) {
+    specifiers.forEach((specifier: any, i: number) => {
+      const isLast = i === specifiers.length - 1;
+      const end = isLast ? node.end : specifiers[i + 1].start;
       const localName = specifier.local.name;
+      const statements: string[] = [];
       if (specifier.type === 'ImportNamespaceSpecifier') {
         namespaceImportName = localName;
-        continue;
+      } else {
+        // Handle aliased imports: import { foo as bar } -> const { foo: bar }
+        const name = importedName(specifier);
+        const key = JSON.stringify(name);
+        statements.push(
+          `if (!(${key} in ${importBinding})) throw new SyntaxError(${JSON.stringify(
+            missingExportMessage(source, name)
+          )});`
+        );
+        destructuredNames.push(
+          name === localName ? localName : `${key}: ${localName}`
+        );
+        localNames.push(localName);
       }
-      // Handle aliased imports: import { foo as bar } -> const { foo: bar }
-      const importedName =
-        specifier.type === 'ImportDefaultSpecifier'
-          ? 'default'
-          : specifier.imported.name;
-      destructuredNames.push(
-        importedName === localName ? localName : `${importedName}: ${localName}`
-      );
-      localNames.push(localName);
-    }
-    if (destructuredNames.length > 0) {
-      statements.push(
-        `const { ${destructuredNames.join(', ')} } = ${importBinding};`
-      );
-    }
-    if (namespaceImportName) {
-      statements.push(`const ${namespaceImportName} = ${importBinding};`);
-      localNames.push(namespaceImportName);
-    }
-    for (const name of localNames) {
-      statements.push(this._copyToGlobalCode(name));
-    }
-    edits.replace(node.start, node.end, statements.join(' ') + lineBreaks);
+      if (isLast) {
+        if (destructuredNames.length > 0) {
+          statements.push(
+            `const { ${destructuredNames.join(', ')} } = ${importBinding};`
+          );
+        }
+        if (namespaceImportName) {
+          statements.push(`const ${namespaceImportName} = ${importBinding};`);
+          localNames.push(namespaceImportName);
+        }
+        for (const name of localNames) {
+          statements.push(this._copyToGlobalCode(name));
+        }
+      }
+      replace(specifier.start, end, statements.join(' '));
+    });
   }
+
+  /**
+   * Rewrite the dynamic imports of a cell, in its functions too, to load the
+   * package names from the CDN, like the import statements. A string source
+   * is rewritten when the cell is compiled, the other sources when the
+   * import runs.
+   *
+   * @returns Whether the cell has dynamic imports.
+   */
+  private _rewriteDynamicImports(edits: SourceEdits, ast: any): boolean {
+    let found = false;
+    walkSimple(ast, {
+      ImportExpression: (node: any) => {
+        found = true;
+        const source = node.source;
+        const value = staticString(source);
+        if (value !== null) {
+          edits.replace(
+            source.start,
+            source.end,
+            JSON.stringify(this._transformImportSource(value))
+          );
+          return;
+        }
+        // Like the loop guard, the code of a function moved elsewhere, like
+        // `fn.toString()` sent to a Web Worker, still runs without the helper
+        edits.insert(
+          source.start,
+          `(typeof ${IMPORT_SOURCE_NAME} == 'function' ? ${IMPORT_SOURCE_NAME} : s => s)(`
+        );
+        edits.insert(source.end, ')');
+      }
+    });
+    return found;
+  }
+
+  /**
+   * Resolve the source of a dynamic import when it runs, for the sources
+   * which are not strings in the code. Called by the cells.
+   */
+  private _resolveImportSource = (source: unknown): unknown =>
+    typeof source === 'string' ? this._transformImportSource(source) : source;
 
   /**
    * Rewrite a variable declaration to an assignment, e.g. `let a = 1, b;`

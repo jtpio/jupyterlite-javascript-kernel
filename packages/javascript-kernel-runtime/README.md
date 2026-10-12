@@ -84,7 +84,7 @@ const reply = await evaluator.execute('1 + 1', 1);
 
 | Option                   | Description                                                                                                                                                                                                                                                                     |
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `globalScope`            | The global object of the realm running the cells. The evaluator installs `display`, `clearOutput`, `Jupyter` (and `prompt` with `requestInput`) on it.                                                                                                                          |
+| `globalScope`            | The global object of the realm running the cells. The evaluator installs `display`, `clearOutput`, `Jupyter` (and `prompt` with `requestInput`) on it, and a `require()` throwing a `ReferenceError` which suggests `import`, when it has no `require`.                         |
 | `onOutput`               | Called with the output messages, see below.                                                                                                                                                                                                                                     |
 | `requestInput`           | `(prompt, password, parentHeader?) => string \| null`: asks the user for some input, synchronously, for `prompt()`. Returns null when the user cancels. Throws a `StdinNotImplementedError` when the input can not be asked, for example when the request does not allow stdin. |
 | `now`                    | `() => number`: the current time in milliseconds, for `console.time()` and the batching of the outputs. Defaults to `performance.now()`, or `Date.now()`.                                                                                                                       |
@@ -99,6 +99,12 @@ const reply = await evaluator.execute('1 + 1', 1);
 | `executorOptions`        | `IExecutorOptions`, plain data: the configuration of the magic imports, see below. Also applied to `executor`.                                                                                                                                                                  |
 | `loopTimeout`            | The time in milliseconds a loop of the cells can keep the page busy before it is stopped with a `LoopTimeoutError`, 0 (the default) for no limit. See [Interrupts and loop timeout](#interrupts-and-loop-timeout).                                                              |
 | `interruptBuffer`        | An `Int32Array` view of a `SharedArrayBuffer`, to interrupt the loops from another thread: the host sets its first element to 1 with `Atomics.store()`.                                                                                                                         |
+
+The `require()` installed by the evaluator is a global function of the
+realm, so `typeof require` is `'function'` for the cells and for the
+modules they load: a library which checks for CommonJS with
+`typeof require`, without catching the error, gets its `ReferenceError`.
+`delete globalThis.require` removes it.
 
 `requestInput` throws a `StdinNotImplementedError`, exported by the package,
 when the user can not be asked: when the `execute_request` of the cell has
@@ -322,10 +328,27 @@ function, called with the global scope as `this`, in sloppy mode:
   `export` statements allowed at the top level. When both fail, the
   syntax error found the furthest in the code is thrown. `isComplete`,
   `extractImports` and `registerCode` parse the cells the same way.
-- The `import` statements become dynamic imports. The `export` keywords are
+- The `import` statements become dynamic imports, with their attributes
+  (`with { type: 'json' }`), followed by a check of each imported name, `in`
+  the module namespace: a name that the module does not export throws a
+  `SyntaxError` at the name, `The requested module 'x' does not provide an
+export named 'y'`, before any name is bound. The `export` keywords are
   removed, keeping the declarations, the export lists are removed, and the
   re-exports load their module. A semicolon replaces the first character of
   the removed code, which ends the previous statement when it has none.
+- The sources of the `import()` expressions go through the magic imports
+  too, in the functions of the cell as well: a string is rewritten when the
+  cell is compiled, and the other sources when the import runs, by a helper
+  passed to the compiled function. `executor.functionSource(fn)` shows the
+  sources as written.
+- `executor.extractImports(code)` returns the `import` statements of a cell
+  with their magic import URL and their attributes, which
+  `executor.generateImportCode(imports)` loads again, for example in a
+  sketch. `executor.registerCode(code, registry)` rewrites the string
+  sources of the `import()` expressions with the magic imports, so the code
+  of `executor.generateCodeFromRegistry(registry)` loads the same modules as
+  the cells. The other sources are kept as written, without the magic
+  imports, so a name computed when that code runs needs a full URL.
 - The top-level declarations become assignments to the global scope. The
   `var` declarations are hoisted, as `if (!("x" in globalThis))
 globalThis["x"] = undefined`, and keep the value of the global when they

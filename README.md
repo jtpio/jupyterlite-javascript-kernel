@@ -218,7 +218,15 @@ The import sources are rewritten like this:
 - a query or a hash stays at the end, after `/+esm`
 - the URLs (`https://...`), the protocol-relative URLs (`//...`), the relative and absolute paths (`./`, `../`, `/`) and the import map specifiers (`#...`) are left unchanged
 
-The packages load at run time, so the magic imports need a network connection to the CDN. The CDN, the rules and the magic imports themselves can be changed in the [settings](#settings), for example to use [esm.sh](https://esm.sh/) or packages hosted with the JupyterLite site. Only the `import` statements at the top level of the cells are rewritten: `await import()` loads a URL, like `await import('https://cdn.jsdelivr.net/npm/dayjs/+esm')`. The modules loaded by name by the [startup extensions](#kernel-startup-extensions) use the same rules.
+The packages load at run time, so the magic imports need a network connection to the CDN. The CDN, the rules and the magic imports themselves can be changed in the [settings](#settings), for example to use [esm.sh](https://esm.sh/) or packages hosted with the JupyterLite site. The modules loaded by name by the [startup extensions](#kernel-startup-extensions) use the same rules.
+
+The imports behave like in an ES module:
+
+- `import()` loads the package names like the `import` statements, also in functions and with a name computed when the cell runs: `const { capitalize } = await import('lodash-es')` loads the same module as `import { capitalize } from 'lodash-es'`
+- importing a name that the module does not export, like a typo, throws a `SyntaxError` pointing at the name, like `The requested module 'lodash-es' does not provide an export named 'capitalise'`, and the cell stops before binding the other names of the statement. A default import of a module without a default export throws the same error for `default`
+- the import attributes are kept, so JSON modules load with `import data from './data.json' with { type: 'json' }`
+- the names exported as strings are imported with `import { "kebab-name" as kebab } from '...'`
+- `require()` is not available, and throws a `ReferenceError` suggesting `import` instead. It is only installed when the page has no `require` of its own, like RequireJS. It is a global function of the iframe or the Web Worker, so `typeof require` is `'function'` for the cells and for the libraries they load: a library checking for CommonJS with `typeof require` without catching the error fails with this `ReferenceError`. `delete globalThis.require` removes it
 
 ## Interrupting code and loop protection
 
