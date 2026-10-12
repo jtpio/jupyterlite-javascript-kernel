@@ -1,116 +1,107 @@
 # Making a new release of jupyterlite_javascript_kernel
 
-The extension can be published to `PyPI` and `npm` manually or using the [Jupyter Releaser](https://github.com/jupyter-server/jupyter_releaser).
+A release publishes four packages with the same version:
+
+- the `jupyterlite-javascript-kernel` Python package on PyPI, which installs
+  the prebuilt extension in a JupyterLite site
+- the `@jupyterlite/javascript-kernel-runtime`, `@jupyterlite/javascript-kernel`
+  and `@jupyterlite/javascript-kernel-extension` npm packages, for the kernels
+  and extensions building on them
+
+They can be published with the [Jupyter Releaser](https://github.com/jupyter-server/jupyter_releaser)
+(recommended) or manually.
+
+## Automated releases with the Jupyter Releaser
+
+Check out the [workflow documentation](https://jupyter-releaser.readthedocs.io/en/latest/get_started/making_release_from_repo.html) for more information.
+
+### Set up the repository
+
+Once, in the settings of the GitHub repository:
+
+- Create an [environment](https://docs.github.com/en/actions/managing-workflow-runs-and-deployments/managing-deployments/managing-environments-for-deployment)
+  named `release`. The "Step 2: Publish Release" workflow (`publish-release.yml`)
+  runs in it, with `environment: release`, so the secrets below can be limited
+  to it, and it can require a review before publishing.
+- Add the `APP_ID` variable and the `APP_PRIVATE_KEY` secret of the GitHub App
+  which pushes the release commit and tag, and publishes the GitHub release.
+- Add the `NPM_TOKEN` secret: an npm
+  [granular access token](https://docs.npmjs.com/creating-and-viewing-access-tokens)
+  with the **Read and write** permission on the packages and scopes of the
+  `@jupyterlite` organization, and **Bypass two-factor authentication** enabled.
+  A token limited to a list of existing packages can not publish a new one, like
+  `@jupyterlite/javascript-kernel-runtime` on its first release. npm granular
+  tokens with write access expire (after 90 days at most): renew the secret
+  before a release when it has expired. The legacy "Automation" tokens are
+  retired.
+- Set up the PyPI project with a
+  [trusted publisher](https://docs.pypi.org/trusted-publishers/adding-a-publisher/):
+  the _workflow name_ is `publish-release.yml` and the _environment name_ is
+  `release`, the environment of the job. The job has the `id-token: write`
+  permission which trusted publishing needs, so no PyPI token is needed.
+
+### Cut a release
+
+- Go to the Actions panel
+- Run the "Step 1: Prep Release" workflow, with the new version, like `0.4.0`
+  or `0.4.0-beta.0`. It bumps the versions with `scripts/bump-version.py`, which
+  also regenerates the version reported by the kernel, and drafts the changelog
+- Check the draft changelog and the draft GitHub release: add the migration
+  notes of the breaking changes, see the top of [CHANGELOG.md](CHANGELOG.md)
+- Run the "Step 2: Publish Release" workflow with the URL of the draft release
 
 ## Manual release
 
+### Version
+
+Bump the versions of the npm packages and of the Python package together:
+
+```bash
+python scripts/bump-version.py <new-version>
+```
+
+It runs `lerna version` on the npm packages, regenerates
+`packages/javascript-kernel/src/version.ts` (the version reported by the
+kernel, which `jlpm lint:check` verifies) and sets the version of the root
+`package.json`, which is the version of the Python package. `hatch version`
+alone only changes the root `package.json`.
+
 ### Python package
 
-This extension can be distributed as Python packages. All of the Python
-packaging instructions are in the `pyproject.toml` file to wrap your extension in a
-Python package. Before generating a package, you first need to install some tools:
+Clean up the development files, then build the source package (`.tar.gz`)
+and the wheel (`.whl`) in the `dist/` directory:
 
 ```bash
-pip install build twine hatch
-```
-
-Bump the version using `hatch`. By default this will create a tag.
-See the docs on [hatch-nodejs-version](https://github.com/agoose77/hatch-nodejs-version#semver) for details.
-
-```bash
-hatch version <new-version>
-```
-
-`hatch version` alone only bumps the version in the root `package.json`. When
-you bump the versions of the npm packages without the Jupyter Releaser (for
-example with `jlpm bump:js:version`), also regenerate the version reported by
-the kernel:
-
-```bash
-jlpm version:sync
-```
-
-Make sure to clean up all the development files before building the package:
-
-```bash
+pip install build twine
 jlpm clean:all
-```
-
-You could also clean up the local git repository:
-
-```bash
-git clean -dfX
-```
-
-To create a Python source package (`.tar.gz`) and the binary package (`.whl`) in the `dist/` directory, do:
-
-```bash
 python -m build
 ```
 
 > `python setup.py sdist bdist_wheel` is deprecated and will not work for this package.
 
-Then to upload the package to PyPI, do:
+Then upload them to PyPI:
 
 ```bash
 twine upload dist/*
 ```
 
-### NPM package
+### npm packages
 
-To publish the frontend part of the extension as a NPM package, do:
+Build the packages, then publish with Lerna the ones whose version is not on
+npm yet, in the order of their dependencies:
 
 ```bash
+jlpm
+jlpm build:prod
 npm login
-npm publish --access public
+jlpm lerna publish from-package
 ```
 
-## Automated releases with the Jupyter Releaser
+`jlpm run publish` does the same after cleaning the packages.
 
-The extension repository should already be compatible with the Jupyter Releaser.
-
-Check out the [workflow documentation](https://jupyter-releaser.readthedocs.io/en/latest/get_started/making_release_from_repo.html) for more information.
-
-Here is a summary of the steps to cut a new release:
-
-- Add tokens to the [Github Secrets](https://docs.github.com/en/actions/security-guides/encrypted-secrets) in the repository:
-  - `ADMIN_GITHUB_TOKEN` (with "public_repo" and "repo:status" permissions); see the [documentation](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/creating-a-personal-access-token)
-  - `NPM_TOKEN` (with "automation" permission); see the [documentation](https://docs.npmjs.com/creating-and-viewing-access-tokens)
-- Set up PyPI
-
-<details><summary>Using PyPI trusted publisher (modern way)</summary>
-
-- Set up your PyPI project by [adding a trusted publisher](https://docs.pypi.org/trusted-publishers/adding-a-publisher/)
-  - The _workflow name_ is `publish-release.yml` and the _environment_ should be left blank.
-- Ensure the publish release job as `permissions`: `id-token : write` (see the [documentation](https://docs.pypi.org/trusted-publishers/using-a-publisher/))
-
-</details>
-
-<details><summary>Using PyPI token (legacy way)</summary>
-
-- If the repo generates PyPI release(s), create a scoped PyPI [token](https://packaging.python.org/guides/publishing-package-distribution-releases-using-github-actions-ci-cd-workflows/#saving-credentials-on-github). We recommend using a scoped token for security reasons.
-
-- You can store the token as `PYPI_TOKEN` in your fork's `Secrets`.
-  - Advanced usage: if you are releasing multiple repos, you can create a secret named `PYPI_TOKEN_MAP` instead of `PYPI_TOKEN` that is formatted as follows:
-
-    ```text
-    owner1/repo1,token1
-    owner2/repo2,token2
-    ```
-
-    If you have multiple Python packages in the same repository, you can point to them as follows:
-
-    ```text
-    owner1/repo1/path/to/package1,token1
-    owner1/repo1/path/to/package2,token2
-    ```
-
-</details>
-
-- Go to the Actions panel
-- Run the "Step 1: Prep Release" workflow
-- Check the draft changelog
-- Run the "Step 2: Publish Release" workflow
+Check the contents of a package before publishing it with
+`npm pack --dry-run` in its folder: the extension needs its `lib/`, `schema/`
+and `style/icons/` folders, and each package has its `README.md` and `LICENSE`.
 
 ## Publishing to `conda-forge`
 

@@ -23,9 +23,10 @@
   "files": [
     "dist/*",
     "lib/**/*.d.ts",
-    "lib/**/*.js.map",
     "lib/**/*.js",
-    "src/**/*.{ts,tsx}"
+    "src/**/*.{ts,tsx}",
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "jlpm build:lib && jlpm build:bundle",

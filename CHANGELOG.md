@@ -1,5 +1,115 @@
 # Changelog
 
+## Migrating to 0.4.0
+
+These notes cover the upgrade from 0.3.0, the last stable release. The first
+part lists the breaking changes of the 0.4.0 alphas, the second part the
+breaking changes since 0.4.0a5, which also apply when upgrading from 0.3.0.
+The release entries below list every change.
+
+### From 0.3.0
+
+#### For the deployments
+
+- The kernel requires JupyterLite 0.8, instead of JupyterLite 0.2 or 0.3.
+- The extension registers two kernels instead of one (see
+  [Runtime modes](README.md#runtime-modes)). The kernel named `javascript`,
+  which ran the code in a Web Worker, is now `JavaScript (IFrame)`: it runs
+  the code in a hidden iframe on the thread of the page, with access to the
+  DOM. The Web Worker kernel is now named `javascript-worker`, and shown as
+  `JavaScript (Web Worker)`. A deployment can disable either kernel (see
+  [Enable or disable specific modes](README.md#enable-or-disable-specific-modes)).
+
+#### For the notebooks
+
+- The notebooks saved with the kernelspec `javascript` now run in
+  `JavaScript (IFrame)`, on the thread of the page: a synchronous loop
+  freezes JupyterLite until it is stopped after 10 s with a `LoopTimeoutError`
+  (see
+  [Interrupting code and loop protection](README.md#interrupting-code-and-loop-protection)).
+  The notebooks which need the Web Worker, for long computations or for
+  isolation from the page, switch to `JavaScript (Web Worker)` with
+  **Kernel > Change Kernel...**, which saves the kernelspec
+  `javascript-worker`.
+
+#### For the extensions and the kernels building on the JavaScript kernel
+
+- The packages depend on `@jupyterlite/services` 0.8, which replaces
+  `@jupyterlite/kernel` and `@jupyterlite/server`: `BaseKernel`, `IKernel`
+  and `IKernelSpecs` are imported from `@jupyterlite/services`, and the
+  plugins are `JupyterFrontEndPlugin`s instead of `JupyterLiteServerPlugin`s.
+- `JavaScriptKernel` runs the code in the runtime given by the new `runtime`
+  option, `'iframe'` by default, or `'worker'`. Its Web Worker members,
+  `initWorker()`, `initRemote()` and `remoteKernel`, are removed: override
+  `createBackend()` or `onRuntimeReady()` instead.
+- The `IJavaScriptWorkerKernel` and `IRemoteJavaScriptWorkerKernel`
+  interfaces of `lib/tokens`, and the `JavaScriptRemoteKernel` class of
+  `lib/worker`, are removed.
+
+### Since 0.4.0a5
+
+#### For the deployments
+
+- The Python package requires JupyterLite 0.8: it depends on
+  `jupyterlite-core>=0.8,<0.9`, and installing it in an environment with an
+  older `jupyterlite-core` upgrades it.
+- The extension is installed in the `labextensions` folder under its npm name,
+  `@jupyterlite/javascript-kernel-extension`. Remove a symlink named
+  `@jupyterlite/javascript-kernel` left by an earlier development install.
+- The kernels have [settings](README.md#settings), which a deployment can set
+  in its `overrides.json`. The `JavaScript (IFrame)` kernel stops the loops
+  keeping the page busy for more than 10 s, and the cells print at most
+  5,000,000 characters: raise or turn off these limits with the **Loop timeout
+  (ms)** and **Output limit (characters)** settings.
+
+#### For the notebooks
+
+- The second argument of `display()` is an object of options:
+  `display(value, metadata)` becomes `display(value, { metadata })`.
+- The cells run like in a REPL (see [Cells](README.md#cells)): the
+  declarations are globals shared with the next cells, `const` can be declared
+  again, and `_` and `_error` hold the last result and the last error.
+- `require()` throws a `ReferenceError` suggesting `import`.
+- The errors thrown later, in timers, event listeners and widget callbacks,
+  are printed in the notebook as `Uncaught ...` instead of the console of the
+  browser.
+- The `language_info.version` saved in the notebook metadata is the
+  ECMAScript edition parsed by the kernel, like `ES2026`, instead of `es2017`.
+- An interrupt can restart the Web Worker of `JavaScript (Web Worker)`, when
+  the cell does not stop, and reloading the page of the iframe restarts the
+  iframe of `JavaScript (IFrame)`: the variables of the previous cells are
+  then lost.
+
+#### For the extensions and the kernels building on the JavaScript kernel
+
+- The runtime running next to the code of the cells (the executor, the
+  evaluator, `display()`, the console, comms and widgets) moved to the new
+  `@jupyterlite/javascript-kernel-runtime` package, which does not depend on
+  JupyterLite. `@jupyterlite/javascript-kernel` still exports everything from
+  it, so the imports from `@jupyterlite/javascript-kernel` keep working, but
+  the deep imports, like `@jupyterlite/javascript-kernel/lib/executor`, must
+  use `@jupyterlite/javascript-kernel-runtime` (or, better, its main entry).
+- `DisplayHelper`, `IDisplayData` and `IDisplayCallbacks` are replaced by
+  `createDisplay()`, `IDisplay`, `IDisplayHost` and `DisplayHandle`.
+- The iframe runtime is called directly from the page instead of over
+  `postMessage()`: other windows can not run code in the kernel by posting
+  messages to the iframe anymore.
+- `onRuntimeReady()` can run more than once for a kernel: again with a new
+  global scope and executor when a cell reloads the iframe.
+- `JavaScriptKernel` handles the silent `execute_request` messages itself, but
+  still calls `executeRequest()`: an override checks `content.silent` before
+  publishing outputs.
+- The runtime output messages carry the `parentHeader` of the message of the
+  frontend they belong to, and `JavaScriptKernel` publishes them with it.
+- JupyterLite only cancels the queued cells on interrupt:
+  `installKernelInterrupts(client)` makes its kernel client also call the
+  `interrupt()` method of the kernels. The extension calls it, and the
+  extensions of the kernels building on `JavaScriptKernel` can call it too.
+
+See the [README](README.md) and the
+[README of the runtime package](packages/javascript-kernel-runtime/README.md)
+for the details.
+
 <!-- <START NEW CHANGELOG ENTRY> -->
 
 ## 0.4.0a5

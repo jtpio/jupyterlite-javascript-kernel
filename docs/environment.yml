@@ -7,4 +7,4 @@ dependencies:
 - ipywidgets>=8.1,<9
 - jupyterlab>=4.6.0,<5
 - nodejs=22
-- jupyterlite-core>=0.7.0,<0.8
+- jupyterlite-core>=0.8,<0.9

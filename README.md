@@ -9,17 +9,32 @@ A JavaScript kernel for JupyterLite.
 
 ## Requirements
 
-- JupyterLite >=0.3.0
+- JupyterLite 0.8 (`jupyterlite-core>=0.8,<0.9`), which the Python package installs
 
 This kernel was originally maintained as part of the main JupyterLite repository, and was moved to its own repository for the JupyterLite 0.3.0 release.
 
 ## Install
 
-To install the extension, execute:
+Install the kernel in the Python environment which builds the JupyterLite site. It also installs `jupyterlite-core`:
 
 ```bash
 pip install jupyterlite-javascript-kernel
 ```
+
+Also install `jupyterlab-widgets` to show the [Jupyter Widgets](#jupyter-widgets):
+
+```bash
+pip install jupyterlab-widgets
+```
+
+Then build the site, in the folder of its notebooks and `jupyter-lite.json`, and serve it on http://localhost:8000 to try it:
+
+```bash
+jupyter lite build --contents .
+jupyter lite serve
+```
+
+The site, in the `_output` folder, has the JavaScript kernels. See the [JupyterLite documentation](https://jupyterlite.readthedocs.io/en/stable/) to configure and deploy it.
 
 ## Uninstall
 
@@ -31,14 +46,14 @@ pip uninstall jupyterlite-javascript-kernel
 
 ## Runtime modes
 
-The extension currently registers two JavaScript kernelspecs:
+The extension registers two JavaScript kernels:
 
-- `JavaScript (IFrame)`:
-  Runs code in a hidden runtime `iframe` on the main page thread. Use this when your code needs browser DOM APIs like `document`, `window`, or canvas access through the page context.
-- `JavaScript (Web Worker)`:
-  Runs code in a dedicated Web Worker. Use this for stronger isolation and to avoid blocking the main UI thread.
+| Kernel name         | Display name              | Runtime                                                                                                                                                                              |
+| ------------------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `javascript`        | `JavaScript (IFrame)`     | Runs code in a hidden runtime `iframe` on the main page thread. Use this when your code needs browser DOM APIs like `document`, `window`, or canvas access through the page context. |
+| `javascript-worker` | `JavaScript (Web Worker)` | Runs code in a dedicated Web Worker. Use this for stronger isolation and to avoid blocking the main UI thread.                                                                       |
 
-Pick either kernel from the notebook kernel selector in JupyterLite.
+Pick either kernel from the launcher or the notebook kernel selector in JupyterLite. The kernel name is the one saved in the `kernelspec` of the notebook metadata, like `{ "name": "javascript-worker", "display_name": "JavaScript (Web Worker)" }`, and the one to give in the URL of the REPL app of JupyterLite, like `repl/index.html?kernel=javascript`. Both kernels speak the same language, `javascript`, with the `.js` file extension.
 
 ### Kernel information
 
@@ -331,6 +346,7 @@ Error: boom
 - `console.error(error)`, `console.trace()` and the errors shown as values use the same locations.
 - The errors thrown later, in a timer, an event listener or the handler of a widget, are printed on stderr as `Uncaught Error: ...`, with the other outputs of the code that threw them (see [Console](#console)): the errors of a timer in the cell which created it, the ones of a widget handler in the cell which registered it, the others in the last cell that ran. The promises rejected without a handler, like an async function called without `await`, are printed as `Uncaught (in promise) Error: ...`. The kernel keeps running. These errors are shown in the notebook instead of the console of the browser.
 - The last error, of a cell or printed later, is in `_error`, to look at it in the next cell (see [Cells](#cells)).
+- The `raises-exception` tag of a cell does not let **Run All** go on after its error. JupyterLab asks the kernel not to stop at the error of such a cell (with `stop_on_error: false`), but JupyterLite cancels the cells waiting to run as soon as a cell fails, whatever the request asks. This is a limitation of JupyterLite, not of the kernel. In `JavaScript (Web Worker)`, **Run All** stops at the first cell which fails. In `JavaScript (IFrame)`, which runs the cells on the page, the cells after it can still run, when the cell fails before JupyterLite received them.
 
 The columns can differ slightly between browsers, which point at different parts of the expression that failed.
 
@@ -419,6 +435,21 @@ display(out);
 - `out.capture(callback, options?)`, or `out.capture(options)(callback)`, returns a function which runs `callback` with its outputs (the `console`, `display()`, `clearOutput()`) shown in the widget. The outputs of an async callback after an `await` are captured too, until its promise settles: while it runs, the outputs of the other code running outside of the cells, after an `await`, also go to the widget. With the `clearOutput` option, the outputs of the widget are removed first, when the next output arrives with `wait`. The errors of the callback go to the cell which registered it.
 - `out.appendStdout(text)` and `out.appendStderr(text)` add some text, and `out.appendDisplayData(value, metadata?)` adds a value shown like `display()` shows it, like a widget, or a MIME bundle like `{ 'text/html': '<b>Hi</b>' }`
 - `out.clearOutput({ wait })` removes the outputs of the widget, with `wait` when the next output arrives
+
+The kernel handles the messages of the widgets, like the clicks of a button or the new value of a slider moved by the user, between the cells: JupyterLite gives the messages of the frontend to the kernel one at a time, in order, so they wait while a cell runs, also while it waits in an `await`. A cell looping over the value of a widget does not see the slider move until it ends:
+
+```javascript
+const slider = new Jupyter.widgets.IntSlider();
+display(slider);
+
+// Moving the slider while the loop runs prints 0 until the loop ends
+for (let i = 0; i < 50; i++) {
+  await new Promise(resolve => setTimeout(resolve, 100));
+  console.log(slider.value);
+}
+```
+
+Use the callbacks of the widgets instead, like `slider.observe()`, or a `setInterval()` timer, which run between the cells and see the new values.
 
 When a notebook is closed and opened again while its kernel keeps running, like with File > Close Tab and a double-click in the file browser, its widgets show again, with their current values, and keep syncing with the kernel: the kernel answers the widget manager of the notebook with the state of the live widgets, including the bytes of the `Image`, `Video` and `Audio` widgets and of the uploaded files. The widgets are lost when the kernel restarts.
 
@@ -674,7 +705,7 @@ reply.content.user_expressions.total.data['text/plain']; // '6'
 - `store_history: false` keeps the execution count and the history, but the outputs are shown. The tracebacks name the code `<silent-1>`, `<silent-2>`..., instead of the cell of the execution count
 - `user_expressions` are evaluated after the code, when it succeeds, like the last expression of a cell: a promise is awaited. The reply holds, for each name, the MIME bundle of the value, as `{ status: 'ok', data, metadata }` with a `text/plain` without colors, or the error, as `{ status: 'error', ename, evalue, traceback }`. Each one must be a single expression: `let x = 1` or `a; b` fail with `SyntaxError: Expected an expression`
 
-JupyterLite cancels the requests waiting to run when a request fails, also when it is silent.
+JupyterLite cancels the requests waiting to run when a request fails, also when it is silent, and also when it has `stop_on_error: false`, which the kernel can not honour (see [Errors](#errors)).
 
 ## Configuration
 
@@ -738,12 +769,13 @@ The two runtime modes are registered by separate plugins:
 - `@jupyterlite/javascript-kernel-extension:kernel-iframe`
 - `@jupyterlite/javascript-kernel-extension:kernel-worker`
 
-You can disable either one using `disabledExtensions` in `jupyter-config-data`.
+You can disable either one using `disabledExtensions` in the `jupyter-config-data` of the `jupyter-lite.json` file, in the folder where `jupyter lite build` runs. The build merges it into the `jupyter-lite.json` of the site.
 
 Disable worker mode:
 
 ```json
 {
+  "jupyter-lite-schema-version": 0,
   "jupyter-config-data": {
     "disabledExtensions": [
       "@jupyterlite/javascript-kernel-extension:kernel-worker"
@@ -756,6 +788,7 @@ Disable iframe mode:
 
 ```json
 {
+  "jupyter-lite-schema-version": 0,
   "jupyter-config-data": {
     "disabledExtensions": [
       "@jupyterlite/javascript-kernel-extension:kernel-iframe"
@@ -778,7 +811,7 @@ The repository contains three npm packages:
 
 ### Development install
 
-Note: You will need NodeJS to build the extension package.
+You will need Node.js to build the extension package, and a Python environment, like a virtual environment.
 
 The `jlpm` command is JupyterLab's pinned version of
 [yarn](https://yarnpkg.com/) that is installed with JupyterLab. You may use
@@ -786,31 +819,34 @@ The `jlpm` command is JupyterLab's pinned version of
 
 ```bash
 # Clone the repo to your local environment
-# Change directory to the jupyterlite-javascript-kernel directory
-# Install package in development mode
+# Change directory to the javascript-kernel directory
+# Install the package in development mode, with JupyterLab and jupyterlite-core
 pip install -e ".[dev]"
-# Link your development version of the extension with JupyterLab
+# Link your development version of the extension in the Python environment
 jupyter-builder develop . --overwrite
-# Rebuild extension Typescript source after making changes
+# Rebuild the packages and the extension after making changes
 jlpm build
 ```
 
-You can watch the source directory and run JupyterLab at the same time in different terminals to watch for changes in the extension's source and automatically rebuild the extension.
+The kernels run in JupyterLite, not in JupyterLab: build a JupyterLite site with the extension, with the example notebooks, and serve it on http://localhost:8000:
+
+```bash
+jupyter lite build --contents examples
+jupyter lite serve
+```
+
+You can watch the source directory to rebuild the extension automatically on every saved change:
 
 ```bash
 # Watch the source directory in one terminal, automatically rebuilding when needed
 jlpm watch
-# Run JupyterLab in another terminal
-jupyter lab
+# Build and serve the JupyterLite site in another terminal
+jupyter lite serve --contents examples
 ```
 
-With the watch command running, every saved change will immediately be built locally and available in your running JupyterLab. Refresh JupyterLab to load the change in your browser (you may need to wait several seconds for the extension to be rebuilt).
+`jupyter lite serve` builds the site first. The site has a copy of the extension: after a change, stop `jupyter lite serve` and run it again, or run `jupyter lite build --contents examples` in another terminal, then refresh the page (you may need to wait several seconds for the extension to be rebuilt).
 
-By default, the `jlpm build` command generates the source maps for this extension to make it easier to debug using the browser dev tools. To also generate source maps for the JupyterLab core extensions, you can run the following command:
-
-```bash
-jupyter lab build --minimize=False
-```
+By default, the `jlpm build` command builds the extension in development mode, with source maps, to make it easier to debug using the browser dev tools. `jlpm build:prod` builds it like a release.
 
 The version reported by the kernel comes from
 `packages/javascript-kernel/src/version.ts`, generated from `package.json` by
@@ -833,8 +869,8 @@ pip uninstall jupyterlite-javascript-kernel
 
 In development mode, you will also need to remove the symlink created by `jupyter-builder develop`
 command. To find its location, you can run `jupyter labextension list` to figure out where the `labextensions`
-folder is located. Then you can remove the symlink named `@jupyterlite/javascript-kernel` within that folder.
+folder is located. Then you can remove the symlink named `@jupyterlite/javascript-kernel-extension` within that folder.
 
 ### Packaging the extension
 
-See [RELEASE](RELEASE.md)
+See [RELEASE](RELEASE.md) to publish the Python package and the npm packages, and the [CHANGELOG](CHANGELOG.md) for the migration notes of each release.

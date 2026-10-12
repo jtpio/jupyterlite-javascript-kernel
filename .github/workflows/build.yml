@@ -33,7 +33,7 @@ jobs:
     - name: Build the extension
       run: |
         set -eux
-        python -m pip install .[test]
+        python -m pip install ".[dev]"
 
         jupyter labextension list
         jupyter labextension list 2>&1 | grep -ie "@jupyterlite/javascript-kernel.*OK"
@@ -103,7 +103,7 @@ jobs:
       - name: Install the extension
         run: |
           set -eux
-          python -m pip install "jupyterlab>=4.6.0,<5" jupyterlite-core jupyterlab-widgets jupyter-server jupyterlite_javascript_kernel*.whl
+          python -m pip install "jupyterlab>=4.6.0,<5" jupyterlab-widgets jupyter-server jupyterlite_javascript_kernel*.whl
 
       - name: Install dependencies
         working-directory: ui-tests
@@ -155,7 +155,7 @@ jobs:
           name: extension-artifacts
       - name: Install the dependencies
         run: |
-          python -m pip install --pre jupyterlite-core jupyter-server jupyterlab-widgets jupyterlite_javascript_kernel*.whl
+          python -m pip install jupyter-server jupyterlab-widgets jupyterlite_javascript_kernel*.whl
       - name: Build the JupyterLite site
         run: |
           jupyter lite build --output-dir dist --contents examples

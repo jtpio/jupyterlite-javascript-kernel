@@ -38,7 +38,7 @@
     "lint:check": "yarn run eslint:check && yarn run prettier:check && yarn run version:check && yarn run ecmascript:check",
     "prettier": "prettier --write \"**/*{.ts,.tsx,.js,.jsx,.css,.json,.md}\"",
     "prettier:check": "prettier --list-different \"**/*{.ts,.tsx,.js,.jsx,.css,.json,.md}\"",
-    "publish": "yarn run clean && yarn run build && lerna publish",
+    "publish": "yarn run clean && yarn run build:prod && lerna publish from-package",
     "version:check": "node scripts/version.mjs --check",
     "version:sync": "node scripts/version.mjs",
     "watch": "lerna run watch"

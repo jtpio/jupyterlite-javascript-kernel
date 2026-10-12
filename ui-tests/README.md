@@ -4,10 +4,10 @@ The UI tests open a JupyterLite site in a browser, and use the JavaScript kernel
 
 ## Run the tests
 
-Install the extension and the dependencies of the JupyterLite site first, from the root of the repository:
+Install the extension, with JupyterLab (for Galata) and `jupyterlite-core`, and the dependencies of the JupyterLite site first, from the root of the repository:
 
 ```bash
-pip install . jupyterlite-core jupyterlab-widgets jupyter-server
+pip install ".[dev]" jupyterlab-widgets jupyter-server
 ```
 
 Then build the site in `dist` with the example notebooks, and run the tests:

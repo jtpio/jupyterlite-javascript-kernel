@@ -19,9 +19,11 @@
   },
   "files": [
     "lib/*.d.ts",
-    "lib/*.js.map",
     "lib/*.js",
-    "schema/*.json"
+    "schema/*.json",
+    "style/icons/*.png",
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "jlpm build:lib && jlpm build:labextension:dev",
