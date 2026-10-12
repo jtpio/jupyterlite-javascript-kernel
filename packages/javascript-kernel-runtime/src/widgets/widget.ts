@@ -295,6 +295,82 @@ export class Widget {
   }
 
   /**
+   * Wait for the next change of a property, `value` by default: the promise
+   * resolves with its new value, like `wait_for_change()` in the
+   * asynchronous widgets of ipywidgets. An interrupt of the kernel stops the
+   * wait: the promise then never settles.
+   */
+  changed(name = 'value'): Promise<unknown> {
+    return new Promise(resolve => {
+      const stop = this._waitFor(`change:${name}`, (value: unknown) => {
+        stop();
+        resolve(value);
+      });
+    });
+  }
+
+  /**
+   * The next values of a property, `value` by default, as an async iterator,
+   * like `for await (const value of slider.changes()) { ... }`. The values
+   * set while the loop body runs are kept for the next iterations. Breaking
+   * out of the loop stops listening, and the loop ends when the widget is
+   * closed. An interrupt of the kernel stops it: the loop then waits forever.
+   */
+  changes(name = 'value'): AsyncIterableIterator<unknown> {
+    const values: unknown[] = [];
+    const waiting: Array<(result: IteratorResult<unknown>) => void> = [];
+    let state: 'listening' | 'done' | 'cancelled' = 'listening';
+    const finish = (): void => {
+      if (state !== 'listening') {
+        return;
+      }
+      state = 'done';
+      stop();
+      this.off('close', finish);
+      for (const resolve of waiting.splice(0)) {
+        resolve({ value: undefined, done: true });
+      }
+    };
+    const stop = this._waitFor(
+      `change:${name}`,
+      (value: unknown) => {
+        const resolve = waiting.shift();
+        if (resolve) {
+          resolve({ value, done: false });
+        } else {
+          values.push(value);
+        }
+      },
+      () => {
+        state = 'cancelled';
+        values.length = 0;
+        this.off('close', finish);
+      }
+    );
+    this.on('close', finish);
+    const iterator: AsyncIterableIterator<unknown> = {
+      next: () => {
+        if (values.length > 0) {
+          return Promise.resolve({ value: values.shift(), done: false });
+        }
+        if (state === 'done') {
+          return Promise.resolve({ value: undefined, done: true });
+        }
+        if (state === 'cancelled') {
+          return new Promise<IteratorResult<unknown>>(() => undefined);
+        }
+        return new Promise(resolve => waiting.push(resolve));
+      },
+      return: (value?: unknown) => {
+        finish();
+        return Promise.resolve({ value, done: true });
+      },
+      [Symbol.asyncIterator]: () => iterator
+    };
+    return iterator;
+  }
+
+  /**
    * The widget's comm/model ID.
    */
   get commId(): string {
@@ -363,6 +439,29 @@ export class Widget {
     }
     this._validationWidgets?.push(widget);
     return widget;
+  }
+
+  /**
+   * Listen for an event of the widget, for a wait of the cells, like
+   * `changed()`, which an interrupt of the kernel cancels.
+   *
+   * @param onCancel - Called when an interrupt cancels the wait.
+   * @returns A function to stop listening.
+   */
+  protected _waitFor(
+    event: string,
+    callback: WidgetEventCallback,
+    onCancel?: () => void
+  ): () => void {
+    this.on(event, callback);
+    const unregister = this._manager.addWait(() => {
+      this.off(event, callback);
+      onCancel?.();
+    });
+    return () => {
+      this.off(event, callback);
+      unregister();
+    };
   }
 
   /**

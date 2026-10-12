@@ -46,6 +46,20 @@ export interface IOutputSink {
    * stops showing the outputs of its message.
    */
   ended?(capture: IOutputCapture): void;
+
+  /**
+   * Called when an output of the message of a held capture of the widget,
+   * like the result of the cell which started an async callback captured in
+   * the widget, goes to the message itself: the widget stops showing the
+   * outputs of the message, until resume().
+   */
+  suspend?(): void;
+
+  /**
+   * Called before an output of a held capture of the widget: the widget
+   * shows the outputs of its message again, after suspend().
+   */
+  resume?(): void;
 }
 
 /**
@@ -75,9 +89,31 @@ export interface IOutputCapture {
 }
 
 /**
+ * The parent of the outputs of the running callback, saved by enter().
+ */
+export interface IOutputScope {
+  /**
+   * The parent message of the callback, null outside of the callbacks.
+   */
+  readonly parent: IParentMessage | null;
+
+  /**
+   * The Output widgets which keep showing the outputs of the callback while
+   * they hold a capture of its parent message, like the ones capturing the
+   * code which created a timer.
+   */
+  readonly sinks: ReadonlySet<IOutputSink>;
+}
+
+/**
  * No parent message: the host attaches the outputs to its current parent.
  */
 const NO_PARENT: IParentMessage = { id: null };
+
+/**
+ * No Output widget.
+ */
+const NO_SINKS: ReadonlySet<IOutputSink> = new Set();
 
 /**
  * A capture of the outputs by an Output widget.
@@ -186,6 +222,26 @@ export class OutputRouter {
   }
 
   /**
+   * The Output widgets capturing the outputs sent now, for the callbacks
+   * registered now, like a timer created by an async callback captured in a
+   * widget: given to enter(), they keep showing the outputs of the callback
+   * while they hold their capture.
+   */
+  capturing(): ReadonlySet<IOutputSink> {
+    const sinks = new Set(
+      this._captures.filter(record => !record.held).map(record => record.sink)
+    );
+    if (!this._request && !this._scope) {
+      // After an `await` in an async callback captured by a widget
+      const held = this._lastHeld();
+      if (held && (!held.inRequest || this._isOpen(held.parent))) {
+        sinks.add(held.sink);
+      }
+    }
+    return sinks;
+  }
+
+  /**
    * Handle a comm message of the frontend: the outputs captured by an Output
    * widget, and the comm messages, go to it.
    *
@@ -251,24 +307,32 @@ export class OutputRouter {
   /**
    * Make the outputs go to a parent message, until leave().
    *
-   * @returns The previous parent, for leave().
+   * @param sinks - The Output widgets which keep showing the outputs while
+   * they hold a capture of `parent`, from capturing().
+   *
+   * @returns The previous scope, for leave().
    */
-  enter(parent: IParentMessage): IParentMessage | null {
-    const previous = this._scope;
+  enter(
+    parent: IParentMessage,
+    sinks: ReadonlySet<IOutputSink> = NO_SINKS
+  ): IOutputScope {
+    const previous: IOutputScope = { parent: this._scope, sinks: this._sinks };
     this._scope = parent;
+    this._sinks = sinks;
     this._errorParent = null;
     return previous;
   }
 
   /**
-   * Restore the parent of the outputs before enter().
+   * Restore the scope of the outputs before enter().
    *
    * @param threw - Whether the callback threw: the error, reported by the
    * `error` event of the realm right after, goes to its parent.
    */
-  leave(previous: IParentMessage | null, threw = false): void {
+  leave(previous: IOutputScope, threw = false): void {
     this._errorParent = threw ? this._scope : null;
-    this._scope = previous;
+    this._scope = previous.parent;
+    this._sinks = previous.sinks;
   }
 
   /**
@@ -394,7 +458,7 @@ export class OutputRouter {
     switch (message.type) {
       case 'execute_result':
       case 'execute_error':
-        return this._cell;
+        return this._outsideHeld(this._cell);
       default:
         break;
     }
@@ -404,16 +468,17 @@ export class OutputRouter {
       // capturing them, and forgets them otherwise
       return this._captures.some(record => record.parent === request)
         ? request
-        : (this._scope ?? this._cell);
+        : this._outsideHeld(this._scope ?? this._cell);
     }
     if (this._scope) {
-      return this._scope;
+      return this._outsideHeld(this._scope);
     }
     // Outside of the handlers and the callbacks, like after an `await`: the
     // outputs of an async callback captured by an Output widget
     const held = this._lastHeld();
     if (held) {
       if (!held.inRequest || this._isOpen(held.parent)) {
+        held.sink.resume?.();
         return held.parent;
       }
       // The outputs the frontend showed in the widget are in its state once
@@ -422,7 +487,43 @@ export class OutputRouter {
         return this._directParent(held);
       }
     }
-    return this._cell;
+    return this._outsideHeld(this._cell);
+  }
+
+  /**
+   * Send an output to its parent message, and not to the Output widgets
+   * holding a capture of the message: the frontend shows the outputs of a
+   * message in the widgets whose capture started in it, like the outputs of
+   * an async callback a cell captured, and would show the result of the cell
+   * there too. These widgets stop showing them, until the next output of
+   * their capture. A widget whose callback runs, capturing the outputs,
+   * keeps showing them, and so does a widget given to enter(), like the
+   * one capturing the code which created the running timer.
+   */
+  private _outsideHeld(parent: IParentMessage): IParentMessage {
+    if (parent.id === null) {
+      return parent;
+    }
+    const capturing = new Set(
+      this._captures
+        .filter(record => !record.held && record.parent.id === parent.id)
+        .map(record => record.sink)
+    );
+    for (const record of this._captures) {
+      if (
+        record.held &&
+        !record.inRequest &&
+        record.parent.id === parent.id &&
+        !capturing.has(record.sink)
+      ) {
+        if (this._sinks.has(record.sink)) {
+          record.sink.resume?.();
+        } else {
+          record.sink.suspend?.();
+        }
+      }
+    }
+    return parent;
   }
 
   /**
@@ -473,6 +574,7 @@ export class OutputRouter {
   private _request: IParentMessage | null = null;
   private _openRequest: IParentMessage | null = null;
   private _scope: IParentMessage | null = null;
+  private _sinks: ReadonlySet<IOutputSink> = NO_SINKS;
   private _errorParent: IParentMessage | null = null;
   private _captures: ICaptureRecord[] = [];
   private _executions = 0;

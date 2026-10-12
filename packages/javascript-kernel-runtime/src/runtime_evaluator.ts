@@ -20,7 +20,11 @@ import { setPromiseStateResolver, type PromiseStateResolver } from './inspect';
 import { LoopGuard, TimerRegistry, defaultClock } from './interrupt';
 import { getDoc, setDoc } from './introspection';
 import { OutputBatcher } from './output_batcher';
-import { OutputRouter, type IParentMessage } from './output_router';
+import {
+  OutputRouter,
+  type IOutputScope,
+  type IParentMessage
+} from './output_router';
 import type { RuntimeOutputHandler } from './protocol';
 import { safe, stripAnsi } from './utils';
 import {
@@ -257,12 +261,14 @@ export class JavaScriptRuntimeEvaluator {
    * message, like a click on a button. To stop a loop which never yields,
    * the host runs the evaluator in another thread and sets the
    * `interruptBuffer`. The async callbacks captured by the Output widgets
-   * stop capturing the outputs.
+   * stop capturing the outputs, and the waits for the changes of the
+   * widgets, like `slider.changed()`, stop: their promises never settle.
    */
   interrupt(): void {
     this._guard.interrupt();
     this._timers.clearAll();
     this._router.endHeld();
+    this._commManager.cancelWaits();
   }
 
   /**
@@ -896,13 +902,19 @@ export class JavaScriptRuntimeEvaluator {
     scope.Jupyter = jupyter;
     this._installRequireStub();
 
-    // The timers keep the cell which created them, for their outputs
+    // The timers keep the cell which created them, for their outputs, and
+    // the Output widgets capturing the code which created them
     const router = this._router;
     this._timers.install(scope, {
-      capture: () => router.context(),
-      enter: context => router.enter(context as IParentMessage),
-      leave: (previous, threw) =>
-        router.leave(previous as IParentMessage | null, threw)
+      capture: (): IOutputScope => ({
+        parent: router.context(),
+        sinks: router.capturing()
+      }),
+      enter: context => {
+        const { parent, sinks } = context as IOutputScope;
+        return router.enter(parent ?? router.cell, sinks);
+      },
+      leave: (previous, threw) => router.leave(previous as IOutputScope, threw)
     });
     this._wrapBlockingFunctions();
   }

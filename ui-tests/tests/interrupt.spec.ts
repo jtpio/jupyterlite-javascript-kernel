@@ -227,6 +227,67 @@ for (const kernel of KERNELS) {
       await expect(await getOutputs(page, index, STDERR)).toHaveCount(0);
     });
 
+    test('Stop waiting for the change of a widget on interrupt', async ({
+      page
+    }) => {
+      const index = await runCode(
+        page,
+        'const a = new Jupyter.widgets.IntSlider({ description: "a" });\na'
+      );
+      // The kernel handles the change of the slider after the cell: the cell
+      // waits until it is interrupted
+      const waiting = await runCode(
+        page,
+        'const v = await a.changed();\nconsole.log("got", v);',
+        { wait: false }
+      );
+      await waitForRunning(page, waiting);
+      await interruptFromMenu(page);
+      await waitForError(page, waiting, 'KeyboardInterrupt');
+
+      // The wait stopped: the next change does not resume the cell
+      const widget = await getOutputs(page, index);
+      await widget.getByRole('slider').click();
+      await page.keyboard.press('ArrowRight');
+      await expect(widget.locator('.widget-readout')).toHaveText('1');
+      const cell = await runCode(page, 'a.value');
+      expect(await page.notebook.getCellTextOutput(cell)).toEqual(['1']);
+      await expect(
+        await getOutputs(page, waiting, 'application/vnd.jupyter.stdout')
+      ).toHaveCount(0);
+    });
+
+    test('Enable the button of interact.manual again on interrupt', async ({
+      page
+    }) => {
+      const index = await runCode(
+        page,
+        [
+          'const { interact } = Jupyter.widgets;',
+          'interact.manual(async ({ n }) => {',
+          'console.log("waiting", n);',
+          'await new Promise(resolve => setTimeout(resolve, 60000));',
+          '}, { n: [0, 10] }, { manual_name: "Wait" })'
+        ].join('\n')
+      );
+      const widget = await getOutputs(page, index);
+      const button = widget.getByRole('button', { name: 'Wait' });
+      const output = widget.locator('.widget-output');
+      await button.click();
+      await expect(output).toHaveText('waiting 5\n');
+      await expect(button).toBeDisabled();
+
+      // The interrupt clears the timer of the run, which never ends
+      await interruptFromMenu(page);
+      await expect(button).toBeEnabled();
+      await widget.getByRole('slider').click();
+      await page.keyboard.press('ArrowRight');
+      await expect(widget.locator('.widget-readout')).toHaveText('6');
+      await button.click();
+      await expect(output).toHaveText('waiting 6\n');
+      await expect(button).toBeDisabled();
+    });
+
     test('Interrupt an async loop from the toolbar', async ({ page }) => {
       const index = await runCode(
         page,

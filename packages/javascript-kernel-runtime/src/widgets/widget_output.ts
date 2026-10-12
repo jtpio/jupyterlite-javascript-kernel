@@ -57,6 +57,11 @@ export class Output extends DOMWidget {
     const wait = Boolean(options.wait);
     const capture = this._manager.router.captureOf(this._sink);
     if (capture && (wait || capture.direct)) {
+      if (!capture.direct) {
+        // The frontend shows the clear in the widget, like the outputs of
+        // the capture
+        this._resume();
+      }
       // The frontend clears the widget when the next captured output
       // arrives, and the widget clears its own outputs after the ones
       // printed before
@@ -131,6 +136,7 @@ export class Output extends DOMWidget {
     // the outputs of a click while the async callback of the click before
     // still runs
     this._captures.push(capture);
+    this._suspended = false;
     this.msg_id = capture.messageId;
     if (this._clearPending) {
       // The frontend clears the widget when the first captured output
@@ -162,8 +168,32 @@ export class Output extends DOMWidget {
     }
     this._captures.splice(index, 1);
     // The frontend shows the outputs of the captures still running
+    this._suspended = false;
     const last = this._captures[this._captures.length - 1];
     this.msg_id = last?.messageId ?? '';
+  }
+
+  /**
+   * Stop showing the outputs of the message of the captures, for an output
+   * of the message which does not belong to them, like the result of the
+   * cell which started an async capture.
+   */
+  private _suspend(): void {
+    if (this.msg_id !== '') {
+      this._suspended = true;
+      this.msg_id = '';
+    }
+  }
+
+  /**
+   * Show the outputs of the message of the captures again.
+   */
+  private _resume(): void {
+    if (this._suspended) {
+      this._suspended = false;
+      const last = this._captures[this._captures.length - 1];
+      this.msg_id = last?.messageId ?? '';
+    }
   }
 
   /**
@@ -254,9 +284,12 @@ export class Output extends DOMWidget {
 
   private _captures: IOutputCapture[] = [];
   private _clearPending = false;
+  private _suspended = false;
   private _sink: IOutputSink = {
     append: message => this._appendMessage(message),
-    ended: capture => this._endCapture(capture)
+    ended: capture => this._endCapture(capture),
+    suspend: () => this._suspend(),
+    resume: () => this._resume()
   };
 }
 

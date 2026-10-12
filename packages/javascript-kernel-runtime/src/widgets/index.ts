@@ -21,6 +21,7 @@ export * from './widget_tagsinput';
 export * from './widget_box';
 export * from './widget_selectioncontainer';
 export * from './widget_link';
+export * from './widget_interact';
 
 import type { CommManager } from '../comm';
 
@@ -100,7 +101,14 @@ import {
 } from './widget_tagsinput';
 import { Box, GridBox, HBox, VBox } from './widget_box';
 import { Accordion, Stack, Tab } from './widget_selectioncontainer';
-import { DirectionalLink, Link } from './widget_link';
+import { DirectionalLink, Link, dlink, link } from './widget_link';
+import {
+  Interactive,
+  _interactiveOutput,
+  fixed,
+  type IInteractOptions,
+  type InteractFunction
+} from './widget_interact';
 
 /**
  * All widget classes, keyed by class name.
@@ -185,14 +193,17 @@ export function createWidgetClasses(
   const classes: Record<string, unknown> = {};
   // The widgets create the default layout and style of their bound class
   const boundClasses = new Map<WidgetClass, WidgetClass>();
-
-  for (const [name, cls] of Object.entries(widgetClasses)) {
+  const bind = (cls: typeof Widget, name: string): typeof Widget => {
     const BoundWidgetClass = class extends cls {};
     Object.defineProperty(BoundWidgetClass, 'name', { value: name });
     BoundWidgetClass.setDefaultManager(manager);
     BoundWidgetClass._boundClasses = boundClasses;
     boundClasses.set(cls, BoundWidgetClass);
-    classes[name] = BoundWidgetClass;
+    return BoundWidgetClass;
+  };
+
+  for (const [name, cls] of Object.entries(widgetClasses)) {
+    classes[name] = bind(cls, name);
   }
 
   const LinkClass = classes.Link as typeof Link;
@@ -203,6 +214,52 @@ export function createWidgetClasses(
     new LinkClass({ source, target });
   classes.jsdlink = (source: WidgetTraitPair, target: WidgetTraitPair) =>
     new DirectionalLinkClass({ source, target });
+  classes.link = link;
+  classes.dlink = dlink;
+
+  // Like ipywidgets, interactive() makes the widget, and interact() also
+  // shows the value returned by the function
+  const InteractiveClass = bind(
+    Interactive as unknown as typeof Widget,
+    'interactive'
+  ) as unknown as typeof Interactive;
+  const interactive = (
+    fn: InteractFunction,
+    abbreviations?: Record<string, unknown>,
+    options?: IInteractOptions
+  ) => new InteractiveClass(fn, abbreviations, options);
+  const interact = (
+    fn: InteractFunction,
+    abbreviations?: Record<string, unknown>,
+    options: IInteractOptions = {}
+  ) => {
+    const widget = interactive(fn, abbreviations, {
+      auto_display: true,
+      ...options
+    });
+    try {
+      // Like ipywidgets, the function keeps its widget
+      (fn as InteractFunction & { widget?: Interactive }).widget = widget;
+    } catch {
+      // A frozen function
+    }
+    return widget;
+  };
+  const interactManual = (
+    fn: InteractFunction,
+    abbreviations?: Record<string, unknown>,
+    options: IInteractOptions = {}
+  ) => interact(fn, abbreviations, { manual: true, ...options });
+  interact.manual = interactManual;
+  classes.interact = interact;
+  classes.interact_manual = interactManual;
+  classes.interactive = interactive;
+  classes.interactive_output = (
+    fn: InteractFunction,
+    controls: Record<string, Widget>
+  ) =>
+    _interactiveOutput(manager, classes.Output as typeof Output, fn, controls);
+  classes.fixed = fixed;
 
   return classes;
 }

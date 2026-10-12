@@ -446,7 +446,7 @@ display(button);
 display(out);
 ```
 
-- `out.capture(callback, options?)`, or `out.capture(options)(callback)`, returns a function which runs `callback` with its outputs (the `console`, `display()`, `clearOutput()`) shown in the widget. The outputs of an async callback after an `await` are captured too, until its promise settles: while it runs, the outputs of the other code running outside of the cells, after an `await`, also go to the widget, but not the ones of a cell running. An async callback started by a cell stops capturing when the next cell runs, and any async callback when the kernel is interrupted: its outputs then go to the cell that ran last. To update a widget from an endless loop, capture each step instead, like `setInterval(out.capture(() => console.log(new Date())), 1000)`. When a callback runs again before the previous run ended, like a button clicked twice, the widget shows the outputs of both. With the `clearOutput` option, the outputs of the widget are removed first, when the next output arrives with `wait`. The errors of the callback go to the cell which registered it.
+- `out.capture(callback, options?)`, or `out.capture(options)(callback)`, returns a function which runs `callback` with its outputs (the `console`, `display()`, `clearOutput()`) shown in the widget. The outputs of an async callback after an `await` are captured too, until its promise settles, and so are the ones of the timers it creates, like a `setTimeout()` callback: while it runs, the outputs of the other code running outside of the cells, after an `await`, also go to the widget, but not the ones of a cell running. An async callback started by a cell stops capturing when the next cell runs, and any async callback when the kernel is interrupted: its outputs then go to the cell that ran last. To update a widget from an endless loop, capture each step instead, like `setInterval(out.capture(() => console.log(new Date())), 1000)`. When a callback runs again before the previous run ended, like a button clicked twice, the widget shows the outputs of both. With the `clearOutput` option, the outputs of the widget are removed first, when the next output arrives with `wait`. The errors of the callback go to the cell which registered it.
 - `out.appendStdout(text)` and `out.appendStderr(text)` add some text, and `out.appendDisplayData(value, metadata?)` adds a value shown like `display()` shows it, like a widget, or a MIME bundle like `{ 'text/html': '<b>Hi</b>' }`
 - `out.clearOutput({ wait })` removes the outputs of the widget, with `wait` when the next output arrives
 
@@ -624,6 +624,94 @@ counter.onMsg(content => console.log('The view says', content));
 counter;
 ```
 
+### Interact
+
+`interact(fn, controls, options?)` makes the controls of a function, like `interact()` in ipywidgets: a widget for each of its parameters, and the outputs of the function under them, which run again when a control changes. As JavaScript has no keyword arguments, the function gets the values of the controls in one object, by name:
+
+```javascript
+const { interact } = Jupyter.widgets;
+
+function draw({ r, color }) {
+  display.svg`<svg width="220" height="220"><circle cx="110" cy="110" r="${r}" fill="${color}"/></svg>`;
+  return `A ${color} circle of radius ${r}`;
+}
+
+display(interact(draw, { r: [5, 100], color: ['red', 'green', 'blue'] }));
+```
+
+Each value of `controls` gives a control, like in ipywidgets:
+
+- `[min, max]` or `[min, max, step]`: an `IntSlider`, or a `FloatSlider` when one of the numbers is not an integer, with the value in the middle. An array of two or three numbers is always a range: for a dropdown of numbers, pass `[label, value]` pairs
+- a number: a slider from `-value` to `3 * value`
+- a boolean: a `Checkbox`
+- a string: a `Text`
+- an array of values or of `[label, value]` pairs, or an object of the values by label: a `Dropdown`
+- a widget with a value, like `new IntSlider({ max: 5 })`: the widget itself, labelled with the name when it has no description
+- `fixed(value)`: the value as is, without a control
+
+The function runs in an `Output` widget, like with `out.capture()`: its `console` output and its `display()` calls replace the ones of the previous run, the value it returns is shown under them like `display()` shows it, unless it is `undefined` or `null`, and its errors are printed there too. An async function is awaited, and the result of a run which ends after a newer run started is not shown. Its outputs after an `await`, and the ones of the timers it creates, like a `setTimeout()` callback, go to the `Output` widget until it ends, like with `out.capture()`.
+
+`interact()` returns the widget, a `VBox` of the controls and the `Output`, which shows when it is the last expression of the cell, or with `display()`. Its `result` is the value returned by the last run, `kwargs` the values it got, `kwargs_widgets` the controls, `out` the `Output` widget, and `update()` runs the function again. The function also gets the widget as `fn.widget`. The options are:
+
+- `manual`: only run the function when a button is clicked, labelled with `manual_name` ('Run Interact' by default). `interact.manual(fn, controls)`, or `interact_manual()`, is a shortcut. A text box then also runs it when Enter is pressed. The button is disabled while the function runs, until its promise settles for an async function, or until the kernel is interrupted
+- `continuous_update: false`: the sliders and the text boxes made from the controls send their value when they are released, or when Enter is pressed, instead of while they change
+- `clear_output: false`: keep the outputs of the previous runs
+- `auto_display: false`: do not show the value returned by the function
+
+`interactive(fn, controls, options?)` makes the same widget without showing the value returned by the function, like in ipywidgets: read it from its `result`. `interactive_output(fn, controls)` takes existing widgets, by name, and returns only the `Output` widget, for a layout of your own:
+
+```javascript
+const { interactive_output, HBox, IntSlider, VBox } = Jupyter.widgets;
+
+const a = new IntSlider({ value: 2, description: 'a' });
+const b = new IntSlider({ value: 3, description: 'b' });
+const out = interactive_output(
+  ({ a, b }) => console.log(`${a} + ${b} = ${a + b}`),
+  { a, b }
+);
+display(new VBox({ children: [new HBox({ children: [a, b] }), out] }));
+```
+
+### Links and waiting for changes
+
+`jslink()` and `jsdlink()` link two widgets in the frontend, so they keep working without the kernel. `link(source, target, transform?)` and `dlink(source, target, transform?)` link them in the kernel instead, like `link()` and `dlink()` of traitlets, so the values can be changed on their way: `dlink()` from the source to the target, with a function, and `link()` both ways, with a pair of functions `[forward, backward]`. The target gets the value of the source at once, and `unlink()` stops them:
+
+```javascript
+const { FloatSlider, FloatText, link } = Jupyter.widgets;
+
+const celsius = new FloatSlider({ max: 100, description: 'Celsius' });
+const fahrenheit = new FloatText({ description: 'Fahrenheit' });
+const temperature = link(
+  [celsius, 'value'],
+  [fahrenheit, 'value'],
+  [c => (c * 9) / 5 + 32, f => ((f - 32) * 5) / 9]
+);
+display(celsius);
+display(fahrenheit);
+```
+
+`widget.changed(name?)` returns a promise of the next value of a property (`'value'` by default), `widget.changes(name?)` an async iterator of its next values, and `button.clicked()` a promise of the next click, like the `wait_for_change()` of the asynchronous widgets of ipywidgets. As the kernel handles the messages of the widgets between the cells, a cell awaiting them waits for the changes made by the kernel, like in a timer, but not for the ones made by the user: start an async function without awaiting it, which runs on after the cell, like ipywidgets does with an asyncio task:
+
+```javascript
+const { Button, IntSlider } = Jupyter.widgets;
+
+const slider = new IntSlider({ description: 'Pick' });
+const done = new Button({ description: 'Done' });
+display(slider);
+display(done);
+
+(async () => {
+  for await (const value of slider.changes()) {
+    console.log(`Now ${value}`);
+    if (value >= 10) break;
+  }
+  await done.clicked();
+  console.log(`You picked ${slider.value}`);
+})();
+```
+
+Breaking out of the loop stops listening, and the loop ends when the widget is closed. Interrupting the kernel stops all the waits: their promises never settle, like the timers it clears.
+
 ### Available widgets
 
 - **Numeric**: `IntSlider`, `FloatSlider`, `FloatLogSlider`, `IntRangeSlider`, `FloatRangeSlider`, `Play`, `IntProgress`, `FloatProgress`, `IntText`, `FloatText`, `BoundedIntText`, `BoundedFloatText`
@@ -639,7 +727,7 @@ counter;
 - **Media**: `Image`, `Video`, `Audio` (from bytes, sent as binary buffers, or from a URL with `fromUrl()`)
 - **Layout / Style**: `Layout`, `DescriptionStyle`, `SliderStyle`, `ProgressStyle`, `ButtonStyle`, `CheckboxStyle`, `ToggleButtonStyle`, `ToggleButtonsStyle`, `TextStyle`, `HTMLStyle`, `HTMLMathStyle`, `LabelStyle`
 - **Containers**: `Box`, `HBox`, `VBox`, `GridBox`, `Accordion`, `Tab`, `Stack`
-- **Helpers**: `jslink`, `jsdlink`
+- **Helpers**: `jslink`, `jsdlink`, `link`, `dlink`, `interact`, `interact_manual`, `interactive`, `interactive_output`, `fixed`
 
 ### Ported widget modules
 
@@ -661,7 +749,8 @@ The widget runtime is split into files that roughly follow the upstream `ipywidg
 | `packages/controls/src/widget_color.ts`              | `packages/javascript-kernel-runtime/src/widgets/widget_color.ts`              | Ported | Color picker                                                         |
 | `packages/controls/src/widget_box.ts`                | `packages/javascript-kernel-runtime/src/widgets/widget_box.ts`                | Ported | Box, HBox, VBox, GridBox                                             |
 | `packages/controls/src/widget_selectioncontainer.ts` | `packages/javascript-kernel-runtime/src/widgets/widget_selectioncontainer.ts` | Ported | Accordion, Tab, Stack                                                |
-| `packages/controls/src/widget_link.ts`               | `packages/javascript-kernel-runtime/src/widgets/widget_link.ts`               | Ported | `jslink`, `jsdlink`, `Link`, and `DirectionalLink`                   |
+| `packages/controls/src/widget_link.ts`               | `packages/javascript-kernel-runtime/src/widgets/widget_link.ts`               | Ported | `jslink`, `jsdlink`, `Link`, `DirectionalLink`, `link` and `dlink`   |
+| `ipywidgets/widgets/interaction.py`                  | `packages/javascript-kernel-runtime/src/widgets/widget_interact.ts`           | Ported | `interact`, `interactive`, `interactive_output` and `fixed`          |
 | `packages/controls/src/widget_image.ts`              | `packages/javascript-kernel-runtime/src/widgets/widget_media.ts`              | Ported | `Image`, with `Video` and `Audio` on the same base, like Python      |
 | `packages/controls/src/widget_video.ts`              | `packages/javascript-kernel-runtime/src/widgets/widget_media.ts`              | Ported | `Video`                                                              |
 | `packages/controls/src/widget_audio.ts`              | `packages/javascript-kernel-runtime/src/widgets/widget_media.ts`              | Ported | `Audio`                                                              |

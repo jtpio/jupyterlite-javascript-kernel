@@ -176,8 +176,9 @@ The methods of the evaluator:
 - `flushOutputs()` sends the text written to stdout and stderr and not sent
   yet, see below.
 - `interrupt()` stops the running cell, if any, with a `KeyboardInterrupt`,
-  clears the timers of the cells, and ends the captures of the async
-  callbacks of the `Output` widgets. `loopTimeout` gets and sets the loop
+  clears the timers of the cells, ends the captures of the async
+  callbacks of the `Output` widgets, and stops the waits for the changes of
+  the widgets, like `slider.changed()`, with `commManager.cancelWaits()`. `loopTimeout` gets and sets the loop
   timeout. See [Interrupts and loop timeout](#interrupts-and-loop-timeout).
 - `reportUncaught(error, inPromise?)` prints an error thrown outside of an
   execution on stderr, as `Uncaught Error: ...`, or
@@ -585,10 +586,13 @@ and `silent` for a silent `execute_request`, whose outputs are dropped:
 - `runRequest(request, callback)` handles a comm message of the frontend,
   which stays open until `endRequest(request?)`, when the host replied to it,
 - `context()` returns the parent of the callbacks registered now, for
-  `TimerRegistry.IContext.capture()`, `enter(parent)` and
-  `leave(previous, threw)` run them in it, like `runInScope(parent, callback)`,
-  and `runCallback(parent, callback)` runs a widget callback, in `parent`
-  when the frontend triggered it,
+  `TimerRegistry.IContext.capture()`, and `capturing()` the `Output` widgets
+  capturing the code which registers them. `enter(parent, sinks?)` and
+  `leave(previous, threw)` run them in it, like
+  `runInScope(parent, callback)`: the widgets in `sinks` keep showing the
+  outputs of the callback while they capture an async callback of `parent`.
+  `runCallback(parent, callback)` runs a widget callback, in `parent` when
+  the frontend triggered it,
 - `runUncaught(callback)` reports an uncaught error in the parent of the
   callback which threw it,
 - `beginExecution()` and `endExecution()` surround a cell: while it runs, its
@@ -599,7 +603,12 @@ and `silent` for a silent `execute_request`, whose outputs are dropped:
   or `null` when its parent is `silent` and the message is not a comm
   message. The outputs an `Output` widget adds to its own outputs get a
   `parentHeader` of the widget, and `sinkOf(parentHeader)` returns the widget
-  (an `IOutputSink`), which the evaluator gives them to once batched.
+  (an `IOutputSink`), which the evaluator gives them to once batched. The
+  frontend shows all the outputs of a message in the `Output` widget whose
+  `msg_id` is the message, so while an async callback a cell captured runs,
+  the outputs `route()` gives to the cell itself, like its result, call
+  `suspend()` on the widget, which clears its `msg_id`, and the next output
+  of the callback calls `resume()`, which sets it again.
 
 ## Tracebacks
 
@@ -730,6 +739,12 @@ A widget class, like a custom model, describes its state with:
   and the label, derived from the index
 - `_createWidget(cls, state?)`, which creates a widget of another class with
   the manager of this one
+- `_waitFor(event, callback, onCancel?)`, which listens for an event of the
+  widget for a wait of the cells, like `changed()`, `changes()` and
+  `Button.clicked()`: the wait is registered with `commManager.addWait()`,
+  and `commManager.cancelWaits()`, called by `interrupt()`, stops it. A host
+  with its own evaluator calls `cancelWaits()` when the user interrupts the
+  kernel
 - `send(content, buffers?)` and `onMsg(callback)` / `offMsg(callback)`, for
   the custom messages of the model in the frontend (`msg:custom`)
 - `_serializeProperty(name, value)` and `_deserializeProperty(name, value)`,
@@ -750,6 +765,17 @@ the realm of the cells, `commManager.realmConstructor('Date')` and
 `CommManager` (the evaluator passes its own), so that `value instanceof Date`
 holds in the cells when the runtime runs in another realm, like the page of
 an iframe kernel.
+
+`createWidgetClasses()` also gives the cells the helpers of ipywidgets
+which are not classes: `jslink()` and `jsdlink()`, `link()` and `dlink()`,
+which link the widgets in the kernel with their observers, and `interact()`,
+`interact.manual()`, `interact_manual()`, `interactive()`,
+`interactive_output()` and `fixed()` from `widgets/widget_interact.ts`. The
+widget of `interactive()` is an `Interactive`, a `VBox` bound like the
+other classes, which creates its controls with `_createWidget()`, and runs
+the function in its `Output` widget with `out.capture()`. The objects of the
+values it gives to the function are created with
+`realmConstructor('Object')`.
 
 `DOMWidget` is in `widgets/widget_dom.ts`, apart from `Widget` in
 `widgets/widget.ts`, since it uses `Layout` and `Style`, which extend

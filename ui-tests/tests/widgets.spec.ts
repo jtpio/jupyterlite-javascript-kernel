@@ -314,6 +314,90 @@ for (const kernel of KERNELS) {
       await expect(widget).toHaveText(/^polling\s+waiting\s*$/);
     });
 
+    test('Show the result of the cell which started an async capture in the cell', async ({
+      page
+    }) => {
+      const index = await runCode(
+        page,
+        [
+          'const { Output } = Jupyter.widgets;',
+          'const out = new Output();',
+          'display(out);',
+          'out.capture(async () => {',
+          'console.log("before");',
+          'await new Promise(resolve => setTimeout(resolve, 500));',
+          'console.log("after");',
+          '})();',
+          '"result"'
+        ].join('\n')
+      );
+      const outputs = await getOutputs(page, index);
+      const widget = outputs.locator('.widget-output');
+      await expect(widget).toHaveText(/^before\s+after\s*$/);
+      // The result is shown in the cell, after the widget
+      await expect(await getOutputs(page, index, 'text/plain')).toHaveText(
+        "'result'"
+      );
+      await expect(outputs.last()).toHaveText("'result'");
+    });
+
+    test('Clear an Output widget from an async capture after the result of its cell', async ({
+      page
+    }) => {
+      const index = await runCode(
+        page,
+        [
+          'const { Output } = Jupyter.widgets;',
+          'const out = new Output();',
+          'out.capture(async () => {',
+          'console.log("before");',
+          'await new Promise(resolve => setTimeout(resolve, 500));',
+          'out.clearOutput({ wait: true });',
+          'console.log("after");',
+          '})();',
+          'setTimeout(() => console.log("later"), 1500);',
+          'out'
+        ].join('\n')
+      );
+      const outputs = await getOutputs(page, index);
+      const widget = outputs.locator('.widget-output');
+      await expect(widget).toHaveText(/^after\s*$/);
+      // The clear went to the widget, not to the cell: the next output of
+      // the cell is shown after the widget
+      await expect(
+        await getOutputs(page, index, 'application/vnd.jupyter.stdout')
+      ).toHaveText(['after\n', 'later\n']);
+      await expect(widget).toHaveText(/^after\s*$/);
+    });
+
+    test('Show the outputs of the timers of an async capture in the Output widget', async ({
+      page
+    }) => {
+      const index = await runCode(
+        page,
+        [
+          'const { Output } = Jupyter.widgets;',
+          'const out = new Output();',
+          'out.capture(async () => {',
+          'console.log("start");',
+          'await new Promise(resolve => setTimeout(() => {',
+          'console.log("tick");',
+          'resolve();',
+          '}, 300));',
+          'console.log("end");',
+          '})();',
+          'out'
+        ].join('\n')
+      );
+      const outputs = await getOutputs(page, index);
+      const widget = outputs.locator('.widget-output');
+      await expect(widget).toHaveText(/^start\s+tick\s+end\s*$/);
+      // The only stream output is the one of the widget
+      await expect(
+        await getOutputs(page, index, 'application/vnd.jupyter.stdout')
+      ).toHaveCount(1);
+    });
+
     test('Print the outputs of the widget callbacks in their cell', async ({
       page
     }) => {
@@ -1040,6 +1124,263 @@ for (const kernel of KERNELS) {
       expect(await page.notebook.getCellTextOutput(cell)).toEqual([
         "'true url false https://example.com/cat.png'"
       ]);
+    });
+
+    test('Make controls for a function with interact', async ({ page }) => {
+      const index = await runCode(
+        page,
+        [
+          'const { interact } = Jupyter.widgets;',
+          "interact(({ n, name }) => `${name}: ${'*'.repeat(n)}`, { n: [0, 10], name: 'stars' })"
+        ].join('\n')
+      );
+      const widget = await getOutputs(page, index);
+      const slider = widget.getByRole('slider');
+      const readout = widget.locator('.widget-readout');
+      const textbox = widget.getByRole('textbox');
+      const output = widget.locator('.widget-output');
+      await expect(widget.getByText('n', { exact: true })).toBeVisible();
+      await expect(widget.getByText('name', { exact: true })).toBeVisible();
+      await expect(readout).toHaveText('5');
+      await expect(textbox).toHaveValue('stars');
+      await expect(output).toHaveText("'stars: *****'");
+
+      // Drag the slider with the mouse: the output follows
+      const box = (await slider.boundingBox())!;
+      const x = box.x + box.width / 2;
+      const y = box.y + box.height / 2;
+      await page.mouse.move(x, y);
+      await page.mouse.down();
+      await page.mouse.move(x + 200, y, { steps: 10 });
+      await page.mouse.up();
+      await expect(readout).toHaveText('10');
+      await expect(output).toHaveText("'stars: **********'");
+
+      // With the keyboard
+      await slider.click();
+      await page.keyboard.press('ArrowLeft');
+      await expect(output).toHaveText("'stars: *********'");
+
+      // Type in the text box: the outputs of a run replace the previous ones
+      await textbox.fill('');
+      await textbox.pressSequentially('moons');
+      await expect(output).toHaveText("'moons: *********'");
+      await expect(output.locator('.jp-OutputArea-output')).toHaveCount(1);
+
+      const cell = await runCode(page, '_.result');
+      expect(await page.notebook.getCellTextOutput(cell)).toEqual([
+        "'moons: *********'"
+      ]);
+    });
+
+    test('Run the function of interact.manual with its button', async ({
+      page
+    }) => {
+      const index = await runCode(
+        page,
+        [
+          'const { interact } = Jupyter.widgets;',
+          'let runs = 0;',
+          'interact.manual(({ x }) => { runs += 1; return x * 2; }, { x: [0, 10] }, { manual_name: "Double" })'
+        ].join('\n')
+      );
+      const widget = await getOutputs(page, index);
+      const output = widget.locator('.widget-output');
+      const button = widget.getByRole('button', { name: 'Double' });
+      await expect(button).toBeVisible();
+      await expect(widget.locator('.widget-readout')).toHaveText('5');
+      await expect(output).toHaveText('');
+
+      // Nothing runs until the button is clicked
+      await widget.getByRole('slider').click();
+      await page.keyboard.press('ArrowRight');
+      await expect(widget.locator('.widget-readout')).toHaveText('6');
+      let cell = await runCode(page, 'runs');
+      expect(await page.notebook.getCellTextOutput(cell)).toEqual(['0']);
+      await expect(output).toHaveText('');
+
+      await button.click();
+      await expect(output).toHaveText('12');
+      await widget.getByRole('slider').click();
+      await page.keyboard.press('ArrowRight');
+      await expect(widget.locator('.widget-readout')).toHaveText('7');
+      cell = await runCode(page, 'runs');
+      expect(await page.notebook.getCellTextOutput(cell)).toEqual(['1']);
+      await expect(output).toHaveText('12');
+      await button.click();
+      await expect(output).toHaveText('14');
+    });
+
+    test('Show the outputs, results and errors of interactive functions', async ({
+      page
+    }) => {
+      const index = await runCode(
+        page,
+        [
+          'const { interactive, fixed } = Jupyter.widgets;',
+          'const w = interactive(async ({ loud, word, times }) => {',
+          'console.log(`${word} ${times} times`);',
+          'await new Promise(resolve => setTimeout(resolve, 10));',
+          'if (loud) throw new Error("too loud");',
+          'return word.repeat(times);',
+          '}, { loud: false, word: [["Hi", "hi"], ["Hello", "hello"]], times: fixed(2) });',
+          'w'
+        ].join('\n')
+      );
+      const widget = await getOutputs(page, index);
+      const output = widget.locator('.widget-output');
+      // interactive() does not show the result, and the fixed value has no
+      // control
+      await expect(output).toHaveText('hi 2 times');
+      await expect(widget.getByRole('checkbox')).not.toBeChecked();
+      await expect(widget.getByRole('combobox')).toHaveValue('Hi');
+      await expect(widget.getByText('word', { exact: true })).toBeVisible();
+      await expect(widget.getByText('times', { exact: true })).toHaveCount(0);
+      let cell = await runCode(page, 'w.result');
+      expect(await page.notebook.getCellTextOutput(cell)).toEqual(["'hihi'"]);
+
+      // The result of an async function is awaited, and the outputs of a
+      // run replace the previous ones
+      await widget.getByRole('combobox').selectOption('Hello');
+      await expect(output).toHaveText('hello 2 times');
+      await expect(output.locator('.jp-OutputArea-output')).toHaveCount(1);
+      cell = await runCode(page, '`${w.result} ${w.kwargs.word}`');
+      expect(await page.notebook.getCellTextOutput(cell)).toEqual([
+        "'hellohello hello'"
+      ]);
+
+      // The errors go to the Output widget
+      await widget.getByRole('checkbox').check();
+      await expect(output).toContainText(
+        'Uncaught (in promise) Error: too loud'
+      );
+      await expect(output).toContainText('hello 2 times');
+    });
+
+    test('Run a function with existing controls with interactive_output', async ({
+      page
+    }) => {
+      const index = await runCode(
+        page,
+        [
+          'const { interactive_output, HBox, IntSlider, VBox } = Jupyter.widgets;',
+          'const a = new IntSlider({ value: 2, max: 10, description: "a" });',
+          'const b = new IntSlider({ value: 3, max: 10, description: "b" });',
+          'const out = interactive_output(({ a, b }) => console.log(`${a} + ${b} = ${a + b}`), { a, b });',
+          'new VBox({ children: [new HBox({ children: [a, b] }), out] })'
+        ].join('\n')
+      );
+      const widget = await getOutputs(page, index);
+      const output = widget.locator('.widget-output');
+      await expect(output).toHaveText('2 + 3 = 5');
+      await widget.getByRole('slider').first().click();
+      await page.keyboard.press('ArrowRight');
+      await expect(output).toHaveText('3 + 3 = 6');
+    });
+
+    test('Link the values of widgets in the kernel, with transforms', async ({
+      page
+    }) => {
+      const index = await runCode(
+        page,
+        [
+          'const { FloatSlider, FloatText, IntSlider, dlink, link } = Jupyter.widgets;',
+          'const a = new IntSlider({ description: "a" });',
+          'const b = new FloatText({ description: "b" });',
+          'dlink([a, "value"], [b, "value"], v => v / 10);',
+          'const c = new FloatSlider({ value: 20, max: 200, description: "Celsius" });',
+          'const f = new FloatText({ description: "Fahrenheit" });',
+          'const temperature = link([c, "value"], [f, "value"], [v => v * 9 / 5 + 32, v => (v - 32) * 5 / 9]);',
+          'display(a);',
+          'display(b);',
+          'display(c);',
+          'display(f);'
+        ].join('\n')
+      );
+      const outputs = await getOutputs(page, index);
+      const b = outputs.nth(1).getByRole('spinbutton');
+      const celsius = outputs.nth(2).locator('.widget-readout');
+      const fahrenheit = outputs.nth(3).getByRole('spinbutton');
+      await expect(b).toHaveValue('0');
+      await expect(fahrenheit).toHaveValue('68');
+
+      // From the source to the target only
+      await outputs.nth(0).getByRole('slider').click();
+      await page.keyboard.press('ArrowRight');
+      await page.keyboard.press('ArrowRight');
+      await expect(b).toHaveValue('0.2');
+      await b.fill('5');
+      await b.press('Enter');
+      let cell = await runCode(page, '`${a.value} ${b.value}`');
+      expect(await page.notebook.getCellTextOutput(cell)).toEqual(["'2 5'"]);
+      await expect(outputs.nth(0).locator('.widget-readout')).toHaveText('2');
+
+      // Both ways
+      await fahrenheit.fill('212');
+      await fahrenheit.press('Enter');
+      await expect(celsius).toHaveText('100.00');
+      await runCode(page, 'temperature.unlink();');
+      await fahrenheit.fill('32');
+      await fahrenheit.press('Enter');
+      await expect(fahrenheit).toHaveValue('32');
+      cell = await runCode(page, 'c.value');
+      expect(await page.notebook.getCellTextOutput(cell)).toEqual(['100']);
+    });
+
+    test('Wait for the changes of the widgets', async ({ page }) => {
+      const index = await runCode(
+        page,
+        [
+          'const { Button, IntSlider } = Jupyter.widgets;',
+          'const a = new IntSlider({ description: "a" });',
+          'const done = new Button({ description: "Done" });',
+          'display(a);',
+          'display(done);'
+        ].join('\n')
+      );
+      const outputs = await getOutputs(page, index);
+
+      // A change made by the kernel while the cell waits
+      let cell = await runCode(
+        page,
+        'setTimeout(() => { a.value = 7; }, 100);\nawait a.changed()'
+      );
+      expect(await page.notebook.getCellTextOutput(cell)).toEqual(['7']);
+      await expect(outputs.nth(0).locator('.widget-readout')).toHaveText('7');
+
+      // The changes made by the user, after the cell
+      cell = await runCode(
+        page,
+        [
+          'a.changed().then(v => console.log("got", v));',
+          'done.clicked().then(() => console.log("clicked"));',
+          '(async () => {',
+          'for await (const v of a.changes()) {',
+          'console.log("value", v);',
+          'if (v >= 9) break;',
+          '}',
+          'console.log("done");',
+          '})();'
+        ].join('\n')
+      );
+      const stdout = await getOutputs(
+        page,
+        cell,
+        'application/vnd.jupyter.stdout'
+      );
+      // One value at a time: the slider sends the last one of quick changes
+      await outputs.nth(0).getByRole('slider').click();
+      await page.keyboard.press('ArrowRight');
+      await expect(stdout).toHaveText('got 8\nvalue 8\n');
+      await page.keyboard.press('ArrowRight');
+      await expect(stdout).toHaveText('got 8\nvalue 8\nvalue 9\ndone\n');
+      await page.keyboard.press('ArrowRight');
+      await expect(outputs.nth(0).locator('.widget-readout')).toHaveText('10');
+      await outputs.nth(1).getByRole('button', { name: 'Done' }).click();
+      await outputs.nth(1).getByRole('button', { name: 'Done' }).click();
+      await expect(stdout).toHaveText(
+        'got 8\nvalue 8\nvalue 9\ndone\nclicked\n'
+      );
     });
 
     test('Show the widgets again when the notebook is reopened', async ({

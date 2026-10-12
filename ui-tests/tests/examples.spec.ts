@@ -140,7 +140,15 @@ test.describe('Examples', () => {
     ).toBeVisible();
     await expect(outputs.getByRole('tab', { name: 'Slider' })).toBeVisible();
     await expect(outputs.getByText('Comm ID:')).toBeVisible();
-    await expect(outputs.getByRole('img')).toHaveAttribute('width', '240');
+    await expect(outputs.getByRole('img').first()).toHaveAttribute(
+      'width',
+      '240'
+    );
+    // The controls of a function
+    await expect(
+      outputs.getByText("'A tomato circle of radius 52'")
+    ).toBeVisible();
+    await expect(outputs.getByText('2 + 3 = 5')).toBeVisible();
     expect(await getErrors(page)).toEqual([]);
   });
 });

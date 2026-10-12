@@ -16,7 +16,7 @@ import { isThenable, safe } from '../utils';
  * The constructors of the values the widgets give to the cells, like the
  * date of a date picker, which can come from the realm of the cells.
  */
-const REALM_CONSTRUCTORS = { Date, Uint8Array };
+const REALM_CONSTRUCTORS = { Date, Object, Uint8Array };
 
 /**
  * The name of a constructor of the realm of the cells.
@@ -352,6 +352,39 @@ export class CommManager {
   }
 
   /**
+   * Register a wait of the code of the cells for an event of a widget, like
+   * `slider.changed()`, or of a widget for the code of the cells, like the
+   * run of an async function of `interact()`, which an interrupt of the
+   * kernel cancels.
+   *
+   * @param cancel - Called on interrupt: it stops waiting.
+   * @returns A function removing the registration, once the wait ended.
+   *
+   * @internal
+   */
+  addWait(cancel: () => void): () => void {
+    this._waits.add(cancel);
+    return () => {
+      this._waits.delete(cancel);
+    };
+  }
+
+  /**
+   * Cancel the waits for the events of the widgets, on interrupt: their
+   * promises never settle, like the callbacks of the timers cleared by an
+   * interrupt never run.
+   *
+   * @internal
+   */
+  cancelWaits(): void {
+    const waits = [...this._waits];
+    this._waits.clear();
+    for (const cancel of waits) {
+      this.invokeCallback(cancel);
+    }
+  }
+
+  /**
    * Display a widget identified by its comm ID.
    */
   displayWidget(commId: string): void {
@@ -395,6 +428,7 @@ export class CommManager {
     this._widgets.clear();
     this._comms.clear();
     this._targets.clear();
+    this._waits.clear();
   }
 
   /**
@@ -463,6 +497,7 @@ export class CommManager {
   private _comms = new Map<string, IComm>();
   private _targets = new Map<string, CommTargetHandler>();
   private _widgets = new Map<string, unknown>();
+  private _waits = new Set<() => void>();
 }
 
 /**

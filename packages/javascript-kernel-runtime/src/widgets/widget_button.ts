@@ -33,6 +33,20 @@ export class Button extends DOMWidget {
     return this.off('click', callback);
   }
 
+  /**
+   * Wait for the next click: the promise resolves with the button, like
+   * `await button.clicked()`. An interrupt of the kernel stops the wait:
+   * the promise then never settles.
+   */
+  clicked(): Promise<this> {
+    return new Promise(resolve => {
+      const stop = this._waitFor('click', () => {
+        stop();
+        resolve(this);
+      });
+    });
+  }
+
   get icon(): string {
     return this.get('icon') as string;
   }
