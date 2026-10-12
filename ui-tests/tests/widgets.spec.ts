@@ -3,7 +3,13 @@
 
 import { expect, test } from '@jupyterlab/galata';
 
-import { KERNELS, createNotebook, getOutputs, runCode } from './utils';
+import {
+  KERNELS,
+  createNotebook,
+  getOutputs,
+  runCode,
+  waitForKernelIdle
+} from './utils';
 
 for (const kernel of KERNELS) {
   test.describe(`Widgets (${kernel.displayName})`, () => {
@@ -388,6 +394,62 @@ for (const kernel of KERNELS) {
         ].join('\n')
       );
       await expect.poll(naturalWidth).toBe(5);
+    });
+
+    test('Show the widgets again when the notebook is reopened', async ({
+      page
+    }) => {
+      // A red PNG image of 3x2 pixels, sent to the frontend as a buffer
+      const index = await runCode(
+        page,
+        [
+          'const { HBox, Image, IntSlider } = Jupyter.widgets;',
+          'const png = "iVBORw0KGgoAAAANSUhEUgAAAAMAAAACCAIAAAASFvFNAAAAEElEQVR4nGP4z8AAQQxwFgBB0gX7h/C5SAAAAABJRU5ErkJggg==";',
+          'const bytes = Uint8Array.from(atob(png), c => c.charCodeAt(0));',
+          'const slider = new IntSlider({ value: 5, max: 10, description: "Level" });',
+          'const image = new Image({ value: bytes, format: "png", width: "60" });',
+          'new HBox({ children: [slider, image] })'
+        ].join('\n')
+      );
+      let widget = await getOutputs(page, index);
+      await widget.getByRole('slider').click();
+      await page.keyboard.press('ArrowRight');
+      await expect(widget.locator('.widget-readout')).toHaveText('6');
+
+      // Save, close the tab, and open the notebook again: the kernel keeps
+      // running, with its widgets
+      const notebook = 'Widgets.ipynb';
+      await page.menu.clickMenuItem('File>Save Notebook');
+      const dialog = page.getByRole('dialog');
+      await dialog.getByRole('textbox').fill(notebook);
+      await dialog.getByRole('button', { name: 'Rename and Save' }).click();
+      const tab = page.activity.getTabLocator(notebook);
+      await expect(tab).not.toHaveClass(/jp-mod-dirty/);
+      await page.menu.clickMenuItem('File>Close Tab');
+      await expect(tab).toHaveCount(0);
+      await page.filebrowser.open(notebook);
+      await waitForKernelIdle(page, kernel);
+
+      widget = await getOutputs(page, index);
+      const readout = widget.locator('.widget-readout');
+      await expect(widget.getByText('Level')).toBeVisible();
+      await expect(readout).toHaveText('6');
+      const img = widget.getByRole('img');
+      await expect(img).toHaveAttribute('width', '60');
+      await expect
+        .poll(() =>
+          img.evaluate(element => (element as HTMLImageElement).naturalWidth)
+        )
+        .toBe(3);
+
+      // The slider still drives the value in the kernel, and the other way
+      await widget.getByRole('slider').click();
+      await page.keyboard.press('ArrowRight');
+      await expect(readout).toHaveText('7');
+      const cell = await runCode(page, 'slider.value');
+      expect(await page.notebook.getCellTextOutput(cell)).toEqual(['7']);
+      await runCode(page, 'slider.value = 2;');
+      await expect(readout).toHaveText('2');
     });
   });
 }

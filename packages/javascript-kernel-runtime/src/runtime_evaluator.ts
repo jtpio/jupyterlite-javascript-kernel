@@ -23,7 +23,11 @@ import { OutputBatcher } from './output_batcher';
 import { OutputRouter, type IParentMessage } from './output_router';
 import type { RuntimeOutputHandler } from './protocol';
 import { safe } from './utils';
-import { Widget, createWidgetClasses } from './widgets';
+import {
+  Widget,
+  createWidgetClasses,
+  registerWidgetControlTarget
+} from './widgets';
 
 /**
  * The names of the globals installed by the evaluator.
@@ -98,6 +102,7 @@ export class JavaScriptRuntimeEvaluator {
       mimeBundle: value => this._mimeBundle(value),
       router: this._router
     });
+    registerWidgetControlTarget(this._commManager);
     this._display = createDisplay({
       publish: (data, metadata, transient, update) => {
         const bundle = { data, metadata, transient } as any;

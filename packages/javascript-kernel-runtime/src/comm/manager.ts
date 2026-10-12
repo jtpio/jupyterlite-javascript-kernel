@@ -129,6 +129,15 @@ export class CommManager {
   }
 
   /**
+   * The live widgets, in the order they were created.
+   *
+   * @internal
+   */
+  getWidgets<T>(): T[] {
+    return [...this._widgets.values()] as T[];
+  }
+
+  /**
    * Remove a widget registration.
    *
    * @internal
@@ -179,6 +188,12 @@ export class CommManager {
     data: Record<string, unknown>,
     buffers?: ArrayBuffer[]
   ): void {
+    if (this._comms.get(commId)?.targetName === targetName) {
+      // The frontend reattaches to an open comm, like the widget manager of
+      // a notebook reopened on a running kernel to the comm of a live widget:
+      // keep it open, with its handlers
+      return;
+    }
     const handler = this._targets.get(targetName);
     if (!handler) {
       // Close the comm like ipykernel, so that the frontend can fall back

@@ -20,7 +20,12 @@ export * from './widget_link';
 
 import type { CommManager } from '../comm';
 
-import { DOMWidget, Widget, type WidgetTraitPair } from './widget';
+import {
+  DOMWidget,
+  Widget,
+  type BufferPath,
+  type WidgetTraitPair
+} from './widget';
 import { Layout } from './widget_layout';
 import {
   ButtonStyle,
@@ -167,4 +172,53 @@ export function createWidgetClasses(
     new DirectionalLinkClass({ source, target });
 
   return classes;
+}
+
+/**
+ * The comm target of the widget manager of the frontend asking for the
+ * state of all the widgets, like when a notebook is reopened on a running
+ * kernel.
+ */
+export const WIDGET_CONTROL_TARGET = 'jupyter.widget.control';
+
+/**
+ * Register the comm target answering the `request_states` of the widget
+ * manager of the frontend with the state of all the live widgets, in an
+ * `update_states` message, like ipywidgets: a notebook reopened on a running
+ * kernel shows its widgets again.
+ */
+export function registerWidgetControlTarget(manager: CommManager): void {
+  manager.registerTarget(WIDGET_CONTROL_TARGET, comm => {
+    comm.onMsg = data => {
+      if (data.method !== 'request_states') {
+        return;
+      }
+      const states: Record<string, unknown> = {};
+      const buffers: ArrayBuffer[] = [];
+      const bufferPaths: BufferPath[] = [];
+      for (const widget of manager.getWidgets<unknown>()) {
+        if (!(widget instanceof Widget)) {
+          continue;
+        }
+        const serialized = widget._serializeFullState();
+        const { state } = serialized;
+        states[widget.commId] = {
+          model_name: state._model_name,
+          model_module: state._model_module,
+          model_module_version: state._model_module_version,
+          state
+        };
+        // The paths of the buffers start with the id of their widget
+        serialized.bufferPaths.forEach((path, i) => {
+          bufferPaths.push([widget.commId, 'state', ...path]);
+          buffers.push(serialized.buffers[i]);
+        });
+      }
+      comm.send(
+        { method: 'update_states', states, buffer_paths: bufferPaths },
+        undefined,
+        buffers
+      );
+    };
+  });
 }

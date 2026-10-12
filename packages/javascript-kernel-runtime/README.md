@@ -156,6 +156,18 @@ The methods of the evaluator:
   the host instead.
 - `dispose()` removes the globals and the listeners of the evaluator.
 
+The evaluator registers the `jupyter.widget.control` comm target, so
+`onCommTargetRegistered` is called with it: like ipywidgets, it answers the
+`request_states` message of the widget manager of the frontend with an
+`update_states` message, holding the state of all the live widgets and their
+binary values as buffers, so that a notebook reopened on a running kernel shows
+its widgets again. A `comm_open` of the frontend on the id of a comm already
+open on the same target, like the comm of a live widget, keeps that comm and
+its handlers. The host replies to the `comm_info_request` messages itself, with
+the comms of the `comm_open` messages, of the frontend and of `onOutput`, not
+closed yet by a `comm_close`, optionally only the ones of the `target_name` of
+the request: the widget manager falls back to it when the control comm fails.
+
 The evaluator can run outside of the realm of the cells, like in the page
 holding the iframe of the cells: the JupyterLite kernel calls the evaluator
 of its iframe kernel directly, and the one of its Web Worker kernel over

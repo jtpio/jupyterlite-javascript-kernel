@@ -39,6 +39,7 @@
   },
   "dependencies": {
     "@jupyterlab/coreutils": "^6.6.0",
+    "@jupyterlab/services": "^7.6.0",
     "@jupyterlite/javascript-kernel-runtime": "^0.4.0-alpha.5",
     "@jupyterlite/services": "^0.8.0",
     "@lumino/coreutils": "^2.2.2",

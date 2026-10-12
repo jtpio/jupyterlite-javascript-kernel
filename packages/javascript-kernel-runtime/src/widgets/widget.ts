@@ -29,6 +29,23 @@ export type WidgetObserveCallback = (change: IWidgetChange) => void;
 export type WidgetTraitPair = [Widget, string];
 
 /**
+ * The path of a binary value in the state of a widget: the keys of the
+ * objects and the indices of the arrays holding it.
+ */
+export type BufferPath = Array<string | number>;
+
+/**
+ * The serialized state of a widget, as sent to the frontend: its binary
+ * values are in `buffers`, with null in their place in `state`, and their
+ * paths in `bufferPaths`.
+ */
+export interface ISerializedState {
+  state: Record<string, unknown>;
+  buffers: ArrayBuffer[];
+  bufferPaths: BufferPath[];
+}
+
+/**
  * Base class for Jupyter widgets.
  *
  * Wraps the low-level comm protocol so user code can work with
@@ -235,12 +252,11 @@ export class Widget {
     if (data.method === 'update' && data.state) {
       const state = { ...(data.state as Record<string, unknown>) };
       // Binary values are sent as buffers, with their path in the state
-      const bufferPaths = (data.buffer_paths as string[][] | undefined) ?? [];
-      bufferPaths.forEach((path, i) => {
-        if (path.length === 1 && buffers?.[i]) {
-          state[path[0]] = new Uint8Array(buffers[i]);
-        }
-      });
+      putBuffers(
+        state,
+        (data.buffer_paths as BufferPath[] | undefined) ?? [],
+        buffers
+      );
       const changes: Array<[string, unknown, unknown]> = [];
       for (const [key, val] of Object.entries(state)) {
         const next = this._deserializeProperty(key, val);
@@ -280,28 +296,30 @@ export class Widget {
   }
 
   /**
-   * Serialize some state, with the binary values (ArrayBuffer, typed arrays)
-   * in buffers, and their paths in the state.
+   * The whole state of the widget, serialized with its binary values in
+   * buffers, for a frontend restoring its model, like the widget manager of
+   * a notebook reopened on a running kernel.
+   *
+   * @internal
    */
-  protected _serializeStateWithBuffers(state: Record<string, unknown>): {
-    state: Record<string, unknown>;
-    buffers: ArrayBuffer[];
-    bufferPaths: string[][];
-  } {
+  _serializeFullState(): ISerializedState {
+    return this._serializeStateWithBuffers(this._state);
+  }
+
+  /**
+   * Serialize some state, with the binary values (ArrayBuffer, typed arrays)
+   * in buffers, and their paths in the state. The binary values can be
+   * nested in the arrays and plain objects of the state.
+   */
+  protected _serializeStateWithBuffers(
+    state: Record<string, unknown>
+  ): ISerializedState {
     const serialized: Record<string, unknown> = {};
-    const buffers: ArrayBuffer[] = [];
-    const bufferPaths: string[][] = [];
     for (const [key, value] of Object.entries(state)) {
-      const bytes = toBytes(value);
-      if (bytes !== null) {
-        buffers.push(bytes.slice().buffer);
-        bufferPaths.push([key]);
-        serialized[key] = null;
-      } else {
-        serialized[key] = this._serializeProperty(key, value);
-      }
+      serialized[key] =
+        toBytes(value) !== null ? value : this._serializeProperty(key, value);
     }
-    return { state: serialized, buffers, bufferPaths };
+    return removeBuffers(serialized);
   }
 
   protected _serializeState(
@@ -513,4 +531,94 @@ export function _deserializeWidgetPair(
   }
 
   return [widget, name];
+}
+
+/**
+ * Move the binary values of some state to buffers, like ipywidgets: they can
+ * be nested in arrays and plain objects, which are copied, and get null in
+ * their place.
+ */
+function removeBuffers(state: Record<string, unknown>): ISerializedState {
+  const buffers: ArrayBuffer[] = [];
+  const bufferPaths: BufferPath[] = [];
+  const visiting = new Set<unknown>();
+
+  const remove = (value: unknown, path: BufferPath): unknown => {
+    const bytes = toBytes(value);
+    if (bytes !== null) {
+      buffers.push(bytes.slice().buffer);
+      bufferPaths.push(path);
+      return null;
+    }
+    const isArray = Array.isArray(value);
+    if ((!isArray && !isPlainObject(value)) || visiting.has(value)) {
+      return value;
+    }
+    visiting.add(value);
+    const container = value as Record<string | number, unknown>;
+    let copy: Record<string | number, unknown> | null = null;
+    for (const [key, item] of Object.entries(container)) {
+      const index = isArray ? Number(key) : key;
+      const next = remove(item, [...path, index]);
+      if (next !== item) {
+        copy ??= (
+          isArray ? [...(value as unknown[])] : { ...container }
+        ) as Record<string | number, unknown>;
+        copy[index] = next;
+      }
+    }
+    visiting.delete(value);
+    return copy ?? value;
+  };
+
+  const serialized: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(state)) {
+    serialized[key] = remove(value, [key]);
+  }
+  return { state: serialized, buffers, bufferPaths };
+}
+
+/**
+ * Put the buffers of a message of the frontend in its state, at their paths,
+ * as bytes.
+ */
+function putBuffers(
+  state: Record<string, unknown>,
+  bufferPaths: BufferPath[],
+  buffers?: ArrayBuffer[]
+): void {
+  bufferPaths.forEach((path, i) => {
+    const buffer = buffers?.[i];
+    if (!buffer || !Array.isArray(path) || path.length === 0) {
+      return;
+    }
+    let target: unknown = state;
+    for (const key of path.slice(0, -1)) {
+      if (
+        typeof target !== 'object' ||
+        target === null ||
+        !Object.prototype.hasOwnProperty.call(target, key)
+      ) {
+        return;
+      }
+      target = (target as Record<string | number, unknown>)[key];
+    }
+    const key = path[path.length - 1];
+    if (typeof target === 'object' && target !== null && key !== '__proto__') {
+      (target as Record<string | number, unknown>)[key] = new Uint8Array(
+        buffer
+      );
+    }
+  });
+}
+
+/**
+ * Whether a value is a plain object, from any realm.
+ */
+function isPlainObject(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+  const proto = Object.getPrototypeOf(value);
+  return proto === null || Object.getPrototypeOf(proto) === null;
 }

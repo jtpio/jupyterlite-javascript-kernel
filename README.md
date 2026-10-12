@@ -406,6 +406,8 @@ display(out);
 - `out.appendStdout(text)` and `out.appendStderr(text)` add some text, and `out.appendDisplayData(value, metadata?)` adds a value shown like `display()` shows it, like a widget, or a MIME bundle like `{ 'text/html': '<b>Hi</b>' }`
 - `out.clearOutput({ wait })` removes the outputs of the widget, with `wait` when the next output arrives
 
+When a notebook is closed and opened again while its kernel keeps running, like with File > Close Tab and a double-click in the file browser, its widgets show again, with their current values, and keep syncing with the kernel: the kernel answers the widget manager of the notebook with the state of the live widgets, including the bytes of the `Image` widgets. The widgets are lost when the kernel restarts.
+
 Widgets also work when JupyterLite is served over plain http, for example on a LAN, where the browser hides some APIs like `crypto.randomUUID` (only `prompt()` in `JavaScript (Web Worker)` needs the service worker, which needs `https` or `localhost`).
 
 ### Available widgets
@@ -466,7 +468,8 @@ Jupyter.comm.registerTarget('my-echo', (comm, data, buffers) => {
 ```
 
 - `Jupyter.comm.open(targetName, data?, metadata?, buffers?)` opens a comm and returns it
-- `Jupyter.comm.registerTarget(targetName, handler)` calls `handler(comm, data, buffers)` when the frontend opens a comm on the target, and `Jupyter.comm.unregisterTarget(targetName)` removes it. A comm opened on a target without a handler, or whose handler throws, is closed, like in `ipykernel`
+- `Jupyter.comm.registerTarget(targetName, handler)` calls `handler(comm, data, buffers)` when the frontend opens a comm on the target, and `Jupyter.comm.unregisterTarget(targetName)` removes it. A comm opened on a target without a handler, or whose handler throws, is closed, like in `ipykernel`. The `jupyter.widget.control` target is built in: it sends the state of the widgets to the frontend
+- the kernel answers the `comm_info_request` messages with the open comms, so a frontend can find the comms of a running kernel
 - a comm has a `commId` and a `targetName`, `send(data, metadata?, buffers?)` and `close(data?)` methods, and the `onMsg` and `onClose` callbacks, called with the data and the binary buffers (`ArrayBuffer`) of the messages of the frontend
 - the outputs of the comm callbacks, and their errors, go to the cell which ran last. The comm messages they send, and the outputs captured by an `Output` widget, go to the message of the frontend which they handle
 

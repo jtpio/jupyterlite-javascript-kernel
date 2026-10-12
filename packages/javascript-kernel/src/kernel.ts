@@ -1,7 +1,7 @@
 // Copyright (c) Jupyter Development Team.
 // Distributed under the terms of the Modified BSD License.
 
-import type { KernelMessage } from '@jupyterlab/services';
+import { KernelMessage } from '@jupyterlab/services';
 
 import { BaseKernel, type IKernel } from '@jupyterlite/services';
 
@@ -38,6 +38,7 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
    */
   constructor(options: JavaScriptKernel.IOptions) {
     super(options);
+    this._sendKernelMessage = options.sendMessage;
     this._runtimeMode = options.runtime ?? 'iframe';
     this._executorFactory = options.executorFactory;
     this._browsingContextId = options.browsingContextId;
@@ -108,6 +109,32 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
    */
   async interrupt(): Promise<void> {
     await this._backend.interrupt();
+  }
+
+  /**
+   * Handle an incoming message from the client.
+   *
+   * JupyterLite does not reply to the `comm_info_request` messages yet: the
+   * widget manager of a notebook reopened on a running kernel would wait for
+   * the reply forever. This can be removed once BaseKernel handles them.
+   */
+  async handleMessage(msg: KernelMessage.IMessage): Promise<void> {
+    if (msg.header.msg_type !== 'comm_info_request') {
+      return super.handleMessage(msg);
+    }
+    const request = msg as KernelMessage.ICommInfoRequestMsg;
+    this._publishStatus('busy', request);
+    const content = await this.commInfoRequest(request.content);
+    this._sendKernelMessage(
+      KernelMessage.createMessage({
+        msgType: 'comm_info_reply',
+        channel: 'shell',
+        session: request.header.session,
+        parentHeader: request.header,
+        content
+      })
+    );
+    this._publishStatus('idle', request);
   }
 
   /**
@@ -626,6 +653,24 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
   }
 
   /**
+   * Publish the status of the kernel while it handles a message.
+   */
+  private _publishStatus(
+    state: 'busy' | 'idle',
+    parent: KernelMessage.IMessage
+  ): void {
+    this._sendKernelMessage(
+      KernelMessage.createMessage({
+        msgType: 'status',
+        channel: 'iopub',
+        session: parent.header.session,
+        parentHeader: parent.header,
+        content: { execution_state: state }
+      })
+    );
+  }
+
+  /**
    * Normalize an execute reply error into an Error instance.
    */
   private _createRuntimeInitializationError(
@@ -739,6 +784,7 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
     this.stream({ name: 'stderr', text: `${text}\n` }, this.parentHeader);
   }
 
+  private _sendKernelMessage: IKernel.SendMessage;
   private _unsupportedControlMessages = new Set<'input_reply'>();
   private _comms = new Map<string, { target_name: string }>();
   private _backend: IRuntimeBackend;
