@@ -181,14 +181,16 @@ export function createRemoteRuntimeApi(
       executionCount: number,
       parentMessageId?: string,
       parentHeader?: Parameters<IRemoteRuntimeApi['execute']>[3],
-      allowStdin?: boolean
+      options: Parameters<IRemoteRuntimeApi['execute']>[4] = {}
     ) {
+      const { allowStdin, ...executeOptions } = options;
       const run = async () => {
         const reply = await ensureEvaluator().execute(
           code,
           executionCount,
           parentMessageId,
-          parentHeader as Record<string, unknown> | undefined
+          parentHeader as Record<string, unknown> | undefined,
+          executeOptions
         );
         await flushOutputs();
         return reply;

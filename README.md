@@ -569,6 +569,26 @@ Jupyter.comm.registerTarget('my-echo', (comm, data, buffers) => {
 
 `context.registerCommTarget()` registers the target of a [startup extension](#kernel-startup-extensions) before the code of the cells runs.
 
+## Execute requests of extensions
+
+Frontend extensions, like a variable inspector, can run code with the options of the [`execute_request`](https://jupyter-client.readthedocs.io/en/latest/messaging.html#execute) message, which the notebook does not use for its cells:
+
+```javascript
+const future = kernel.requestExecute({
+  code: 'const total = values.reduce((a, b) => a + b, 0)',
+  silent: true,
+  user_expressions: { total: 'total', count: 'values.length' }
+});
+const reply = await future.done;
+reply.content.user_expressions.total.data['text/plain']; // '6'
+```
+
+- `silent: true` runs the code quietly: the kernel sends no `execute_input`, keeps the execution count and the history, and publishes no output, no result and no error for the request. The error is in the reply. Only its comm messages are sent, so the widgets it creates work. The outputs of its timers and callbacks are dropped too, and the outputs of the previous cells, like the ones of their timers, still go to their cells. The code which runs after the reply in a promise the code did not wait for, like `fetch(url).then(r => console.log(r.status))`, and its unhandled rejections, print in the last cell run, like the late outputs of that cell: wait for the promises in silent code
+- `store_history: false` keeps the execution count and the history, but the outputs are shown. The tracebacks name the code `<silent-1>`, `<silent-2>`..., instead of the cell of the execution count
+- `user_expressions` are evaluated after the code, when it succeeds, like the last expression of a cell: a promise is awaited. The reply holds, for each name, the MIME bundle of the value, as `{ status: 'ok', data, metadata }` with a `text/plain` without colors, or the error, as `{ status: 'error', ename, evalue, traceback }`. Each one must be a single expression: `let x = 1` or `a; b` fail with `SyntaxError: Expected an expression`
+
+JupyterLite cancels the requests waiting to run when a request fails, also when it is silent.
+
 ## Configuration
 
 ### Settings
@@ -666,7 +686,7 @@ Disabling `@jupyterlite/javascript-kernel-extension:kernel-settings` makes the k
 The repository contains three npm packages:
 
 - `@jupyterlite/javascript-kernel-runtime`: the code running next to the user code, in the iframe or the Web Worker. It executes the cells, formats the outputs, and implements comms and widgets. It does not depend on JupyterLite, so that other JavaScript kernels can reuse it. It is engine-neutral: it only needs the ECMAScript built-ins, and compiles without the DOM types, which the build checks. It also ships single-file builds, with `acorn`, `acorn-walk` and `astring` included, for kernels that do not use npm, and exports the engine-neutral helpers of the tracebacks, like `parseStack` and `formatError`, for other kernels. The evaluator batches the stream outputs: a host can pass its `scheduler` (or `null` when the engine has no host timers, and then calls `evaluator.flushOutputs()` itself), a `flushInterval` (0 turns the batching off) and a `maxStreamOutput` per cell. It interrupts the cells with `evaluator.interrupt()`, and stops the loops with a `loopTimeout` or, from another thread, an `interruptBuffer`. Its output messages carry the `parentHeader` of the message of the frontend they belong to (the cell which created a timer or registered a widget callback, or the comm message whose outputs an `Output` widget captures), given to `execute()` and to the comm handlers, and `JavaScriptKernel` publishes them with it. The `executorOptions` of the evaluator (an `IExecutorOptions`, as plain data) configure the magic imports, also of an existing executor, like `ExecutorConfig.update()`. See its [README](packages/javascript-kernel-runtime/README.md).
-- `@jupyterlite/javascript-kernel`: the JupyterLite kernel, with the iframe and Web Worker runtimes. It also exports everything from `@jupyterlite/javascript-kernel-runtime`. The iframe backend calls the runtime API directly in the page, and the Web Worker backend over Comlink. When the code of a cell reloads the iframe, `IFrameRuntimeBackend` calls its `onRestart` option and starts a new iframe, for which it calls `executorFactory` and `onReady` again: the `onRuntimeReady` method of the kernels building on `JavaScriptKernel`, like the p5.js kernel, runs again with the new global scope and executor. JupyterLite only cancels the queued cells on interrupt: `installKernelInterrupts(client)` makes its kernel client also call the `interrupt()` method of the kernels, like `JavaScriptKernel.interrupt()`. The extension calls it, and the extensions of kernels building on `JavaScriptKernel`, like the p5.js kernel, can call it too, since installing it twice does nothing. The `executorOptions`, `loopTimeout` and `maxStreamOutput` options of `JavaScriptKernel` configure the runtime when it starts: the extension sets them from the [settings](#settings), and the kernels building on `JavaScriptKernel` keep the defaults unless they pass them.
+- `@jupyterlite/javascript-kernel`: the JupyterLite kernel, with the iframe and Web Worker runtimes. It also exports everything from `@jupyterlite/javascript-kernel-runtime`. The iframe backend calls the runtime API directly in the page, and the Web Worker backend over Comlink. When the code of a cell reloads the iframe, `IFrameRuntimeBackend` calls its `onRestart` option and starts a new iframe, for which it calls `executorFactory` and `onReady` again: the `onRuntimeReady` method of the kernels building on `JavaScriptKernel`, like the p5.js kernel, runs again with the new global scope and executor. `JavaScriptKernel` handles the silent `execute_request` messages itself, without `execute_input`, but still calls `executeRequest()`, which these kernels override: for a silent request, `content.silent` is true and `parentHeader` is still the header of the cell which ran before it, so an override checks `content.silent` before publishing outputs. JupyterLite only cancels the queued cells on interrupt: `installKernelInterrupts(client)` makes its kernel client also call the `interrupt()` method of the kernels, like `JavaScriptKernel.interrupt()`. The extension calls it, and the extensions of kernels building on `JavaScriptKernel`, like the p5.js kernel, can call it too, since installing it twice does nothing. The `executorOptions`, `loopTimeout` and `maxStreamOutput` options of `JavaScriptKernel` configure the runtime when it starts: the extension sets them from the [settings](#settings), and the kernels building on `JavaScriptKernel` keep the defaults unless they pass them.
 - `@jupyterlite/javascript-kernel-extension`: the JupyterLite extension registering the kernels, with their settings.
 
 ### Development install

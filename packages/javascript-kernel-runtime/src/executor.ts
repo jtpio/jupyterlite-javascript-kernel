@@ -463,6 +463,14 @@ export interface IMakeAsyncOptions {
    * `<silent-k>`.
    */
   name?: string;
+
+  /**
+   * Compile a single expression, like a user expression of an
+   * execute_request: the function returns its value, also for an
+   * assignment or with a semicolon. Any other code, like a statement or no
+   * code, throws a CellSyntaxError.
+   */
+  expression?: boolean;
 }
 
 /**
@@ -637,7 +645,7 @@ export class JavaScriptExecutor {
       name = `${displayName}#${k}`;
     }
 
-    if (code.length === 0) {
+    if (code.length === 0 && !options.expression) {
       return {
         asyncFunction: async () => {},
         withReturn: false,
@@ -655,6 +663,10 @@ export class JavaScriptExecutor {
       throw this._toCellSyntaxError(error, name);
     }
 
+    if (options.expression) {
+      this._checkExpression(code, ast, name, displayName);
+    }
+
     const fixed = this._fixedGlobalDeclaration(ast);
     if (fixed) {
       this._registerCell(name, createCellSource({ name: displayName, code }));
@@ -670,7 +682,7 @@ export class JavaScriptExecutor {
     }
 
     const { edited, map, hoisted, withReturn, hasDynamicImports } =
-      this._rewriteCell(code, ast, options.name);
+      this._rewriteCell(code, ast, options.name, options.expression);
 
     // The hoisted code goes on a line of its own, before the code of the
     // cell, whose lines are kept. The ";" stops a "use strict" directive,
@@ -1643,7 +1655,8 @@ export class JavaScriptExecutor {
   private _rewriteCell(
     code: string,
     ast: any,
-    cellName?: string
+    cellName?: string,
+    expression = false
   ): {
     edited: string;
     map: PositionMap;
@@ -1712,15 +1725,17 @@ export class JavaScriptExecutor {
     });
 
     // Return the last expression, unless it ends with a semicolon or is an
-    // assignment. The parentheses go around the statement, so that the
-    // parentheses of `({ a: 1 })` are kept, and the value is not assigned,
-    // so that the names of the anonymous functions are not inferred.
+    // assignment, which an expression returns anyway. The parentheses go
+    // around the statement, so that the parentheses of `({ a: 1 })` are
+    // kept, and the value is not assigned, so that the names of the
+    // anonymous functions are not inferred.
     const last = ast.body[ast.body.length - 1];
     const withReturn =
       !!last &&
       last.type === 'ExpressionStatement' &&
-      last.expression.type !== 'AssignmentExpression' &&
-      !code.slice(last.expression.end, last.end).includes(';');
+      (expression ||
+        (last.expression.type !== 'AssignmentExpression' &&
+          !code.slice(last.expression.end, last.end).includes(';')));
 
     // Copy the builtin globals again at the end of the cell, before the
     // last expression, with the values of their last assignments
@@ -1736,8 +1751,9 @@ export class JavaScriptExecutor {
     }
 
     if (withReturn) {
+      // Before the semicolon of an expression
       edits.insert(last.start, 'return (');
-      edits.insert(last.end, ')');
+      edits.insert(last.expression.end, ')');
     }
 
     const { code: edited, map } = edits.apply();
@@ -2040,6 +2056,32 @@ export class JavaScriptExecutor {
       this._cells.delete(oldest);
       this._editedCode.delete(oldest);
     }
+  }
+
+  /**
+   * Check that the code of an expression is a single expression, or throw a
+   * CellSyntaxError at the first statement which is not one, or at the end
+   * of the code.
+   */
+  private _checkExpression(
+    code: string,
+    ast: any,
+    name: string,
+    displayName: string
+  ): void {
+    const body: any[] = ast.body;
+    if (body.length === 1 && body[0].type === 'ExpressionStatement') {
+      return;
+    }
+    const statement =
+      body.find((node: any) => node.type !== 'ExpressionStatement') ?? body[1];
+    const offset = statement ? statement.start : code.length;
+    this._registerCell(name, createCellSource({ name: displayName, code }));
+    const { line, column } = offsetToLineColumn(lineStarts(code), offset);
+    throw new CellSyntaxError(
+      statement ? 'Expected an expression' : 'Expected an expression, got none',
+      { token: name, line, column }
+    );
   }
 
   /**

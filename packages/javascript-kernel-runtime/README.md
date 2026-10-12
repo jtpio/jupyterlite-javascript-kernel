@@ -126,13 +126,14 @@ const evaluator = new runtime.JavaScriptRuntimeEvaluator({
 
 The methods of the evaluator:
 
-- `execute(code, executionCount, parentMessageId?, parentHeader?)` runs a
-  cell, and returns a promise of the content of the `execute_reply`. Its
-  outputs go to `parentHeader`, and so do the outputs sent outside of the
+- `execute(code, executionCount, parentMessageId?, parentHeader?, options?)`
+  runs a cell, and returns a promise of the content of the `execute_reply`.
+  Its outputs go to `parentHeader`, and so do the outputs sent outside of the
   cells until the next execution, see below. The host
   must run the job queue of the engine until the promise settles: browsers do
   it on their own, QuickJS runs `JS_ExecutePendingJob` in a loop, and
-  quickjs-emscripten `runtime.executePendingJobs()`.
+  quickjs-emscripten `runtime.executePendingJobs()`. The `options` come from
+  the `execute_request`, see below.
 - `complete(code, cursorPos)`, `inspect(code, cursorPos, detailLevel)` and
   `isComplete(code)` are synchronous, and return the content of the replies.
   The cursor positions are in code points, like in the Jupyter protocol.
@@ -161,6 +162,34 @@ The methods of the evaluator:
   Once the cell reached `maxStreamOutput`, the error goes to the console of
   the host instead.
 - `dispose()` removes the globals and the listeners of the evaluator.
+
+The `options` of `execute()` (`JavaScriptRuntimeEvaluator.IExecuteOptions`)
+hold the fields of the `execute_request` which change the execution:
+
+- `silent`: the evaluator sends no output message for the code, only its comm
+  messages, so its widgets work: no `stream`, no `display_data`, no
+  `execute_result` and no `execute_error`, whose content is still returned.
+  The outputs of the timers and the callbacks of the code are dropped too.
+  While it runs, the silent request is the parent of the outputs sent outside
+  of the cells, and once it ends, the cell which ran before it is again: the
+  promise continuations of the silent code which run after it ended, like
+  the code after an `await` in an async function it did not wait for, and
+  its unhandled rejections, print in that cell, so that a silent request
+  sent after each cell does not drop the late outputs of the cell. The
+  host does not send `execute_input`, and does not change the execution count
+  and the history: it passes the current execution count,
+- `storeHistory`: false when the request does not store the history, or is
+  silent: the code is then named `<silent-k>` in the tracebacks, as the
+  execution count is the one of the cell before it. True by default,
+- `userExpressions`: the `user_expressions` of the request, evaluated after
+  the code when it succeeds, like the last expression of a cell (a promise is
+  awaited, an assignment returns its value), with the loop timeout and the
+  interrupts of the cell (a loop timeout fails one expression, not the next
+  ones). The `user_expressions` of the reply hold, by name,
+  `{ status: 'ok', data, metadata }` with the MIME bundle of the value, whose
+  `text/plain` has no ANSI colors, or
+  `{ status: 'error', ename, evalue, traceback }`. An expression which is not
+  a single expression fails with `SyntaxError: Expected an expression`.
 
 The evaluator registers the `jupyter.widget.control` comm target, so
 `onCommTargetRegistered` is called with it: like ipywidgets, it answers the
@@ -353,7 +382,7 @@ DOM elements and an image of the canvases, and else its text, formatted by
 
 ## Cells
 
-`executor.makeAsyncFromCode(code, { name })` compiles a cell to an async
+`executor.makeAsyncFromCode(code, { name, expression })` compiles a cell to an async
 function, called with the global scope as `this`, in sloppy mode:
 
 - A cell which is an object literal, like `{ a: 1 }`, is parsed as an
@@ -398,6 +427,10 @@ globalThis["x"] = undefined`, and keep the value of the global when they
   can not be replaced: their declaration throws a `CellSyntaxError` at the
   declared name, before the cell runs, except a `var` declaration without a
   value, like `var window;`, which keeps the global, as in a script.
+- With `{ expression: true }`, the code must be a single expression, like a
+  user expression: the function returns its value, also for an assignment
+  or with a semicolon. Any other code, or no code, throws a
+  `CellSyntaxError`, `Expected an expression`.
 
 ## Interrupts and loop timeout
 
@@ -465,8 +498,8 @@ not delay the checks of a slow loop running after it.
 The runtime exports the parts, for the kernels which compile the cells
 themselves: `LoopGuard` (`fn`, the guard passed to the compiled code,
 `registerSite()`, `beginExecution()`, `race(promise)`, `interrupt()`,
-`endExecution()`, `tripped`, `timeout`, `resetClock()`), `TimerRegistry`
-(`install(scope, context?)`, `enable()`, `clearAll()`, `restore()`), the error
+`endExecution()`, `tripped`, `clearTimedOut()`, `timeout`, `resetClock()`),
+`TimerRegistry` (`install(scope, context?)`, `enable()`, `clearAll()`, `restore()`), the error
 names `KEYBOARD_INTERRUPT` and `LOOP_TIMEOUT`, and `createRuntimeError(scope,
 name, message)`. The executor instruments the loops when its `loopGuard` is
 set.
@@ -481,7 +514,8 @@ registry also wraps `requestAnimationFrame`, whose callbacks are not cleared
 by `clearAll()`.
 
 The `OutputRouter` attaches the outputs to their parent message, an
-`IParentMessage` with the `id` and the `header` of a message of the frontend:
+`IParentMessage` with the `id` and the `header` of a message of the frontend,
+and `silent` for a silent `execute_request`, whose outputs are dropped:
 
 - `cell` is the parent of the outputs sent outside of the callbacks, the
   `execute_request` which ran last, and `current` the parent of the outputs
@@ -496,12 +530,14 @@ The `OutputRouter` attaches the outputs to their parent message, an
 - `runUncaught(callback)` reports an uncaught error in the parent of the
   callback which threw it,
 - `route(message)` returns the message with the `parentHeader` of its parent,
-  or `null` when an `Output` widget took it.
+  or `null` when an `Output` widget took it, or when its parent is `silent`
+  and the message is not a comm message.
 
 ## Tracebacks
 
 The evaluator names the cells after their execution count, like `In[3]`
-(`<silent-1>`, `<silent-2>`... for the execution count 0), and compiles them
+(`<silent-1>`, `<silent-2>`... for the execution count 0, the silent
+requests and the requests which do not store the history), and compiles them
 with a `//# sourceURL=In[3]` directive. The `traceback` of an
 `execute_error` is a list of lines, colored with ANSI escape codes:
 

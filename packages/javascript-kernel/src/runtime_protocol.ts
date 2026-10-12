@@ -6,6 +6,7 @@ import type { IWorkerKernel } from '@jupyterlite/services';
 
 import type {
   IExecutorOptions,
+  JavaScriptRuntimeEvaluator,
   RuntimeOutputMessage
 } from '@jupyterlite/javascript-kernel-runtime';
 
@@ -57,6 +58,20 @@ export interface IRuntimeInitializeOptions extends IWorkerKernel.IOptions {
 }
 
 /**
+ * The options of an execution, from the content of its execute_request.
+ */
+export interface IRuntimeExecuteOptions
+  extends JavaScriptRuntimeEvaluator.IExecuteOptions {
+  /**
+   * With false, the frontend does not support input requests: prompt()
+   * fails with a StdinNotImplementedError in the Web Worker. Without it, as
+   * for the startup code, the setting of the running cell is kept (false
+   * when no cell runs).
+   */
+  allowStdin?: boolean;
+}
+
+/**
  * The message a Web Worker runtime posts to the page when the code of a
  * cell closes it with `close()`.
  */
@@ -81,17 +96,14 @@ export interface IRemoteRuntimeApi {
     onOutput: RuntimeOutputCallback
   ): Promise<void>;
   /**
-   * Execute the code of a cell. With `allowStdin` false, the frontend does
-   * not support input requests: prompt() fails with a
-   * StdinNotImplementedError. Without it, as for the startup code, the
-   * setting of the running cell is kept (false when no cell runs).
+   * Execute the code of a cell, with the options of its execute_request.
    */
   execute(
     code: string,
     executionCount: number,
     parentMessageId?: string,
     parentHeader?: KernelMessage.IHeader,
-    allowStdin?: boolean
+    options?: IRuntimeExecuteOptions
   ): Promise<KernelMessage.IExecuteReplyMsg['content']>;
   preloadModule(moduleName: string): Promise<void>;
   registerCommTarget(

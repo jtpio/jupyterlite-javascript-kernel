@@ -21,6 +21,12 @@ export interface IParentMessage {
    * Without it, the host attaches the outputs to its own current parent.
    */
   readonly header?: KernelMessage.IHeader;
+
+  /**
+   * Whether the outputs of the message are dropped, for a silent
+   * execute_request: only its comm messages are sent.
+   */
+  readonly silent?: boolean;
 }
 
 /**
@@ -287,14 +293,14 @@ export class OutputRouter {
    * Attach an output message to its parent message.
    *
    * @returns The message with its parent header, or null when an Output
-   * widget took it.
+   * widget took it, or when its parent is a silent request.
    */
   route(message: RuntimeOutputMessage): RuntimeOutputMessage | null {
     if (message.parentHeader) {
       return message;
     }
     const parent = this._parentOf(message);
-    if (!parent) {
+    if (!parent || (parent.silent && !isCommMessage(message))) {
       return null;
     }
     return parent.header
@@ -307,11 +313,10 @@ export class OutputRouter {
    * took it.
    */
   private _parentOf(message: RuntimeOutputMessage): IParentMessage | null {
+    if (isCommMessage(message)) {
+      return this.current;
+    }
     switch (message.type) {
-      case 'comm_open':
-      case 'comm_msg':
-      case 'comm_close':
-        return this.current;
       case 'execute_result':
       case 'execute_error':
         return this._cell;
@@ -371,4 +376,16 @@ export class OutputRouter {
   private _scope: IParentMessage | null = null;
   private _errorParent: IParentMessage | null = null;
   private _captures: ICaptureRecord[] = [];
+}
+
+/**
+ * Whether an output message is a comm message, which a silent request still
+ * sends, so that the frontend keeps the same comms and widgets.
+ */
+function isCommMessage(message: RuntimeOutputMessage): boolean {
+  return (
+    message.type === 'comm_open' ||
+    message.type === 'comm_msg' ||
+    message.type === 'comm_close'
+  );
 }

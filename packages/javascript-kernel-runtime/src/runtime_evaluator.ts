@@ -22,7 +22,7 @@ import { getDoc, setDoc } from './introspection';
 import { OutputBatcher } from './output_batcher';
 import { OutputRouter, type IParentMessage } from './output_router';
 import type { RuntimeOutputHandler } from './protocol';
-import { safe } from './utils';
+import { safe, stripAnsi } from './utils';
 import {
   Widget,
   createWidgetClasses,
@@ -236,17 +236,34 @@ export class JavaScriptRuntimeEvaluator {
    * sent outside of the cells, until the next execution: the timers and
    * the widget callbacks keep the cell which created them. Without a parent
    * message, like for some startup code, the outputs keep the current one.
+   *
+   * A silent execution sends no outputs, no result and no error, only its
+   * comm messages, until it ends: the outputs sent outside of the cells then
+   * go to the cell which ran before it again. The timers and the callbacks
+   * of the silent code stay silent, but not its promise continuations which
+   * run after it ended, like the code after an `await` in an async function
+   * it did not wait for, or its unhandled rejections: like the ones of the
+   * cell before it, they go to that cell.
    */
   async execute(
     code: string,
     executionCount: number,
     parentMessageId?: string,
-    parentHeader?: Record<string, unknown>
+    parentHeader?: Record<string, unknown>,
+    options: JavaScriptRuntimeEvaluator.IExecuteOptions = {}
   ): Promise<KernelMessage.IExecuteReplyMsg['content']> {
+    const silent = options.silent === true;
+    const previous = this._router.cell;
     if (parentMessageId !== undefined || parentHeader !== undefined) {
-      this._router.cell = toParent(parentMessageId, parentHeader);
+      this._router.cell = toParent(parentMessageId, parentHeader, silent);
+    } else if (silent) {
+      this._router.cell = { ...previous, silent };
     }
-    this._outputs.resetStreamOutput();
+    const cell = this._router.cell;
+    if (!silent) {
+      // A silent execution keeps the output limit of the cell before it
+      this._outputs.resetStreamOutput();
+    }
     if (executionCount > 0) {
       // The timers of the startup code, run without execution count, are
       // not cleared on interrupt
@@ -254,9 +271,12 @@ export class JavaScriptRuntimeEvaluator {
     }
     this._guard.beginExecution();
     try {
-      return await this._execute(code, executionCount);
+      return await this._execute(code, executionCount, options);
     } finally {
       this._guard.endExecution();
+      if (silent && this._router.cell === cell) {
+        this._router.cell = previous;
+      }
     }
   }
 
@@ -265,10 +285,16 @@ export class JavaScriptRuntimeEvaluator {
    */
   private async _execute(
     code: string,
-    executionCount: number
+    executionCount: number,
+    options: JavaScriptRuntimeEvaluator.IExecuteOptions
   ): Promise<KernelMessage.IExecuteReplyMsg['content']> {
-    // The name of the cell in the tracebacks
-    const name = executionCount > 0 ? `In[${executionCount}]` : undefined;
+    const silent = options.silent === true;
+    // The name of the cell in the tracebacks: the code which is not in the
+    // history does not replace the cell of the execution count
+    const name =
+      executionCount > 0 && options.storeHistory !== false && !silent
+        ? `In[${executionCount}]`
+        : undefined;
     let asyncFunction: () => Promise<any>;
     let withReturn: boolean;
     let docs: IAsyncCodeResult['docs'];
@@ -282,7 +308,7 @@ export class JavaScriptRuntimeEvaluator {
     } catch (error) {
       // A syntax error, with its location in the cell. The error sends the
       // pending outputs before it.
-      return this._emitError(executionCount, error);
+      return this._emitError(executionCount, error, undefined, silent);
     }
 
     // The code of the cell sends its outputs to the cell, even while an
@@ -290,17 +316,9 @@ export class JavaScriptRuntimeEvaluator {
     const cell = this._router.cell;
     try {
       // An interrupt stops waiting for the promise of the cell
-      const result = await this._guard.race(
-        this._router.runInScope(cell, () => this._evalFunc(asyncFunction))
-      );
-      // The code of the cell caught the error of the loop guard: the cell
-      // still fails with it
-      const tripped = this._guard.tripped;
-      if (tripped) {
-        throw tripped;
-      }
+      const result = await this._evaluate(asyncFunction, cell);
 
-      if (withReturn && result !== undefined) {
+      if (withReturn && result !== undefined && !silent) {
         this._router.runInScope(cell, () => {
           if (result instanceof Widget) {
             this._commManager.displayWidget(result.commId);
@@ -321,11 +339,14 @@ export class JavaScriptRuntimeEvaluator {
       return {
         status: 'ok',
         execution_count: executionCount,
-        user_expressions: {}
+        user_expressions: await this._evaluateUserExpressions(
+          options.userExpressions,
+          cell
+        )
       };
     } catch (error) {
       // The thrown value as is, which may not be an error
-      return this._emitError(executionCount, error, token);
+      return this._emitError(executionCount, error, token, silent);
     } finally {
       // The declarations made before an error keep their documentation
       this._executor.introspection.registerDocs(docs);
@@ -334,6 +355,70 @@ export class JavaScriptRuntimeEvaluator {
       // The outputs of the cell are sent before its reply
       this._outputs.flush();
     }
+  }
+
+  /**
+   * Run the compiled code of a cell or of an expression, with its outputs
+   * going to `parent`, and wait for its promise, until an interrupt.
+   */
+  private async _evaluate(
+    asyncFunction: () => Promise<any>,
+    parent: IParentMessage
+  ): Promise<any> {
+    const result = await this._guard.race(
+      this._router.runInScope(parent, () => this._evalFunc(asyncFunction))
+    );
+    // The code caught the error of the loop guard: it still fails with it
+    const tripped = this._guard.tripped;
+    if (tripped) {
+      throw tripped;
+    }
+    return result;
+  }
+
+  /**
+   * Evaluate the user expressions of an execute_request, after its code
+   * ran: the results hold the MIME bundle of the value of each expression,
+   * awaited like the last expression of a cell, with its text without
+   * colors, or its error. Their outputs go to the request.
+   */
+  private async _evaluateUserExpressions(
+    expressions: Record<string, string> | undefined,
+    parent: IParentMessage
+  ): Promise<UserExpressionResults> {
+    const results: UserExpressionResults = {};
+    if (!expressions) {
+      return results;
+    }
+    for (const [key, expression] of Object.entries(expressions)) {
+      // The loop timeout of an expression does not fail the next ones
+      this._guard.clearTimedOut();
+      let token: string | undefined;
+      try {
+        const parsed = this._executor.makeAsyncFromCode(String(expression), {
+          expression: true
+        });
+        token = parsed.name;
+        const value = await this._evaluate(parsed.asyncFunction, parent);
+        const data = this._mimeBundle(value);
+        // The text is read by the extensions, not shown in a notebook
+        const text = data['text/plain'];
+        if (typeof text === 'string') {
+          data['text/plain'] = stripAnsi(text);
+        }
+        results[key] = {
+          status: 'ok',
+          data: data as UserExpressionResults,
+          metadata: {}
+        };
+      } catch (error) {
+        const { ename, evalue, traceback } = this._executor.formatError(error, {
+          currentToken: token
+        });
+        results[key] = { status: 'error', ename, evalue, traceback };
+      }
+    }
+    return results;
   }
 
   /**
@@ -612,11 +697,14 @@ export class JavaScriptRuntimeEvaluator {
    * value.
    *
    * @param currentToken - The name of the cell which threw the value.
+   * @param silent - Whether the error is only returned, for a silent
+   * execution, and not sent as an output.
    */
   private _emitError(
     executionCount: number,
     error: unknown,
-    currentToken?: string
+    currentToken?: string,
+    silent = false
   ): KernelMessage.IExecuteReplyMsg['content'] {
     const { ename, evalue, traceback } = this._executor.formatError(error, {
       currentToken
@@ -629,10 +717,12 @@ export class JavaScriptRuntimeEvaluator {
       traceback
     };
 
-    this._onOutput({
-      type: 'execute_error',
-      bundle: content
-    });
+    if (!silent) {
+      this._onOutput({
+        type: 'execute_error',
+        bundle: content
+      });
+    }
 
     return {
       ...content,
@@ -933,15 +1023,24 @@ export class JavaScriptRuntimeEvaluator {
 }
 
 /**
+ * The results of the user expressions in an execute_reply, by name: the MIME
+ * bundle of the value of an expression, `{ status: 'ok', data, metadata }`,
+ * or its error, `{ status: 'error', ename, evalue, traceback }`.
+ */
+type UserExpressionResults = KernelMessage.IExecuteReply['user_expressions'];
+
+/**
  * The parent message of a request of the host.
  */
 function toParent(
   id: string | undefined,
-  header: Record<string, unknown> | undefined
+  header: Record<string, unknown> | undefined,
+  silent = false
 ): IParentMessage {
   return {
     id: id ?? (typeof header?.msg_id === 'string' ? header.msg_id : null),
-    header: header as KernelMessage.IHeader | undefined
+    header: header as KernelMessage.IHeader | undefined,
+    ...(silent ? { silent } : {})
   };
 }
 
@@ -1113,6 +1212,36 @@ export namespace JavaScriptRuntimeEvaluator {
    * The timers of a host.
    */
   export type IScheduler = OutputBatcher.IScheduler;
+
+  /**
+   * The options of an execution, from the content of its execute_request.
+   */
+  export interface IExecuteOptions {
+    /**
+     * Run the code as quietly as possible, for a request with `silent`: its
+     * outputs, its result and its error are not sent, only its comm
+     * messages, and neither are the outputs of its timers and callbacks.
+     * The error is still returned in the reply. Once it ends, the outputs
+     * sent outside of the cells go to the cell which ran before it again,
+     * also the ones of the promise continuations of the silent code which
+     * run after it ended, and its unhandled rejections.
+     */
+    silent?: boolean;
+
+    /**
+     * Whether the code is in the history of the execution counts, false for
+     * a request with `store_history: false`: the code is then named
+     * `<silent-k>` in the tracebacks, instead of the cell of the execution
+     * count, `In[n]`. True by default, false for a silent execution.
+     */
+    storeHistory?: boolean;
+
+    /**
+     * The `user_expressions` of the request: the expressions evaluated after
+     * the code, when it succeeds, by name. The reply holds their results.
+     */
+    userExpressions?: Record<string, string>;
+  }
 }
 
 /**

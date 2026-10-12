@@ -117,8 +117,20 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
    * JupyterLite does not reply to the `comm_info_request` messages yet: the
    * widget manager of a notebook reopened on a running kernel would wait for
    * the reply forever. This can be removed once BaseKernel handles them.
+   *
+   * BaseKernel sends an `execute_input` message for the silent
+   * `execute_request` messages too, and makes them the parent of the outputs
+   * sent outside of the cells: the kernel handles them itself, and still
+   * calls `executeRequest()`, which the kernels building on it override,
+   * with the silent content.
    */
   async handleMessage(msg: KernelMessage.IMessage): Promise<void> {
+    if (
+      msg.header.msg_type === 'execute_request' &&
+      (msg as KernelMessage.IExecuteRequestMsg).content.silent
+    ) {
+      return this._executeSilent(msg as KernelMessage.IExecuteRequestMsg);
+    }
     if (msg.header.msg_type !== 'comm_info_request') {
       return super.handleMessage(msg);
     }
@@ -210,22 +222,56 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
 
   /**
    * Handle an `execute_request` message.
+   *
+   * It is also called for a silent request, whose `content.silent` is true:
+   * `parentHeader` is then still the header of the request which ran before
+   * it, and the outputs published by an override with it go to that cell.
    */
   async executeRequest(
     content: KernelMessage.IExecuteRequestMsg['content']
   ): Promise<KernelMessage.IExecuteReplyMsg['content']> {
+    const header =
+      content.silent && this._silentHeader
+        ? this._silentHeader
+        : this.parentHeader;
+    return this._executeCode(content, header);
+  }
+
+  /**
+   * Execute the code of an `execute_request` message, with its header.
+   *
+   * A silent request publishes no outputs, no result and no error, only its
+   * comm messages: its error is in the reply. The `user_expressions` are
+   * evaluated after the code, when it succeeds, and their results are in the
+   * reply.
+   */
+  private async _executeCode(
+    content: KernelMessage.IExecuteRequestMsg['content'],
+    header: KernelMessage.IHeader | undefined
+  ): Promise<KernelMessage.IExecuteReplyMsg['content']> {
+    const silent = content.silent === true;
     try {
       await this.ready;
       if (this._startupError) {
         throw this._startupError;
       }
-      this._reportStartupExtensionErrors();
+      if (!silent) {
+        this._reportStartupExtensionErrors();
+      }
       return await this._backend.execute(
         content.code,
         this.executionCount,
-        this.parentHeader?.msg_id,
-        this.parentHeader,
-        content.allow_stdin
+        header?.msg_id,
+        header,
+        {
+          allowStdin: content.allow_stdin,
+          silent,
+          // Like BaseKernel, which counts the requests storing the history
+          storeHistory: !silent && content.store_history === true,
+          userExpressions: content.user_expressions as
+            | Record<string, string>
+            | undefined
+        }
       );
     } catch (error) {
       if (
@@ -239,16 +285,18 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
           error instanceof RuntimeRestartedError
             ? KEYBOARD_INTERRUPT
             : error.name;
-        const content = {
+        const errorContent = {
           ename,
           evalue: error.message,
           traceback: [`${ename}: ${error.message}`]
         };
-        this.publishExecuteError(content);
+        if (!silent) {
+          this.publishExecuteError(errorContent, header);
+        }
         return {
           status: 'error',
           execution_count: this.executionCount,
-          ...content
+          ...errorContent
         };
       }
       const normalized = this.normalizeError(error);
@@ -256,11 +304,16 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
         normalized.stack || normalized.message || String(error)
       ];
 
-      this.publishExecuteError({
-        ename: normalized.name || 'RuntimeError',
-        evalue: normalized.message || '',
-        traceback
-      });
+      if (!silent) {
+        this.publishExecuteError(
+          {
+            ename: normalized.name || 'RuntimeError',
+            evalue: normalized.message || '',
+            traceback
+          },
+          header
+        );
+      }
 
       return {
         status: 'error',
@@ -653,6 +706,35 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
   }
 
   /**
+   * Handle a silent `execute_request` message: without `execute_input`,
+   * without changing the execution count, the history and the parent of the
+   * outputs sent outside of the cells.
+   */
+  private async _executeSilent(
+    request: KernelMessage.IExecuteRequestMsg
+  ): Promise<void> {
+    this._publishStatus('busy', request);
+    // JupyterLite handles one message at a time
+    this._silentHeader = request.header;
+    let content: KernelMessage.IExecuteReplyMsg['content'];
+    try {
+      content = await this.executeRequest(request.content);
+    } finally {
+      this._silentHeader = undefined;
+    }
+    this._sendKernelMessage(
+      KernelMessage.createMessage({
+        msgType: 'execute_reply',
+        channel: 'shell',
+        session: request.header.session,
+        parentHeader: request.header,
+        content
+      })
+    );
+    this._publishStatus('idle', request);
+  }
+
+  /**
    * Publish the status of the kernel while it handles a message.
    */
   private _publishStatus(
@@ -800,6 +882,8 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
   private _backendReady: Promise<void> | null = null;
   private _ready: Promise<void> = Promise.resolve();
   private _startupError: RuntimeStartupError | null = null;
+  // The header of the silent execute_request being handled, if any
+  private _silentHeader: KernelMessage.IHeader | undefined = undefined;
   private _runtimeReadyContext: JavaScriptKernel.IRuntimeReadyContext | null =
     null;
   private _runtimeMode: RuntimeMode;

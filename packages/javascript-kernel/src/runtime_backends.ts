@@ -20,6 +20,7 @@ import { createRemoteRuntimeApi } from './runtime_remote';
 import {
   RUNTIME_CLOSED_MESSAGE,
   type IRemoteRuntimeApi,
+  type IRuntimeExecuteOptions,
   type RuntimeOutputCallback
 } from './runtime_protocol';
 
@@ -115,17 +116,15 @@ export interface IRuntimeBackend {
   interrupt(): Promise<void>;
 
   /**
-   * Execute the code of a cell. With `allowStdin` false, prompt() fails
-   * with a StdinNotImplementedError in the Web Worker. Without it, as for
-   * the startup code, the setting of the running cell is kept (false when
-   * no cell runs).
+   * Execute the code of a cell, with the options of its execute_request,
+   * like `silent` and `allowStdin`.
    */
   execute(
     code: string,
     executionCount: number,
     parentMessageId?: string,
     parentHeader?: KernelMessage.IHeader,
-    allowStdin?: boolean
+    options?: IRuntimeExecuteOptions
   ): Promise<KernelMessage.IExecuteReplyMsg['content']>;
   complete(
     code: string,
@@ -197,7 +196,7 @@ abstract class AbstractRuntimeBackend<
     executionCount: number,
     parentMessageId?: string,
     parentHeader?: KernelMessage.IHeader,
-    allowStdin?: boolean
+    options?: IRuntimeExecuteOptions
   ): Promise<KernelMessage.IExecuteReplyMsg['content']> {
     await this.ready;
     const reply = this._call<KernelMessage.IExecuteReplyMsg['content']>(
@@ -207,7 +206,7 @@ abstract class AbstractRuntimeBackend<
           executionCount,
           parentMessageId,
           parentHeader,
-          allowStdin
+          options
         )
     );
     this._running = reply;

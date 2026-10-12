@@ -287,6 +287,21 @@ export class LoopGuard {
   }
 
   /**
+   * Clear the error of the loop timeout before other code of the same
+   * execution runs, like the next user expression of an execute_request:
+   * its loops time out again, at their own line, while the page is still
+   * busy. An interruption is kept.
+   */
+  clearTimedOut(): void {
+    if (this._state.flag === TIMED_OUT) {
+      this._state.flag = RUNNING;
+    }
+    if (this._state.flag !== INTERRUPTED) {
+      this._tripped = null;
+    }
+  }
+
+  /**
    * End the current execution.
    */
   endExecution(): void {
