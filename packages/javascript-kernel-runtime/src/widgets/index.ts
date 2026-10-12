@@ -14,7 +14,10 @@ export * from './widget_string';
 export * from './widget_output';
 export * from './widget_button';
 export * from './widget_color';
-export * from './widget_image';
+export * from './widget_media';
+export * from './widget_upload';
+export * from './widget_date';
+export * from './widget_tagsinput';
 export * from './widget_box';
 export * from './widget_selectioncontainer';
 export * from './widget_link';
@@ -81,7 +84,20 @@ import {
 import { Output } from './widget_output';
 import { Button } from './widget_button';
 import { ColorPicker } from './widget_color';
-import { Image } from './widget_image';
+import { Audio, Image, Video } from './widget_media';
+import { FileUpload } from './widget_upload';
+import {
+  DatePicker,
+  DatetimePicker,
+  NaiveDatetimePicker,
+  TimePicker
+} from './widget_date';
+import {
+  ColorsInput,
+  FloatsInput,
+  IntsInput,
+  TagsInput
+} from './widget_tagsinput';
 import { Box, GridBox, HBox, VBox } from './widget_box';
 import { Accordion, Stack, Tab } from './widget_selectioncontainer';
 import { DirectionalLink, Link } from './widget_link';
@@ -138,6 +154,17 @@ export const widgetClasses: Record<string, typeof Widget> = {
   Button,
   ColorPicker,
   Image,
+  Video,
+  Audio,
+  FileUpload,
+  DatePicker,
+  TimePicker,
+  DatetimePicker,
+  NaiveDatetimePicker,
+  TagsInput,
+  ColorsInput,
+  FloatsInput,
+  IntsInput,
   Box,
   HBox,
   VBox,

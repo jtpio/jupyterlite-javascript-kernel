@@ -115,7 +115,8 @@ export class JavaScriptRuntimeEvaluator {
       onTargetRegistered: options.onCommTargetRegistered,
       reportError: (error, inPromise) => this.reportUncaught(error, inPromise),
       mimeBundle: value => this._mimeBundle(value),
-      router: this._router
+      router: this._router,
+      globalScope: this._globalScope
     });
     registerWidgetControlTarget(this._commManager);
     this._display = createDisplay({

@@ -3,7 +3,7 @@
 
 import type { CommManager, IComm } from '../comm';
 import type { IParentMessage } from '../output_router';
-import { isPlainObject, toBytes } from '../utils';
+import { isPlainObject, isUint8Array, toBytes } from '../utils';
 
 import {
   CONTROLS_MODULE,
@@ -369,7 +369,8 @@ export class Widget {
       putBuffers(
         state,
         (data.buffer_paths as BufferPath[] | undefined) ?? [],
-        buffers
+        buffers,
+        this._manager.realmConstructor('Uint8Array')
       );
       const received: Record<string, unknown> = {};
       for (const [key, val] of Object.entries(state)) {
@@ -491,6 +492,27 @@ export class Widget {
 
   protected _deserializeProperty(_name: string, value: unknown): unknown {
     return value;
+  }
+
+  /**
+   * The bytes of a binary value (ArrayBuffer, typed array) as a Uint8Array
+   * of the realm of the cells, sharing its memory, or null for another
+   * value. A Uint8Array of any realm is kept.
+   */
+  protected _toBytes(value: unknown): Uint8Array | null {
+    if (isUint8Array(value)) {
+      return value;
+    }
+    const bytes = toBytes(value);
+    if (bytes === null) {
+      return null;
+    }
+    const RealmUint8Array = this._manager.realmConstructor('Uint8Array');
+    return new RealmUint8Array(
+      bytes.buffer,
+      bytes.byteOffset,
+      bytes.byteLength
+    );
   }
 
   /**
@@ -727,12 +749,14 @@ function removeBuffers(state: Record<string, unknown>): ISerializedState {
 
 /**
  * Put the buffers of a message of the frontend in its state, at their paths,
- * as bytes.
+ * as bytes, like the contents of the files of a FileUpload at
+ * `['value', 0, 'content']`.
  */
 function putBuffers(
   state: Record<string, unknown>,
   bufferPaths: BufferPath[],
-  buffers?: ArrayBuffer[]
+  buffers: ArrayBuffer[] | undefined,
+  Bytes: Uint8ArrayConstructor
 ): void {
   bufferPaths.forEach((path, i) => {
     const buffer = buffers?.[i];
@@ -752,9 +776,7 @@ function putBuffers(
     }
     const key = path[path.length - 1];
     if (typeof target === 'object' && target !== null && key !== '__proto__') {
-      (target as Record<string | number, unknown>)[key] = new Uint8Array(
-        buffer
-      );
+      (target as Record<string | number, unknown>)[key] = new Bytes(buffer);
     }
   });
 }

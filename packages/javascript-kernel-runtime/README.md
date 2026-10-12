@@ -681,6 +681,24 @@ A widget class, like a custom model, describes its state with:
   the manager of this one
 - `send(content, buffers?)` and `onMsg(callback)` / `offMsg(callback)`, for
   the custom messages of the model in the frontend (`msg:custom`)
+- `_serializeProperty(name, value)` and `_deserializeProperty(name, value)`,
+  which turn a value of the state into its JSON for the frontend and back,
+  like the `Date` of a `DatePicker` and its `{ year, month, date }`. The
+  binary values (ArrayBuffer, typed arrays) can be nested in the arrays and
+  plain objects of the serialized state, like the contents of the files of a
+  `FileUpload` at `['value', 0, 'content']`: they are sent as buffers, with
+  their paths in `buffer_paths`, and the buffers of the frontend are put back
+  at their paths as `Uint8Array`s
+- `_toBytes(value)`, the bytes of a binary value as a `Uint8Array` of the
+  realm of the cells, or null
+
+The values the widgets create for the cells, like the dates of the date
+pickers and the bytes of the frontend, are created with the constructors of
+the realm of the cells, `commManager.realmConstructor('Date')` and
+`realmConstructor('Uint8Array')`, from the `globalScope` option of the
+`CommManager` (the evaluator passes its own), so that `value instanceof Date`
+holds in the cells when the runtime runs in another realm, like the page of
+an iframe kernel.
 
 `DOMWidget` is in `widgets/widget_dom.ts`, apart from `Widget` in
 `widgets/widget.ts`, since it uses `Layout` and `Style`, which extend

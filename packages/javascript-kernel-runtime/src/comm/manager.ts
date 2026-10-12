@@ -6,7 +6,18 @@ import type { IMimeBundle } from '@jupyterlab/nbformat';
 import { hostConsole, uuid } from '../env';
 import { OutputRouter, type IParentMessage } from '../output_router';
 import type { RuntimeOutputHandler, RuntimeOutputMessage } from '../protocol';
-import { isThenable } from '../utils';
+import { isThenable, safe } from '../utils';
+
+/**
+ * The constructors of the values the widgets give to the cells, like the
+ * date of a date picker, which can come from the realm of the cells.
+ */
+const REALM_CONSTRUCTORS = { Date, Uint8Array };
+
+/**
+ * The name of a constructor of the realm of the cells.
+ */
+export type RealmConstructorName = keyof typeof REALM_CONSTRUCTORS;
 
 /**
  * Represents an open comm channel.
@@ -50,6 +61,7 @@ export class CommManager {
     this._onTargetRegistered = options.onTargetRegistered;
     this._reportError = options.reportError;
     this._mimeBundle = options.mimeBundle;
+    this._globalScope = options.globalScope ?? null;
     this.router = options.router ?? new OutputRouter();
   }
 
@@ -144,6 +156,22 @@ export class CommManager {
    */
   unregisterWidget(commId: string): void {
     this._widgets.delete(commId);
+  }
+
+  /**
+   * A constructor of the realm running the cells, like its `Date`, for the
+   * values the widgets give to the cells, so that `value instanceof Date`
+   * holds there, also when the runtime runs in another realm, like the page
+   * of an iframe. Defaults to the one of the runtime.
+   *
+   * @internal
+   */
+  realmConstructor<K extends RealmConstructorName>(
+    name: K
+  ): (typeof REALM_CONSTRUCTORS)[K] {
+    const scope = this._globalScope;
+    const ctor = scope ? safe(() => scope[name]) : undefined;
+    return typeof ctor === 'function' ? ctor : REALM_CONSTRUCTORS[name];
   }
 
   /**
@@ -404,6 +432,7 @@ export class CommManager {
   private _onTargetRegistered?: (targetName: string) => void;
   private _reportError?: (error: unknown, inPromise: boolean) => void;
   private _mimeBundle?: (value: unknown) => IMimeBundle;
+  private _globalScope: Record<string, any> | null;
   private _comms = new Map<string, IComm>();
   private _targets = new Map<string, CommTargetHandler>();
   private _widgets = new Map<string, unknown>();
@@ -441,5 +470,12 @@ export namespace CommManager {
      * Defaults to a new one.
      */
     router?: OutputRouter;
+
+    /**
+     * The global object of the realm running the cells, whose constructors
+     * create the values the widgets give to the cells, like the dates of the
+     * date pickers. Defaults to the realm of the runtime.
+     */
+    globalScope?: Record<string, any>;
   }
 }

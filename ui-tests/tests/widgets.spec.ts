@@ -608,6 +608,263 @@ for (const kernel of KERNELS) {
       ).toHaveText('message click\n');
     });
 
+    test('Upload files to the kernel with a FileUpload', async ({ page }) => {
+      const index = await runCode(
+        page,
+        [
+          'const { FileUpload } = Jupyter.widgets;',
+          'const up = new FileUpload({ accept: ".csv" });',
+          'up.observe(({ new: files }) => console.log(`Uploaded ${files.map(file => file.name)}`), "value");',
+          'up'
+        ].join('\n')
+      );
+      const widget = await getOutputs(page, index);
+      const button = widget.getByRole('button', { name: 'Upload (0)' });
+
+      // Pick a CSV file with the button
+      const chooser = page.waitForEvent('filechooser');
+      await button.click();
+      await (
+        await chooser
+      ).setFiles({
+        name: 'data.csv',
+        mimeType: 'text/csv',
+        buffer: Buffer.from('city,people\nParis,2100000\n')
+      });
+      await expect(
+        widget.getByRole('button', { name: 'Upload (1)' })
+      ).toBeVisible();
+      await expect(
+        await getOutputs(page, index, 'application/vnd.jupyter.stdout')
+      ).toHaveText('Uploaded data.csv\n');
+
+      // The kernel has its name, type, size, date and bytes
+      let cell = await runCode(
+        page,
+        [
+          'const [file] = up.value;',
+          'console.log(new TextDecoder().decode(file.content));',
+          'console.log(file.name, file.type, file.size, file.content instanceof Uint8Array, file.last_modified instanceof Date);'
+        ].join('\n')
+      );
+      await expect(
+        await getOutputs(page, cell, 'application/vnd.jupyter.stdout')
+      ).toHaveText(
+        'city,people\nParis,2100000\n\ndata.csv text/csv 26 true true\n'
+      );
+
+      // The kernel can forget the files
+      cell = await runCode(page, 'up.value = [];');
+      await expect(
+        widget.getByRole('button', { name: 'Upload (0)' })
+      ).toBeVisible();
+    });
+
+    test.describe('Away from UTC', () => {
+      // A time zone with a half-hour offset, so that a mix-up of the UTC and
+      // local fields of the dates shows
+      test.use({ timezoneId: 'Asia/Kolkata' });
+
+      test('Pick dates and times', async ({ page }) => {
+        const index = await runCode(
+          page,
+          [
+            'const { DatePicker, DatetimePicker, NaiveDatetimePicker, TimePicker, VBox } = Jupyter.widgets;',
+            'const day = new DatePicker({ value: new Date("2024-05-01"), description: "Day" });',
+            'const time = new TimePicker({ value: "09:30", description: "Time" });',
+            'const meeting = new DatetimePicker({ value: new Date("2024-05-01T09:30:00Z"), description: "Meeting" });',
+            'const naive = new NaiveDatetimePicker({ value: new Date("2024-05-01T09:30"), description: "Naive" });',
+            'new VBox({ children: [day, time, meeting, naive] })'
+          ].join('\n')
+        );
+        const widget = await getOutputs(page, index);
+        const dayInput = widget.locator('input[type="date"]');
+        const timeInput = widget.locator('input[type="time"]');
+        // The pickers of a date and a time show the local time
+        const meetingInput = widget.getByLabel('Meeting');
+        const naiveInput = widget.getByLabel('Naive');
+        await expect(dayInput).toHaveValue('2024-05-01');
+        await expect(timeInput).toHaveValue('09:30');
+        await expect(meetingInput).toHaveValue('2024-05-01T15:00');
+        await expect(naiveInput).toHaveValue('2024-05-01T09:30');
+
+        // From the frontend to the kernel
+        await dayInput.fill('2024-06-15');
+        await timeInput.fill('14:45');
+        await meetingInput.fill('2024-06-15T14:45');
+        await naiveInput.fill('2024-06-15T08:00');
+        let cell = await runCode(
+          page,
+          '`${day.value.toISOString().slice(0, 10)} ${day.value instanceof Date} ${time.value}`'
+        );
+        expect(await page.notebook.getCellTextOutput(cell)).toEqual([
+          "'2024-06-15 true 14:45'"
+        ]);
+        cell = await runCode(
+          page,
+          '`${meeting.value.toISOString()} ${naive.value.toISOString()} ${naive.value.getHours()}`'
+        );
+        expect(await page.notebook.getCellTextOutput(cell)).toEqual([
+          "'2024-06-15T09:15:00.000Z 2024-06-15T02:30:00.000Z 8'"
+        ]);
+
+        // From the kernel to the frontend, kept in the bounds
+        await runCode(
+          page,
+          [
+            'day.value = "2025-01-02";',
+            'time.value = "18:05:30";',
+            'meeting.value = "2025-01-02T18:00:00Z";',
+            'naive.value = new Date(2025, 0, 2, 7, 5);'
+          ].join('\n')
+        );
+        await expect(dayInput).toHaveValue('2025-01-02');
+        await expect(timeInput).toHaveValue('18:05:30');
+        await expect(meetingInput).toHaveValue('2025-01-02T23:30');
+        await expect(naiveInput).toHaveValue('2025-01-02T07:05');
+        cell = await runCode(
+          page,
+          'day.min = new Date("2025-02-01");\nday.value.toISOString().slice(0, 10)'
+        );
+        expect(await page.notebook.getCellTextOutput(cell)).toEqual([
+          "'2025-02-01'"
+        ]);
+        await expect(dayInput).toHaveValue('2025-02-01');
+      });
+    });
+
+    test('Add tags in a TagsInput', async ({ page }) => {
+      const index = await runCode(
+        page,
+        [
+          'const { TagsInput } = Jupyter.widgets;',
+          'const tags = new TagsInput({ value: ["red"] });',
+          'tags'
+        ].join('\n')
+      );
+      const widget = await getOutputs(page, index);
+      // The input of the new tags is styled like a tag
+      const tag = widget.locator('.jupyter-widget-tag:not(input)');
+      await expect(tag).toHaveText(['red']);
+
+      // Type a tag, and leave the input with Tab: Chromium does not commit
+      // the inputs with suggestions, like this one, with Enter
+      await widget.locator('.jupyter-widget-tagsinput').click();
+      const input = widget.locator('input.jupyter-widget-taginput');
+      await input.pressSequentially('green');
+      await input.press('Tab');
+      await expect(tag).toHaveText(['red', 'green']);
+      let cell = await runCode(page, 'tags.value.join(", ")');
+      expect(await page.notebook.getCellTextOutput(cell)).toEqual([
+        "'red, green'"
+      ]);
+
+      // From the kernel to the frontend, with the allowed tags only
+      await runCode(page, 'tags.value = ["blue"];');
+      await expect(tag).toHaveText(['blue']);
+      cell = await runCode(
+        page,
+        'tags.allowed_tags = ["red", "green", "blue"];\ntags.value = ["pink"];'
+      );
+      await expect(
+        await getOutputs(page, cell, 'application/vnd.jupyter.stderr')
+      ).toContainText('Tag value pink is not allowed');
+    });
+
+    test('Add numbers and colors in their tags inputs', async ({ page }) => {
+      const index = await runCode(
+        page,
+        [
+          'const { ColorsInput, FloatsInput, IntsInput, VBox } = Jupyter.widgets;',
+          'const ints = new IntsInput({ value: [1, 2], max: 10 });',
+          'const floats = new FloatsInput({ value: ["1.5", 2] });',
+          'const colors = new ColorsInput({ value: ["red", "#00ff00"] });',
+          'new VBox({ children: [ints, floats, colors] })'
+        ].join('\n')
+      );
+      const widget = await getOutputs(page, index);
+      const intsInput = widget.locator('.jupyter-widget-tagsinput').nth(0);
+      const intTags = intsInput.locator('.jupyter-widget-tag:not(input)');
+      // The numbers are shown in their format, and the strings are numbers
+      await expect(intTags).toHaveText(['1', '2']);
+      await expect(
+        widget
+          .locator('.jupyter-widget-tagsinput')
+          .nth(1)
+          .locator('.jupyter-widget-tag:not(input)')
+      ).toHaveText(['1.5', '2.0']);
+      await expect(widget.locator('.jupyter-widget-colortag')).toHaveCount(2);
+      let cell = await runCode(page, 'floats.value.map(v => v * 2).join(", ")');
+      expect(await page.notebook.getCellTextOutput(cell)).toEqual(["'3, 4'"]);
+
+      // Type a number
+      await intsInput.click();
+      const input = intsInput.locator('input.jupyter-widget-taginput');
+      await input.pressSequentially('7');
+      await input.press('Tab');
+      await expect(intTags).toHaveText(['1', '2', '7']);
+      cell = await runCode(page, 'ints.value.reduce((a, b) => a + b)');
+      expect(await page.notebook.getCellTextOutput(cell)).toEqual(['10']);
+
+      // The numbers are kept in their bounds
+      cell = await runCode(page, 'ints.value = [11];');
+      await expect(
+        await getOutputs(page, cell, 'application/vnd.jupyter.stderr')
+      ).toContainText('RangeError: Tag value 11 should be <= 10');
+      await expect(intTags).toHaveText(['1', '2', '7']);
+    });
+
+    test('Play audio from its bytes, and show videos and images from their URL', async ({
+      page
+    }) => {
+      // Half a second of silence, in a WAV file of 8-bit samples at 8 kHz
+      const index = await runCode(
+        page,
+        [
+          'const { Audio, Image, Video, VBox } = Jupyter.widgets;',
+          'const wav = new Uint8Array(44 + 4000);',
+          'const view = new DataView(wav.buffer);',
+          'const text = (offset, s) => [...s].forEach((c, i) => { wav[offset + i] = c.charCodeAt(0); });',
+          'text(0, "RIFF"); view.setUint32(4, 36 + 4000, true); text(8, "WAVE");',
+          'text(12, "fmt "); view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);',
+          'view.setUint32(24, 8000, true); view.setUint32(28, 8000, true); view.setUint16(32, 1, true); view.setUint16(34, 8, true);',
+          'text(36, "data"); view.setUint32(40, 4000, true); wav.fill(128, 44);',
+          'const audio = new Audio({ value: wav, format: "wav", autoplay: false });',
+          'const video = Video.fromUrl("https://example.com/clip.mp4", { autoplay: false, loop: false });',
+          'const image = Image.fromUrl("https://example.com/cat.png", { width: "80" });',
+          'new VBox({ children: [audio, video, image] })'
+        ].join('\n')
+      );
+      const widget = await getOutputs(page, index);
+      const player = widget.locator('audio');
+      await expect(player).toHaveAttribute('controls', '');
+      await expect
+        .poll(() =>
+          player.evaluate(element => (element as HTMLAudioElement).duration)
+        )
+        .toBe(0.5);
+      const movie = widget.locator('video');
+      await expect(movie).toHaveAttribute(
+        'src',
+        'https://example.com/clip.mp4'
+      );
+      await expect(movie).not.toHaveAttribute('loop');
+      const picture = widget.locator('img');
+      await expect(picture).toHaveAttribute(
+        'src',
+        'https://example.com/cat.png'
+      );
+      await expect(picture).toHaveAttribute('width', '80');
+
+      const cell = await runCode(
+        page,
+        '`${audio.value === wav} ${video.format} ${video.autoplay} ${new TextDecoder().decode(image.value)}`'
+      );
+      expect(await page.notebook.getCellTextOutput(cell)).toEqual([
+        "'true url false https://example.com/cat.png'"
+      ]);
+    });
+
     test('Show the widgets again when the notebook is reopened', async ({
       page
     }) => {
@@ -615,12 +872,13 @@ for (const kernel of KERNELS) {
       const index = await runCode(
         page,
         [
-          'const { HBox, Image, IntSlider } = Jupyter.widgets;',
+          'const { DatePicker, HBox, Image, IntSlider } = Jupyter.widgets;',
           'const png = "iVBORw0KGgoAAAANSUhEUgAAAAMAAAACCAIAAAASFvFNAAAAEElEQVR4nGP4z8AAQQxwFgBB0gX7h/C5SAAAAABJRU5ErkJggg==";',
           'const bytes = Uint8Array.from(atob(png), c => c.charCodeAt(0));',
           'const slider = new IntSlider({ value: 5, max: 10, description: "Level" });',
           'const image = new Image({ value: bytes, format: "png", width: "60" });',
-          'new HBox({ children: [slider, image] })'
+          'const day = new DatePicker({ value: new Date("2024-05-01") });',
+          'new HBox({ children: [slider, image, day] })'
         ].join('\n')
       );
       let widget = await getOutputs(page, index);
@@ -653,6 +911,9 @@ for (const kernel of KERNELS) {
           img.evaluate(element => (element as HTMLImageElement).naturalWidth)
         )
         .toBe(3);
+      await expect(widget.locator('input[type="date"]')).toHaveValue(
+        '2024-05-01'
+      );
 
       // The slider still drives the value in the kernel, and the other way
       await widget.getByRole('slider').click();

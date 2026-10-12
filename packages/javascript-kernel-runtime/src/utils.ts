@@ -125,6 +125,51 @@ export function toBytes(data: unknown): Uint8Array | null {
   return null;
 }
 
+const typedArrayTag = Object.getOwnPropertyDescriptor(
+  Object.getPrototypeOf(Uint8Array.prototype),
+  Symbol.toStringTag
+)!.get!;
+
+/**
+ * Whether a value is a Uint8Array, from any realm.
+ */
+export function isUint8Array(value: unknown): value is Uint8Array {
+  return safe(() => typedArrayTag.call(value) === 'Uint8Array', false);
+}
+
+/**
+ * Encode a string in UTF-8, like TextEncoder: the lone surrogates become
+ * U+FFFD.
+ */
+export function encodeUtf8(text: string): Uint8Array {
+  const bytes: number[] = [];
+  for (const char of text) {
+    let codePoint = char.codePointAt(0)!;
+    if (codePoint >= 0xd800 && codePoint <= 0xdfff) {
+      codePoint = 0xfffd;
+    }
+    if (codePoint < 0x80) {
+      bytes.push(codePoint);
+    } else if (codePoint < 0x800) {
+      bytes.push(0xc0 | (codePoint >> 6), 0x80 | (codePoint & 0x3f));
+    } else if (codePoint < 0x10000) {
+      bytes.push(
+        0xe0 | (codePoint >> 12),
+        0x80 | ((codePoint >> 6) & 0x3f),
+        0x80 | (codePoint & 0x3f)
+      );
+    } else {
+      bytes.push(
+        0xf0 | (codePoint >> 18),
+        0x80 | ((codePoint >> 12) & 0x3f),
+        0x80 | ((codePoint >> 6) & 0x3f),
+        0x80 | (codePoint & 0x3f)
+      );
+    }
+  }
+  return Uint8Array.from(bytes);
+}
+
 const arrayBufferByteLength = Object.getOwnPropertyDescriptor(
   ArrayBuffer.prototype,
   'byteLength'

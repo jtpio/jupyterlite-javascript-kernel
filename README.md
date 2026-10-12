@@ -418,7 +418,7 @@ display(out);
 - `out.appendStdout(text)` and `out.appendStderr(text)` add some text, and `out.appendDisplayData(value, metadata?)` adds a value shown like `display()` shows it, like a widget, or a MIME bundle like `{ 'text/html': '<b>Hi</b>' }`
 - `out.clearOutput({ wait })` removes the outputs of the widget, with `wait` when the next output arrives
 
-When a notebook is closed and opened again while its kernel keeps running, like with File > Close Tab and a double-click in the file browser, its widgets show again, with their current values, and keep syncing with the kernel: the kernel answers the widget manager of the notebook with the state of the live widgets, including the bytes of the `Image` widgets. The widgets are lost when the kernel restarts.
+When a notebook is closed and opened again while its kernel keeps running, like with File > Close Tab and a double-click in the file browser, its widgets show again, with their current values, and keep syncing with the kernel: the kernel answers the widget manager of the notebook with the state of the live widgets, including the bytes of the `Image`, `Video` and `Audio` widgets and of the uploaded files. The widgets are lost when the kernel restarts.
 
 Widgets also work when JupyterLite is served over plain http, for example on a LAN, where the browser hides some APIs like `crypto.randomUUID` (only `prompt()` in `JavaScript (Web Worker)` needs the service worker, which needs `https` or `localhost`).
 
@@ -449,7 +449,7 @@ size;
 
 ### Layout and style
 
-Every widget with a view has a `layout`, and a `style` of its kind, like a `ButtonStyle` for a `Button` (the boxes, `Image` and `Output` have no style). Their properties, like the CSS properties of the layout, can be set when the widget is created, as plain objects, or later:
+Every widget with a view has a `layout`, and a `style` of its kind, like a `ButtonStyle` for a `Button` (the boxes, the media widgets `Image`, `Video` and `Audio`, and `Output` have no style). Their properties, like the CSS properties of the layout, can be set when the widget is created, as plain objects, or later:
 
 ```javascript
 const { Button, IntSlider } = Jupyter.widgets;
@@ -476,6 +476,78 @@ slider;
 ### Values in their bounds
 
 Like ipywidgets, the numeric widgets keep their value in their bounds, so the value in the kernel is the one the widget shows: `new IntSlider({ value: 150 })` has the value 100, and lowering `max` lowers the value. The bounds of the constructor are applied first, so `new IntSlider({ value: 150, max: 200 })` keeps 150. The integer widgets round their values (`slider.value = 3.7` gives 4), and the widgets throw a `RangeError` when `min > max` (`setting min > max`), or when the lower value of a range slider is above the upper one.
+
+### Files, dates and tags
+
+A `FileUpload` button brings local files into the kernel, like a CSV file. Its `value` is the list of the picked files, each one with its `name`, `type`, `size`, `last_modified` date and `content`, the bytes of the file as a `Uint8Array`:
+
+```javascript
+const { FileUpload } = Jupyter.widgets;
+
+const upload = new FileUpload({ accept: '.csv', multiple: false });
+upload.observe(({ new: files }) => {
+  for (const file of files) {
+    const text = new TextDecoder().decode(file.content);
+    console.log(`${file.name}: ${text.split('\n').length} lines`);
+  }
+}, 'value');
+upload;
+```
+
+- the button shows the number of picked files, like `Upload (1)`; `accept` filters the files, like `.csv,.txt` or `image/*`, and `multiple` picks several at once
+- `upload.value = []` forgets the files
+
+The date and time pickers show the inputs of the browser:
+
+```javascript
+const { DatePicker, TimePicker, DatetimePicker, VBox } = Jupyter.widgets;
+
+const day = new DatePicker({
+  description: 'Day',
+  value: new Date('2024-05-01')
+});
+const time = new TimePicker({ description: 'Time', value: '09:30' });
+const meeting = new DatetimePicker({
+  description: 'Meeting',
+  value: new Date()
+});
+new VBox({ children: [day, time, meeting] });
+```
+
+- the `value` of a `DatePicker` is a `Date` at midnight UTC, like `new Date('2024-05-01')`, so `day.value.toISOString().slice(0, 10)` is the picked date. Another `Date` gives the date of its day in the time zone of the browser, like `new Date()` for today
+- the `value` of a `DatetimePicker` is a `Date`, shown in the time zone of the browser. The `NaiveDatetimePicker` sends its fields to the frontend without a time zone, like the naive datetimes of Python
+- the `value` of a `TimePicker` is a string, like `'09:30'`, with the seconds and the milliseconds when they are not zero, like `'09:30:15.250'`, as the time inputs of the browsers show it
+- the values are null when nothing is picked. A string or a number given as a date is turned into a `Date`. Like the numeric widgets, `min` and `max` keep the value in their bounds, and a `RangeError` is thrown when `min > max`. `step` is in days for a `DatePicker`, in seconds for a `TimePicker`, or `'any'`
+- the dates are `Date` objects of the cells, so `day.value instanceof Date` holds in `JavaScript (IFrame)` too
+
+`TagsInput`, `ColorsInput`, `IntsInput` and `FloatsInput` edit a list of strings, colors or numbers: type a tag in the widget to add it, or click its cross to remove it:
+
+```javascript
+const { TagsInput, IntsInput } = Jupyter.widgets;
+
+const fruits = new TagsInput({
+  value: ['apple'],
+  allowed_tags: ['apple', 'banana', 'cherry'],
+  allow_duplicates: false
+});
+fruits.observe(({ new: tags }) => console.log(tags), 'value');
+display(fruits);
+display(new IntsInput({ value: [1, 2, 3], min: 0, max: 10 }));
+```
+
+- `allowed_tags` are suggested while typing, and the other tags are rejected, also when the kernel sets them (`Tag value pink is not allowed`), and the numbers out of `min` and `max` throw a `RangeError`
+- `tag_style` styles the tags (`'primary'`, `'success'`, `'info'`, `'warning'`, `'danger'`), and `format` shows the numbers, like `'.2f'`
+
+`Video` and `Audio` play the bytes of a video or a sound, like `Image` shows the bytes of an image, with `autoplay`, `loop` and `controls`, all true by default. `Image.fromUrl(url)`, `Video.fromUrl(url)` and `Audio.fromUrl(url)` show the media of a URL instead:
+
+```javascript
+const { Video } = Jupyter.widgets;
+
+Video.fromUrl('https://example.com/movie.mp4', {
+  autoplay: false,
+  width: '320'
+});
+```
 
 ### Buttons and custom messages
 
@@ -513,8 +585,11 @@ counter;
 - **String**: `Text`, `Textarea`, `Password`, `Combobox`
 - **Display**: `Label`, `HTML`, `HTMLMath`, `Output`
 - **Button**: `Button` (with `.onClick()` handler, called with the button)
-- **Color**: `ColorPicker`
-- **Media**: `Image` (from bytes, sent as binary buffers)
+- **Color**: `ColorPicker`, `ColorsInput`
+- **Date and time**: `DatePicker`, `TimePicker`, `DatetimePicker`, `NaiveDatetimePicker`
+- **Tags**: `TagsInput`, `ColorsInput`, `IntsInput`, `FloatsInput`
+- **Files**: `FileUpload` (the contents of the files are sent as binary buffers)
+- **Media**: `Image`, `Video`, `Audio` (from bytes, sent as binary buffers, or from a URL with `fromUrl()`)
 - **Layout / Style**: `Layout`, `DescriptionStyle`, `SliderStyle`, `ProgressStyle`, `ButtonStyle`, `CheckboxStyle`, `ToggleButtonStyle`, `ToggleButtonsStyle`, `TextStyle`, `HTMLStyle`, `HTMLMathStyle`, `LabelStyle`
 - **Containers**: `Box`, `HBox`, `VBox`, `GridBox`, `Accordion`, `Tab`, `Stack`
 - **Helpers**: `jslink`, `jsdlink`
@@ -540,7 +615,15 @@ The widget runtime is split into files that roughly follow the upstream `ipywidg
 | `packages/controls/src/widget_box.ts`                | `packages/javascript-kernel-runtime/src/widgets/widget_box.ts`                | Ported | Box, HBox, VBox, GridBox                                             |
 | `packages/controls/src/widget_selectioncontainer.ts` | `packages/javascript-kernel-runtime/src/widgets/widget_selectioncontainer.ts` | Ported | Accordion, Tab, Stack                                                |
 | `packages/controls/src/widget_link.ts`               | `packages/javascript-kernel-runtime/src/widgets/widget_link.ts`               | Ported | `jslink`, `jsdlink`, `Link`, and `DirectionalLink`                   |
-| `packages/controls/src/widget_image.ts`              | `packages/javascript-kernel-runtime/src/widgets/widget_image.ts`              | Ported | `Image`; `Video` and `Audio` are not ported yet                      |
+| `packages/controls/src/widget_image.ts`              | `packages/javascript-kernel-runtime/src/widgets/widget_media.ts`              | Ported | `Image`, with `Video` and `Audio` on the same base, like Python      |
+| `packages/controls/src/widget_video.ts`              | `packages/javascript-kernel-runtime/src/widgets/widget_media.ts`              | Ported | `Video`                                                              |
+| `packages/controls/src/widget_audio.ts`              | `packages/javascript-kernel-runtime/src/widgets/widget_media.ts`              | Ported | `Audio`                                                              |
+| `packages/controls/src/widget_upload.ts`             | `packages/javascript-kernel-runtime/src/widgets/widget_upload.ts`             | Ported | `FileUpload`, with the contents of the files in binary buffers       |
+| `packages/controls/src/widget_date.ts`               | `packages/javascript-kernel-runtime/src/widgets/widget_date.ts`               | Ported | `DatePicker`, with `Date` values                                     |
+| `packages/controls/src/widget_datetime.ts`           | `packages/javascript-kernel-runtime/src/widgets/widget_date.ts`               | Ported | `DatetimePicker` and `NaiveDatetimePicker`, with `Date` values       |
+| `packages/controls/src/widget_time.ts`               | `packages/javascript-kernel-runtime/src/widgets/widget_date.ts`               | Ported | `TimePicker`, with string values like `'09:30'`                      |
+| `packages/controls/src/widget_tagsinput.ts`          | `packages/javascript-kernel-runtime/src/widgets/widget_tagsinput.ts`          | Ported | `TagsInput`, `ColorsInput`, `IntsInput`, `FloatsInput`               |
+| `packages/controls/src/widget_controller.ts`         |                                                                               | Not    | `Controller`: its frontend opens the comms of its buttons and axes   |
 
 > **Note:** `jupyterlab-widgets`, `@jupyter-widgets/controls`, and `@jupyter-widgets/output` must be available in the JupyterLite deployment for the full widget set to render.
 
