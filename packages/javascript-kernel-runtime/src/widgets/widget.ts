@@ -2,6 +2,7 @@
 // Distributed under the terms of the Modified BSD License.
 
 import type { CommManager, IComm } from '../comm';
+import type { IParentMessage } from '../output_router';
 import { toBytes } from '../utils';
 
 import {
@@ -138,12 +139,18 @@ export class Widget {
    * - `'change:propName'` - property changed `(newValue, oldValue)`
    * - `'change'` - any property changed `(changes)`
    * - `'close'` - comm closed
+   *
+   * When the frontend triggers the event, like when the user moves a slider,
+   * the outputs of the callback go to the cell which registered it.
    */
   on(event: string, callback: WidgetEventCallback): this {
     if (!this._listeners.has(event)) {
-      this._listeners.set(event, new Set());
+      this._listeners.set(event, new Map());
     }
-    this._listeners.get(event)!.add(callback);
+    const listeners = this._listeners.get(event)!;
+    if (!listeners.has(callback)) {
+      listeners.set(callback, this._manager.router.context());
+    }
     return this;
   }
 
@@ -320,8 +327,8 @@ export class Widget {
    * promises they return, are shown in the outputs.
    */
   protected _trigger(event: string, ...args: unknown[]): void {
-    for (const cb of this._listeners.get(event) ?? []) {
-      this._manager.invokeCallback(() => cb(...args));
+    for (const [cb, parent] of this._listeners.get(event) ?? []) {
+      this._manager.invokeCallback(() => cb(...args), parent);
     }
   }
 
@@ -393,7 +400,7 @@ export class Widget {
   protected _comm: IComm;
   protected _manager: CommManager;
   protected _state: Record<string, unknown>;
-  private _listeners: Map<string, Set<WidgetEventCallback>>;
+  private _listeners: Map<string, Map<WidgetEventCallback, IParentMessage>>;
   private _observerWrappers: Map<
     WidgetObserveCallback,
     Map<string, WidgetEventCallback>

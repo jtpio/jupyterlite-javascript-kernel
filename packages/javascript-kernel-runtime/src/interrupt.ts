@@ -476,20 +476,26 @@ export namespace LoopGuard {
 /**
  * The timers created by the code of the cells, to clear them when the
  * kernel is interrupted: setTimeout and setInterval of the global scope are
- * wrapped to keep their ids. requestAnimationFrame is left alone, it drives
- * the drawing loops of libraries like p5.js.
+ * wrapped to keep their ids. The callbacks of the timers, and of
+ * requestAnimationFrame, run in the context of the code which created them,
+ * like the cell whose outputs they go to. requestAnimationFrame is not
+ * cleared, it drives the drawing loops of libraries like p5.js.
  */
 export class TimerRegistry {
   /**
    * Wrap the timers of a global scope. The timers are only tracked once
    * enable() is called.
+   *
+   * @param context - The context of the code, captured when a timer is
+   * created and entered while its callback runs.
    */
-  install(scope: Record<string, any>): void {
+  install(scope: Record<string, any>, context?: TimerRegistry.IContext): void {
     this.restore();
     const setTimeout = scope.setTimeout;
     const setInterval = scope.setInterval;
     const clearTimeout = scope.clearTimeout;
     const clearInterval = scope.clearInterval;
+    const requestAnimationFrame = scope.requestAnimationFrame;
     if (
       typeof setTimeout !== 'function' ||
       typeof clearTimeout !== 'function'
@@ -511,15 +517,38 @@ export class TimerRegistry {
       clear.call(scope, id);
     };
     // The callbacks are wrapped in the realm of the cells: the errors they
-    // throw are reported to its global scope
+    // throw are reported to its global scope, after leave()
     const scopeFunction = safe(() => scope.Function);
     const wrapCallback = new (typeof scopeFunction === 'function'
       ? scopeFunction
       : Function)(
       'callback',
-      'fired',
-      'return function () { fired(); return callback.apply(this, arguments); }\n//# sourceURL=__jsKernelTimer__'
-    ) as (callback: unknown, fired: () => void) => unknown;
+      'enter',
+      'leave',
+      'return function () { var previous = enter(); var threw = true; try { var result = callback.apply(this, arguments); threw = false; return result; } finally { leave(previous, threw); } }\n//# sourceURL=__jsKernelTimer__'
+    ) as (
+      callback: unknown,
+      enter: () => unknown,
+      leave: (previous: unknown, threw: boolean) => void
+    ) => unknown;
+    const leave = (previous: unknown, threw: boolean) => {
+      context?.leave(previous, threw);
+    };
+    // Wrap a callback in the context of the code creating it
+    const wrap = (callback: unknown, fired?: () => void): unknown => {
+      if (typeof callback !== 'function') {
+        return callback;
+      }
+      const captured = context?.capture();
+      return wrapCallback(
+        callback,
+        () => {
+          fired?.();
+          return context?.enter(captured);
+        },
+        leave
+      );
+    };
 
     scope.setTimeout = function (
       this: unknown,
@@ -529,19 +558,29 @@ export class TimerRegistry {
       // The timer is not live anymore once it fired
       const id: unknown = setTimeout.call(
         scope,
-        typeof callback === 'function'
-          ? wrapCallback(callback, () => live.delete(id))
-          : callback,
+        wrap(callback, () => live.delete(id)),
         ...rest
       );
       track(id, 'timeout');
       return id;
     };
     if (typeof setInterval === 'function') {
-      scope.setInterval = function (this: unknown, ...args: unknown[]) {
-        const id = setInterval.apply(scope, args);
+      scope.setInterval = function (
+        this: unknown,
+        callback: unknown,
+        ...rest: unknown[]
+      ) {
+        const id = setInterval.call(scope, wrap(callback), ...rest);
         track(id, 'interval');
         return id;
+      };
+    }
+    if (context && typeof requestAnimationFrame === 'function') {
+      scope.requestAnimationFrame = function (
+        this: unknown,
+        callback: unknown
+      ) {
+        return requestAnimationFrame.call(scope, wrap(callback));
       };
     }
     scope.clearTimeout = function (this: unknown, id: unknown) {
@@ -609,13 +648,45 @@ export class TimerRegistry {
 }
 
 /**
+ * A namespace for TimerRegistry statics.
+ */
+export namespace TimerRegistry {
+  /**
+   * The context of the code, like the cell its outputs go to, kept for the
+   * callbacks of the timers.
+   */
+  export interface IContext {
+    /**
+     * The current context, when a timer is created.
+     */
+    capture(): unknown;
+
+    /**
+     * Enter a captured context, when the callback of the timer runs.
+     *
+     * @returns The previous context, for leave().
+     */
+    enter(context: unknown): unknown;
+
+    /**
+     * Restore the previous context, when the callback returns.
+     *
+     * @param threw - Whether the callback threw: the error is reported right
+     * after, with the `error` event of the realm.
+     */
+    leave(previous: unknown, threw: boolean): void;
+  }
+}
+
+/**
  * The timer functions wrapped by the registry.
  */
 const TIMER_FUNCTIONS = [
   'setTimeout',
   'setInterval',
   'clearTimeout',
-  'clearInterval'
+  'clearInterval',
+  'requestAnimationFrame'
 ];
 
 /**

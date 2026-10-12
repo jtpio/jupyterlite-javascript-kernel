@@ -112,24 +112,34 @@ export interface IRemoteRuntimeApi {
   isComplete(
     code: string
   ): Promise<KernelMessage.IIsCompleteReplyMsg['content']>;
+  /**
+   * Handle a comm message of the frontend. The outputs captured by an Output
+   * widget, and the comm messages sent by the handler, go to `parentHeader`.
+   * The promise resolves once the kernel handled the outputs of the
+   * synchronous part of the handler: the promises it returns are not
+   * awaited.
+   */
   handleCommOpen(
     commId: string,
     targetName: string,
     data: Record<string, unknown>,
     buffers?: ArrayBuffer[],
-    parentMessageId?: string
+    parentMessageId?: string,
+    parentHeader?: KernelMessage.IHeader
   ): Promise<void>;
   handleCommMsg(
     commId: string,
     data: Record<string, unknown>,
     buffers?: ArrayBuffer[],
-    parentMessageId?: string
+    parentMessageId?: string,
+    parentHeader?: KernelMessage.IHeader
   ): Promise<void>;
   handleCommClose(
     commId: string,
     data: Record<string, unknown>,
     buffers?: ArrayBuffer[],
-    parentMessageId?: string
+    parentMessageId?: string,
+    parentHeader?: KernelMessage.IHeader
   ): Promise<void>;
   /**
    * Interrupt the running cell, if any, and clear the timers of the cells.

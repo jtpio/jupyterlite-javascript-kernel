@@ -11,6 +11,7 @@ export * from './inspect';
 export * from './interrupt';
 export * from './introspection';
 export * from './output_batcher';
+export * from './output_router';
 export * from './protocol';
 export * from './runtime_evaluator';
 export * from './source_edits';

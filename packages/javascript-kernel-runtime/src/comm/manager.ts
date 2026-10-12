@@ -1,8 +1,11 @@
 // Copyright (c) Jupyter Development Team.
 // Distributed under the terms of the Modified BSD License.
 
+import type { IMimeBundle } from '@jupyterlab/nbformat';
+
 import { hostConsole, uuid } from '../env';
-import type { RuntimeOutputHandler } from '../protocol';
+import { OutputRouter, type IParentMessage } from '../output_router';
+import type { RuntimeOutputHandler, RuntimeOutputMessage } from '../protocol';
 import { isThenable } from '../utils';
 
 /**
@@ -46,7 +49,16 @@ export class CommManager {
     this._onOutput = onOutput;
     this._onTargetRegistered = options.onTargetRegistered;
     this._reportError = options.reportError;
+    this._mimeBundle = options.mimeBundle;
+    this.router = options.router ?? new OutputRouter();
   }
+
+  /**
+   * The router of the outputs, which tracks their parent message.
+   *
+   * @internal
+   */
+  readonly router: OutputRouter;
 
   /**
    * Open a new comm channel.
@@ -126,21 +138,34 @@ export class CommManager {
   }
 
   /**
-   * Track the active parent message ID for output capture helpers.
-   *
-   * @internal
-   */
-  setCurrentMessageId(messageId: string | null): void {
-    this._currentMessageId = messageId;
-  }
-
-  /**
-   * The active parent message ID, if any.
+   * The id of the current parent message, if any: the comm message being
+   * handled, or the cell the outputs go to.
    *
    * @internal
    */
   getCurrentMessageId(): string | null {
-    return this._currentMessageId;
+    return this.router.current.id;
+  }
+
+  /**
+   * Send an output message, like the ones of the cells.
+   *
+   * @internal
+   */
+  publish(message: RuntimeOutputMessage): void {
+    this._onOutput(message);
+  }
+
+  /**
+   * The MIME bundle of a value, like display() shows it.
+   *
+   * @internal
+   */
+  mimeBundle(value: unknown): IMimeBundle {
+    if (this._mimeBundle) {
+      return this._mimeBundle(value);
+    }
+    return { 'text/plain': String(value) };
   }
 
   /**
@@ -238,23 +263,33 @@ export class CommManager {
    * than the user code (the page of an iframe), so their errors are caught
    * here rather than by the error listeners of the realm of the user code.
    *
+   * @param parent - The context where the callback was registered: when the
+   * frontend triggers it, its outputs go there.
+   *
    * @returns Whether the callback returned without throwing.
    *
    * @internal
    */
-  invokeCallback(callback: () => unknown): boolean {
-    try {
-      const result = callback();
-      if (isThenable(result)) {
-        result.then(undefined, (error: unknown) => {
-          this.reportError(error, true);
-        });
+  invokeCallback(callback: () => unknown, parent?: IParentMessage): boolean {
+    const invoke = (): boolean => {
+      try {
+        const result = callback();
+        if (isThenable(result)) {
+          // The rejection goes with the outputs of the callback
+          const context = this.router.context();
+          result.then(undefined, (error: unknown) => {
+            this.router.runInScope(context, () => {
+              this.reportError(error, true);
+            });
+          });
+        }
+        return true;
+      } catch (error) {
+        this.reportError(error);
+        return false;
       }
-      return true;
-    } catch (error) {
-      this.reportError(error);
-      return false;
-    }
+    };
+    return parent ? this.router.runCallback(parent, invoke) : invoke();
   }
 
   /**
@@ -353,10 +388,10 @@ export class CommManager {
   private _onOutput: RuntimeOutputHandler;
   private _onTargetRegistered?: (targetName: string) => void;
   private _reportError?: (error: unknown, inPromise: boolean) => void;
+  private _mimeBundle?: (value: unknown) => IMimeBundle;
   private _comms = new Map<string, IComm>();
   private _targets = new Map<string, CommTargetHandler>();
   private _widgets = new Map<string, unknown>();
-  private _currentMessageId: string | null = null;
 }
 
 /**
@@ -379,5 +414,17 @@ export namespace CommManager {
      * show them to the user. Defaults to the console of the host.
      */
     reportError?: (error: unknown, inPromise: boolean) => void;
+
+    /**
+     * The MIME bundle of a value, for Output.appendDisplayData(). Defaults to
+     * its text.
+     */
+    mimeBundle?: (value: unknown) => IMimeBundle;
+
+    /**
+     * The router of the outputs, shared with the timers of the runtime.
+     * Defaults to a new one.
+     */
+    router?: OutputRouter;
   }
 }

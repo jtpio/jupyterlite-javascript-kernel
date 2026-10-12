@@ -121,17 +121,29 @@ const evaluator = new runtime.JavaScriptRuntimeEvaluator({
 The methods of the evaluator:
 
 - `execute(code, executionCount, parentMessageId?, parentHeader?)` runs a
-  cell, and returns a promise of the content of the `execute_reply`. The host
+  cell, and returns a promise of the content of the `execute_reply`. Its
+  outputs go to `parentHeader`, and so do the outputs sent outside of the
+  cells until the next execution, see below. The host
   must run the job queue of the engine until the promise settles: browsers do
   it on their own, QuickJS runs `JS_ExecutePendingJob` in a loop, and
   quickjs-emscripten `runtime.executePendingJobs()`.
 - `complete(code, cursorPos)`, `inspect(code, cursorPos, detailLevel)` and
   `isComplete(code)` are synchronous, and return the content of the replies.
   The cursor positions are in code points, like in the Jupyter protocol.
-- `handleCommOpen(commId, targetName, data, buffers?, parentMessageId?)`,
-  `handleCommMsg(commId, data, buffers?, parentMessageId?)` and
-  `handleCommClose(commId, data, buffers?, parentMessageId?)` handle the comm
-  messages of the frontend.
+- `handleCommOpen(commId, targetName, data, buffers?, parentMessageId?, parentHeader?)`,
+  `handleCommMsg(commId, data, buffers?, parentMessageId?, parentHeader?)`
+  and `handleCommClose(commId, data, buffers?, parentMessageId?, parentHeader?)`
+  handle the comm messages of the frontend, with the id and the header of the
+  message. The handlers run synchronously: the promises they return are not
+  awaited, so a handler which never settles does not block the kernel. The
+  outputs of the handler are sent before the method returns. The method
+  returns a promise which resolves at the next timer of the `scheduler`, once
+  the jobs queued by the handler ran, like the code of an async callback after
+  an `await null`: the host replies to the message after it, so that the
+  frontend still shows the outputs of these jobs captured in an `Output`
+  widget. Without a scheduler, the promise resolves at once: the host runs the
+  jobs of the engine, then calls `flushOutputs()`, which ends the comm
+  request.
 - `flushOutputs()` sends the text written to stdout and stderr and not sent
   yet, see below.
 - `interrupt()` stops the running cell, if any, with a `KeyboardInterrupt`,
@@ -155,14 +167,33 @@ replaced, like an iframe reloaded with `location.reload()`, dispose it and
 create a new one for the new realm.
 
 `onOutput` is called in order, during `execute()` and also later, for the
-outputs of callbacks, timers and widget handlers: the host attaches them to
-its current parent message. The consecutive writes to a stream (the
-`console`, uncaught errors) are merged into one `stream` message, sent:
+outputs of callbacks, timers and widget handlers. Each message has the
+`parentHeader` of the message of the frontend it belongs to, which the host
+publishes it with:
+
+- the outputs of a cell go to its `execute_request`, and so do the outputs
+  sent outside of the cells until the next execution, like after an `await`,
+- the outputs of the callbacks of `setTimeout`, `setInterval` and
+  `requestAnimationFrame` go to the cell which created them: the evaluator
+  wraps these functions of `globalScope`,
+- the outputs of the callbacks of the widgets, like a click handler, go to the
+  cell which registered them, when the frontend triggers them,
+- the comm messages sent by a comm handler, and the outputs it captures in an
+  `Output` widget, go to the comm message, and so do the outputs of the jobs
+  it queued, until the promise of the comm method resolves. Once the host
+  replied, the frontend forgets the comm message: the later outputs of an
+  async callback captured in a comm handler, like after an `await` of a
+  `fetch()`, are added to the `outputs` of the `Output` widget instead.
+
+A message without `parentHeader`, when the evaluator got no header, goes to
+the current parent of the host, usually its last `execute_request`. The
+consecutive writes to a stream (the `console`, uncaught errors) are merged
+into one `stream` message, sent:
 
 - before any other output message, including the comm messages,
 - at the end of `execute()` and of the comm handlers, and before `prompt()`
   asks for input,
-- when the stream or the parent message changes,
+- when the stream or the parent message (the `parentHeader` object) changes,
 - at most `flushInterval` after the first write, with the timers of the
   `scheduler`, or on the next write after `flushInterval`: a long synchronous
   loop then shows its output while it runs, even without timers,
@@ -366,9 +397,37 @@ The runtime exports the parts, for the kernels which compile the cells
 themselves: `LoopGuard` (`fn`, the guard passed to the compiled code,
 `registerSite()`, `beginExecution()`, `race(promise)`, `interrupt()`,
 `endExecution()`, `tripped`, `timeout`, `resetClock()`), `TimerRegistry`
-(`install(scope)`, `enable()`, `clearAll()`, `restore()`), the error names
-`KEYBOARD_INTERRUPT` and `LOOP_TIMEOUT`, and `createRuntimeError(scope, name,
-message)`. The executor instruments the loops when its `loopGuard` is set.
+(`install(scope, context?)`, `enable()`, `clearAll()`, `restore()`), the error
+names `KEYBOARD_INTERRUPT` and `LOOP_TIMEOUT`, and `createRuntimeError(scope,
+name, message)`. The executor instruments the loops when its `loopGuard` is
+set.
+
+The optional `context` of `TimerRegistry.install()`, a
+`TimerRegistry.IContext`, runs the callbacks of the timers in the context of
+the code which created them: `capture()` returns the current context when
+`setTimeout` or `setInterval` is called, `enter(context)` makes it current
+before the callback runs and returns the previous one, and
+`leave(previous, threw)` restores it after the callback. With a context, the
+registry also wraps `requestAnimationFrame`, whose callbacks are not cleared
+by `clearAll()`.
+
+The `OutputRouter` attaches the outputs to their parent message, an
+`IParentMessage` with the `id` and the `header` of a message of the frontend:
+
+- `cell` is the parent of the outputs sent outside of the callbacks, the
+  `execute_request` which ran last, and `current` the parent of the outputs
+  sent now,
+- `runRequest(request, callback)` handles a comm message of the frontend,
+  which stays open until `endRequest(request?)`, when the host replied to it,
+- `context()` returns the parent of the callbacks registered now, for
+  `TimerRegistry.IContext.capture()`, `enter(parent)` and
+  `leave(previous, threw)` run them in it, like `runInScope(parent, callback)`,
+  and `runCallback(parent, callback)` runs a widget callback, in `parent`
+  when the frontend triggered it,
+- `runUncaught(callback)` reports an uncaught error in the parent of the
+  callback which threw it,
+- `route(message)` returns the message with the `parentHeader` of its parent,
+  or `null` when an `Output` widget took it.
 
 ## Tracebacks
 

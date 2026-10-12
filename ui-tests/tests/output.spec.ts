@@ -95,6 +95,40 @@ for (const kernel of KERNELS) {
       );
     });
 
+    test('Print the outputs of a timer in its cell', async ({ page }) => {
+      const index = await runCode(
+        page,
+        [
+          'let ticks = 0;',
+          'let last = Infinity;',
+          'const timer = setInterval(() => {',
+          'console.log(`tick ${++ticks}`);',
+          'if (ticks === last) {',
+          'clearInterval(timer);',
+          'throw new Error("late");',
+          '}',
+          '}, 100);'
+        ].join('\n')
+      );
+      // Stop the interval 3 ticks after this cell
+      const later = await runCode(
+        page,
+        'last = ticks + 3;\nconsole.log(`later ${ticks}`);'
+      );
+      const [text] = await page.notebook.getCellTextOutput(later);
+      const ticks = Number(/later (\d+)/.exec(text)![1]);
+
+      // The interval keeps printing in its cell, with its error
+      const outputArea = await page.notebook.getCellOutputLocator(index);
+      await expect(outputArea!).toContainText(`tick ${ticks + 3}`);
+      await expect(await getOutputs(page, index, STDERR)).toContainText(
+        'Uncaught Error: late'
+      );
+      await expect(await getOutputs(page, later)).toHaveText([
+        `later ${ticks}\n`
+      ]);
+    });
+
     test('Clear with wait', async ({ page }) => {
       const index = await runCode(
         page,

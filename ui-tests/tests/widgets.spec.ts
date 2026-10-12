@@ -152,6 +152,152 @@ for (const kernel of KERNELS) {
       ).toHaveText(['inside\n', 'outside\nafter\n']);
     });
 
+    test('Capture the outputs of a button callback in an Output widget', async ({
+      page
+    }) => {
+      const index = await runCode(
+        page,
+        [
+          'const { Button, Output } = Jupyter.widgets;',
+          'const out = new Output();',
+          'const log = new Button({ description: "Log" });',
+          'log.onClick(out.capture(() => console.log("clicked")));',
+          'const load = new Button({ description: "Load" });',
+          'load.onClick(out.capture(async () => {',
+          'console.log("loading");',
+          'await null;',
+          'console.log("ready");',
+          'await new Promise(resolve => setTimeout(resolve, 200));',
+          'console.log("loaded");',
+          '}));',
+          'display(log);',
+          'display(load);',
+          'out'
+        ].join('\n')
+      );
+      // Another cell runs after
+      const later = await runCode(page, 'console.log("later")');
+      const outputs = await getOutputs(page, index);
+      const widget = outputs.locator('.widget-output');
+
+      await outputs.getByRole('button', { name: 'Log' }).click();
+      await expect(widget).toContainText('clicked');
+
+      // The outputs after an await too
+      await outputs.getByRole('button', { name: 'Load' }).click();
+      await expect(widget).toContainText('loaded');
+      await expect(widget).toHaveText(
+        /^clicked\s+loading\s+ready\s+loaded\s*$/
+      );
+
+      // Only in the widget: the stream outputs of the cell are the ones of
+      // the widget
+      await expect(
+        await getOutputs(page, index, 'application/vnd.jupyter.stdout')
+      ).toHaveText(['clicked\nloading\nready\nloaded\n']);
+      await expect(await getOutputs(page, later)).toHaveText(['later\n']);
+    });
+
+    test('Print the outputs of the widget callbacks in their cell', async ({
+      page
+    }) => {
+      const index = await runCode(
+        page,
+        [
+          'const { Button, IntSlider } = Jupyter.widgets;',
+          'const slider = new IntSlider({ value: 5, description: "Level" });',
+          'slider.observe(change => console.log(`level ${change.new}`), "value");',
+          'const button = new Button({ description: "Hello" });',
+          'button.onClick(() => console.log("hello"));',
+          'display(button);',
+          'slider'
+        ].join('\n')
+      );
+      const later = await runCode(page, 'console.log("later")');
+      const outputs = await getOutputs(page, index);
+
+      await outputs.getByRole('button', { name: 'Hello' }).click();
+      await outputs.getByRole('slider').click();
+      await page.keyboard.press('ArrowRight');
+      await expect(
+        await getOutputs(page, index, 'application/vnd.jupyter.stdout')
+      ).toHaveText(['hello\nlevel 6\n']);
+      await expect(await getOutputs(page, later)).toHaveText(['later\n']);
+
+      // Called by the code of a cell, the callback prints in that cell
+      const set = await runCode(page, 'slider.value = 8;');
+      await expect(await getOutputs(page, set)).toHaveText(['level 8\n']);
+    });
+
+    test('Clear and append to an Output widget', async ({ page }) => {
+      const index = await runCode(
+        page,
+        [
+          'const { Button, Output } = Jupyter.widgets;',
+          'const out = new Output();',
+          'out.appendStdout("text\\n");',
+          'out.appendDisplayData(6 * 7);',
+          'out.appendDisplayData(new Button({ description: "Inside" }));',
+          'out.appendDisplayData({ "text/html": "<b>bold</b>" });',
+          'out'
+        ].join('\n')
+      );
+      const widget = (await getOutputs(page, index)).locator('.widget-output');
+      await expect(widget).toContainText('text');
+      await expect(widget).toContainText('42');
+      await expect(
+        widget.getByRole('button', { name: 'Inside' })
+      ).toBeVisible();
+      await expect(widget.locator('b')).toHaveText('bold');
+
+      // Cleared when the next output arrives
+      await runCode(page, 'out.clearOutput({ wait: true });');
+      await expect(widget).toContainText('42');
+      await runCode(page, 'out.appendStdout("replaced\\n");');
+      await expect(widget).toHaveText(/^replaced\s*$/);
+
+      // A button showing only the outputs of its last click
+      const counter = await runCode(
+        page,
+        [
+          'let count = 0;',
+          'const counter = new Button({ description: "Count" });',
+          'counter.onClick(out.capture({ clearOutput: true, wait: true })(() => {',
+          'console.log(`count ${++count}`);',
+          '}));',
+          'counter'
+        ].join('\n')
+      );
+      const button = (await getOutputs(page, counter)).getByRole('button', {
+        name: 'Count'
+      });
+      await button.click();
+      await expect(widget).toHaveText(/^count 1\s*$/);
+      await button.click();
+      await expect(widget).toHaveText(/^count 2\s*$/);
+      await runCode(page, 'out.clearOutput();');
+      await expect(widget).toHaveText('');
+
+      // Cleared when a captured output arrives
+      const note = await runCode(
+        page,
+        [
+          'const note = new Button({ description: "Note" });',
+          'note.onClick(out.capture(() => console.log("note")));',
+          'out.appendStdout("old\\n");',
+          'out.clearOutput({ wait: true });',
+          'note'
+        ].join('\n')
+      );
+      await expect(widget).toHaveText(/^old\s*$/);
+      await (await getOutputs(page, note))
+        .getByRole('button', { name: 'Note' })
+        .click();
+      await expect(widget).toHaveText(/^note\s*$/);
+      await runCode(page, 'out.appendStdout("more\\n");');
+      await expect(widget).toHaveText(/^note\s+more\s*$/);
+    });
+
     test('Observe the changes made in the frontend', async ({ page }) => {
       const index = await runCode(
         page,

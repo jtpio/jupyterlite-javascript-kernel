@@ -139,24 +139,32 @@ export interface IRuntimeBackend {
   isComplete(
     code: string
   ): Promise<KernelMessage.IIsCompleteReplyMsg['content']>;
+  /**
+   * Handle a comm message of the frontend: the outputs captured by an
+   * Output widget, and the comm messages sent by the handler, go to
+   * `parentHeader`.
+   */
   handleCommOpen(
     commId: string,
     targetName: string,
     data: Record<string, unknown>,
     buffers?: ArrayBuffer[],
-    parentMessageId?: string
+    parentMessageId?: string,
+    parentHeader?: KernelMessage.IHeader
   ): Promise<void>;
   handleCommMsg(
     commId: string,
     data: Record<string, unknown>,
     buffers?: ArrayBuffer[],
-    parentMessageId?: string
+    parentMessageId?: string,
+    parentHeader?: KernelMessage.IHeader
   ): Promise<void>;
   handleCommClose(
     commId: string,
     data: Record<string, unknown>,
     buffers?: ArrayBuffer[],
-    parentMessageId?: string
+    parentMessageId?: string,
+    parentHeader?: KernelMessage.IHeader
   ): Promise<void>;
 }
 
@@ -259,11 +267,19 @@ abstract class AbstractRuntimeBackend<
     targetName: string,
     data: Record<string, unknown>,
     buffers?: ArrayBuffer[],
-    parentMessageId?: string
+    parentMessageId?: string,
+    parentHeader?: KernelMessage.IHeader
   ): Promise<void> {
     await this.ready;
     await this._callComm(remote =>
-      remote.handleCommOpen(commId, targetName, data, buffers, parentMessageId)
+      remote.handleCommOpen(
+        commId,
+        targetName,
+        data,
+        buffers,
+        parentMessageId,
+        parentHeader
+      )
     );
   }
 
@@ -274,11 +290,12 @@ abstract class AbstractRuntimeBackend<
     commId: string,
     data: Record<string, unknown>,
     buffers?: ArrayBuffer[],
-    parentMessageId?: string
+    parentMessageId?: string,
+    parentHeader?: KernelMessage.IHeader
   ): Promise<void> {
     await this.ready;
     await this._callComm(remote =>
-      remote.handleCommMsg(commId, data, buffers, parentMessageId)
+      remote.handleCommMsg(commId, data, buffers, parentMessageId, parentHeader)
     );
   }
 
@@ -289,11 +306,18 @@ abstract class AbstractRuntimeBackend<
     commId: string,
     data: Record<string, unknown>,
     buffers?: ArrayBuffer[],
-    parentMessageId?: string
+    parentMessageId?: string,
+    parentHeader?: KernelMessage.IHeader
   ): Promise<void> {
     await this.ready;
     await this._callComm(remote =>
-      remote.handleCommClose(commId, data, buffers, parentMessageId)
+      remote.handleCommClose(
+        commId,
+        data,
+        buffers,
+        parentMessageId,
+        parentHeader
+      )
     );
   }
 

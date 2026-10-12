@@ -247,16 +247,18 @@ export function createRemoteRuntimeApi(
       targetName: string,
       data: Record<string, unknown>,
       buffers?: ArrayBuffer[],
-      parentMessageId?: string
+      parentMessageId?: string,
+      parentHeader?: Parameters<IRemoteRuntimeApi['handleCommOpen']>[5]
     ): Promise<void> {
-      ensureEvaluator().handleCommOpen(
+      await ensureEvaluator().handleCommOpen(
         commId,
         targetName,
         data,
         buffers,
-        parentMessageId
+        parentMessageId,
+        parentHeader as Record<string, unknown> | undefined
       );
-      // The kernel is idle after the outputs of the handler
+      // The kernel is idle after the outputs of the handler and of its jobs
       await flushOutputs();
     },
 
@@ -264,9 +266,16 @@ export function createRemoteRuntimeApi(
       commId: string,
       data: Record<string, unknown>,
       buffers?: ArrayBuffer[],
-      parentMessageId?: string
+      parentMessageId?: string,
+      parentHeader?: Parameters<IRemoteRuntimeApi['handleCommMsg']>[4]
     ): Promise<void> {
-      ensureEvaluator().handleCommMsg(commId, data, buffers, parentMessageId);
+      await ensureEvaluator().handleCommMsg(
+        commId,
+        data,
+        buffers,
+        parentMessageId,
+        parentHeader as Record<string, unknown> | undefined
+      );
       await flushOutputs();
     },
 
@@ -274,9 +283,16 @@ export function createRemoteRuntimeApi(
       commId: string,
       data: Record<string, unknown>,
       buffers?: ArrayBuffer[],
-      parentMessageId?: string
+      parentMessageId?: string,
+      parentHeader?: Parameters<IRemoteRuntimeApi['handleCommClose']>[4]
     ): Promise<void> {
-      ensureEvaluator().handleCommClose(commId, data, buffers, parentMessageId);
+      await ensureEvaluator().handleCommClose(
+        commId,
+        data,
+        buffers,
+        parentMessageId,
+        parentHeader as Record<string, unknown> | undefined
+      );
       await flushOutputs();
     },
 

@@ -6,7 +6,7 @@ import type { KernelMessage } from '@jupyterlab/services';
 /**
  * Output messages emitted by a runtime, for the kernel to publish.
  */
-export type RuntimeOutputMessage =
+export type RuntimeOutputMessage = (
   | {
       type: 'stream';
       bundle: KernelMessage.IStreamMsg['content'];
@@ -59,7 +59,17 @@ export type RuntimeOutputMessage =
       };
       metadata?: Record<string, unknown>;
       buffers?: ArrayBuffer[];
-    };
+    }
+) & {
+  /**
+   * The header of the message of the frontend which the output belongs to,
+   * to publish it with as its parent header: the cell which ran it, created
+   * the timer or registered the widget callback sending it, or the comm
+   * message handled when an Output widget captures it. Without it, the host
+   * uses its current parent, like the cell which ran last.
+   */
+  parentHeader?: KernelMessage.IHeader;
+};
 
 /**
  * Callback invoked when a runtime emits output.

@@ -345,7 +345,8 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
       target_name,
       data as Record<string, unknown>,
       buffers,
-      msg.header.msg_id
+      msg.header.msg_id,
+      msg.header
     );
   }
 
@@ -362,7 +363,8 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
       comm_id,
       data as Record<string, unknown>,
       buffers,
-      msg.header.msg_id
+      msg.header.msg_id,
+      msg.header
     );
   }
 
@@ -380,7 +382,8 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
       comm_id,
       data as Record<string, unknown>,
       buffers,
-      msg.header.msg_id
+      msg.header.msg_id,
+      msg.header
     );
   }
 
@@ -522,14 +525,15 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
   }
 
   /**
-   * Route runtime output messages to Jupyter kernel channels.
+   * Route runtime output messages to Jupyter kernel channels, with the parent
+   * header given by the runtime, or else the one of the cell that ran last.
    */
   protected processRuntimeMessage(message: RuntimeOutputMessage): void {
     // The runtime of a disposed kernel can still send some outputs
     if (this.isDisposed) {
       return;
     }
-    const parentHeader = this.parentHeader;
+    const parentHeader = message.parentHeader ?? this.parentHeader;
 
     switch (message.type) {
       case 'stream':

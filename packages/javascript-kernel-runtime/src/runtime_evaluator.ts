@@ -20,6 +20,7 @@ import { setPromiseStateResolver, type PromiseStateResolver } from './inspect';
 import { LoopGuard, TimerRegistry, defaultClock } from './interrupt';
 import { getDoc, setDoc } from './introspection';
 import { OutputBatcher } from './output_batcher';
+import { OutputRouter, type IParentMessage } from './output_router';
 import type { RuntimeOutputHandler } from './protocol';
 import { safe } from './utils';
 import { Widget, createWidgetClasses } from './widgets';
@@ -55,14 +56,19 @@ export class JavaScriptRuntimeEvaluator {
       onOutput: options.onOutput,
       scheduler: this._scheduler,
       now,
-      parent: () => this._commManager.getCurrentMessageId(),
       flushInterval: options.flushInterval,
       maxBufferSize: options.maxStreamBufferSize,
       maxStreamOutput: options.maxStreamOutput
     });
     // Every output goes through the batcher, the comm messages too: the
-    // Output widget captures the outputs between two of them
-    this._onOutput = this._outputs.handler;
+    // Output widget captures the outputs between two of them. The router
+    // attaches them to their parent message first.
+    this._onOutput = message => {
+      const routed = this._router.route(message);
+      if (routed) {
+        this._outputs.push(routed);
+      }
+    };
     this._executor =
       options.executor ??
       new JavaScriptExecutor(
@@ -88,7 +94,9 @@ export class JavaScriptRuntimeEvaluator {
 
     this._commManager = new CommManager(this._onOutput, {
       onTargetRegistered: options.onCommTargetRegistered,
-      reportError: (error, inPromise) => this.reportUncaught(error, inPromise)
+      reportError: (error, inPromise) => this.reportUncaught(error, inPromise),
+      mimeBundle: value => this._mimeBundle(value),
+      router: this._router
     });
     this._display = createDisplay({
       publish: (data, metadata, transient, update) => {
@@ -142,6 +150,10 @@ export class JavaScriptRuntimeEvaluator {
       this._executor.loopGuard = null;
     }
     this._commManager.dispose();
+    // The timers of a removed realm never fire
+    for (const end of [...this._openRequests]) {
+      end();
+    }
     if (this._resetPromiseState) {
       setPromiseStateResolver(null);
       this._resetPromiseState = false;
@@ -169,10 +181,12 @@ export class JavaScriptRuntimeEvaluator {
    * flushInterval after the first one, or before any other output. The
    * evaluator flushes them at the end of execute() and of the comm handlers,
    * and before prompt() blocks. A host without timers calls it when the
-   * cell, its timers and its jobs are done.
+   * cell, its timers and its jobs are done, and after a comm handler and its
+   * jobs: it ends the comm request.
    */
   flushOutputs(): void {
     this._outputs.flush();
+    this._router.endRequest();
   }
 
   /**
@@ -212,6 +226,11 @@ export class JavaScriptRuntimeEvaluator {
 
   /**
    * Execute user code in the configured runtime global scope.
+   *
+   * The outputs of the cell go to `parentHeader`, and so do the outputs
+   * sent outside of the cells, until the next execution: the timers and
+   * the widget callbacks keep the cell which created them. Without a parent
+   * message, like for some startup code, the outputs keep the current one.
    */
   async execute(
     code: string,
@@ -219,7 +238,9 @@ export class JavaScriptRuntimeEvaluator {
     parentMessageId?: string,
     parentHeader?: Record<string, unknown>
   ): Promise<KernelMessage.IExecuteReplyMsg['content']> {
-    this._parentHeader = parentHeader;
+    if (parentMessageId !== undefined || parentHeader !== undefined) {
+      this._router.cell = toParent(parentMessageId, parentHeader);
+    }
     this._outputs.resetStreamOutput();
     if (executionCount > 0) {
       // The timers of the startup code, run without execution count, are
@@ -228,91 +249,94 @@ export class JavaScriptRuntimeEvaluator {
     }
     this._guard.beginExecution();
     try {
-      return await this._execute(code, executionCount, parentMessageId);
+      return await this._execute(code, executionCount);
     } finally {
       this._guard.endExecution();
     }
   }
 
   /**
-   * Execute user code, with the parent message ID of the request.
+   * Execute user code.
    */
-  private _execute(
+  private async _execute(
     code: string,
-    executionCount: number,
-    parentMessageId?: string
+    executionCount: number
   ): Promise<KernelMessage.IExecuteReplyMsg['content']> {
-    return this._withParentMessageId(parentMessageId, async () => {
-      // The name of the cell in the tracebacks
-      const name = executionCount > 0 ? `In[${executionCount}]` : undefined;
-      let asyncFunction: () => Promise<any>;
-      let withReturn: boolean;
-      let docs: IAsyncCodeResult['docs'];
-      let token: string;
-      try {
-        const parsed = this._executor.makeAsyncFromCode(code, { name });
-        asyncFunction = parsed.asyncFunction;
-        withReturn = parsed.withReturn;
-        docs = parsed.docs;
-        token = parsed.name;
-      } catch (error) {
-        // A syntax error, with its location in the cell. The error sends the
-        // pending outputs before it.
-        return this._emitError(executionCount, error);
+    // The name of the cell in the tracebacks
+    const name = executionCount > 0 ? `In[${executionCount}]` : undefined;
+    let asyncFunction: () => Promise<any>;
+    let withReturn: boolean;
+    let docs: IAsyncCodeResult['docs'];
+    let token: string;
+    try {
+      const parsed = this._executor.makeAsyncFromCode(code, { name });
+      asyncFunction = parsed.asyncFunction;
+      withReturn = parsed.withReturn;
+      docs = parsed.docs;
+      token = parsed.name;
+    } catch (error) {
+      // A syntax error, with its location in the cell. The error sends the
+      // pending outputs before it.
+      return this._emitError(executionCount, error);
+    }
+
+    // The code of the cell sends its outputs to the cell, even while an
+    // Output widget captures the outputs of an async callback
+    const cell = this._router.cell;
+    try {
+      // An interrupt stops waiting for the promise of the cell
+      const result = await this._guard.race(
+        this._router.runInScope(cell, () => this._evalFunc(asyncFunction))
+      );
+      // The code of the cell caught the error of the loop guard: the cell
+      // still fails with it
+      const tripped = this._guard.tripped;
+      if (tripped) {
+        throw tripped;
       }
 
-      try {
-        // An interrupt stops waiting for the promise of the cell
-        const result = await this._guard.race(this._evalFunc(asyncFunction));
-        // The code of the cell caught the error of the loop guard: the cell
-        // still fails with it
-        const tripped = this._guard.tripped;
-        if (tripped) {
-          throw tripped;
-        }
-
-        if (withReturn) {
-          if (result !== undefined) {
-            if (result instanceof Widget) {
-              this._commManager.displayWidget(result.commId);
-            } else {
-              const data = this._mimeBundle(result);
-              this._onOutput({
-                type: 'execute_result',
-                bundle: {
-                  execution_count: executionCount,
-                  data,
-                  metadata: {}
-                }
-              });
-            }
+      if (withReturn && result !== undefined) {
+        this._router.runInScope(cell, () => {
+          if (result instanceof Widget) {
+            this._commManager.displayWidget(result.commId);
+          } else {
+            const data = this._mimeBundle(result);
+            this._onOutput({
+              type: 'execute_result',
+              bundle: {
+                execution_count: executionCount,
+                data,
+                metadata: {}
+              }
+            });
           }
-        }
-
-        return {
-          status: 'ok',
-          execution_count: executionCount,
-          user_expressions: {}
-        };
-      } catch (error) {
-        // The thrown value as is, which may not be an error
-        return this._emitError(executionCount, error, token);
-      } finally {
-        // The declarations made before an error keep their documentation
-        this._executor.introspection.registerDocs(docs);
-        // document.open() removes the listeners of the window, add them back
-        this._listenForUncaughtErrors();
-        // The outputs of the cell are sent before its reply
-        this._outputs.flush();
+        });
       }
-    });
+
+      return {
+        status: 'ok',
+        execution_count: executionCount,
+        user_expressions: {}
+      };
+    } catch (error) {
+      // The thrown value as is, which may not be an error
+      return this._emitError(executionCount, error, token);
+    } finally {
+      // The declarations made before an error keep their documentation
+      this._executor.introspection.registerDocs(docs);
+      // document.open() removes the listeners of the window, add them back
+      this._listenForUncaughtErrors();
+      // The outputs of the cell are sent before its reply
+      this._outputs.flush();
+    }
   }
 
   /**
    * Print an error thrown outside of an execution, like in a timer, an event
    * listener or a widget callback, on stderr: `Uncaught Error: ...` with its
-   * location in the cells. The outputs go to the current parent message of
-   * the host, usually the last cell that ran. Once that cell reached its
+   * location in the cells. The error goes to the cell which created the timer
+   * or registered the callback which threw it, when the evaluator knows it,
+   * or else to the cell that ran last. Once that cell reached its
    * output limit, the error goes to the console of the host instead, as
    * the notebook does not show the rest of the cell outputs.
    *
@@ -326,19 +350,21 @@ export class JavaScriptRuntimeEvaluator {
    */
   reportUncaught(error: unknown, inPromise = false): void {
     const prefix = inPromise ? 'Uncaught (in promise)' : 'Uncaught';
-    if (!this._outputs.isTruncated) {
-      try {
-        const { traceback } = this._executor.formatError(error, { prefix });
-        this._onOutput({
-          type: 'stream',
-          bundle: { name: 'stderr', text: `${traceback.join('\n')}\n` }
-        });
-        return;
-      } catch {
-        // The error can not be shown in the notebook, keep it in the console
+    this._router.runUncaught(() => {
+      if (!this._outputs.isTruncated) {
+        try {
+          const { traceback } = this._executor.formatError(error, { prefix });
+          this._onOutput({
+            type: 'stream',
+            bundle: { name: 'stderr', text: `${traceback.join('\n')}\n` }
+          });
+          return;
+        } catch {
+          // The error can not be shown in the notebook, keep it in the console
+        }
       }
-    }
-    this._logError(prefix, error);
+      this._logError(prefix, error);
+    });
   }
 
   /**
@@ -422,43 +448,58 @@ export class JavaScriptRuntimeEvaluator {
 
   /**
    * Handle a comm_open message from the frontend.
+   *
+   * The handlers run synchronously: the promises they return are not
+   * awaited. The outputs they capture in an Output widget, and the comm
+   * messages they send, go to `parentHeader`. Their other outputs go to the
+   * cell which registered the widget callback, or else to the cell that ran
+   * last.
+   *
+   * The returned promise resolves at the next timer of the scheduler, once
+   * the jobs queued by the handler ran: the outputs of an async callback
+   * captured by the handler, like after an `await null`, still go to
+   * `parentHeader` until then. Without a scheduler, it resolves at once, and
+   * the host calls flushOutputs() once it ran the jobs.
    */
   handleCommOpen(
     commId: string,
     targetName: string,
     data: Record<string, unknown>,
     buffers?: ArrayBuffer[],
-    parentMessageId?: string
-  ): void {
-    this._runInBackground(parentMessageId, () => {
+    parentMessageId?: string,
+    parentHeader?: Record<string, unknown>
+  ): Promise<void> {
+    return this._handleComm(parentMessageId, parentHeader, () => {
       this._commManager.handleCommOpen(commId, targetName, data, buffers);
     });
   }
 
   /**
-   * Handle a comm_msg message from the frontend.
+   * Handle a comm_msg message from the frontend, like handleCommOpen().
    */
   handleCommMsg(
     commId: string,
     data: Record<string, unknown>,
     buffers?: ArrayBuffer[],
-    parentMessageId?: string
-  ): void {
-    this._runInBackground(parentMessageId, () => {
+    parentMessageId?: string,
+    parentHeader?: Record<string, unknown>
+  ): Promise<void> {
+    return this._handleComm(parentMessageId, parentHeader, () => {
       this._commManager.handleCommMsg(commId, data, buffers);
     });
   }
 
   /**
-   * Handle a comm_close message from the frontend.
+   * Handle a comm_close message from the frontend, like handleCommOpen().
    */
   handleCommClose(
     commId: string,
     data: Record<string, unknown>,
     buffers?: ArrayBuffer[],
-    parentMessageId?: string
-  ): void {
-    this._runInBackground(parentMessageId, () => {
+    parentMessageId?: string,
+    parentHeader?: Record<string, unknown>
+  ): Promise<void> {
+    return this._handleComm(parentMessageId, parentHeader, () => {
       this._commManager.handleCommClose(commId, data, buffers);
     });
   }
@@ -471,42 +512,46 @@ export class JavaScriptRuntimeEvaluator {
   }
 
   /**
-   * Set the active parent message ID while invoking runtime code.
-   */
-  private async _withParentMessageId<T>(
-    parentMessageId: string | undefined,
-    callback: () => Promise<T> | T
-  ): Promise<T> {
-    const previousMessageId = this._commManager.getCurrentMessageId();
-    this._commManager.setCurrentMessageId(parentMessageId ?? null);
-    try {
-      return await callback();
-    } finally {
-      this._commManager.setCurrentMessageId(previousMessageId);
-    }
-  }
-
-  /**
-   * Run a callback with the active parent message ID, outside of an
-   * execution, and report its errors.
+   * Handle a comm message of the frontend, outside of an execution, and
+   * report the errors of the handler.
    *
-   * The rejections of the promises of the kernel are not seen by the
-   * listeners of globalScope when the kernel runs in another realm, like the
-   * page of an iframe, so they are reported here.
+   * The errors thrown by the kernel are not seen by the listeners of
+   * globalScope when the kernel runs in another realm, like the page of an
+   * iframe, so they are reported here.
    */
-  private _runInBackground(
+  private _handleComm(
     parentMessageId: string | undefined,
+    parentHeader: Record<string, unknown> | undefined,
     callback: () => void
-  ): void {
-    this._withParentMessageId(parentMessageId, () => {
+  ): Promise<void> {
+    const request = toParent(parentMessageId, parentHeader);
+    this._router.runRequest(request, () => {
       try {
         callback();
+      } catch (error) {
+        this.reportUncaught(error);
       } finally {
         // The outputs of the handler are sent before it returns, like the
         // prints of a button click
         this._outputs.flush();
       }
-    }).catch(error => this.reportUncaught(error));
+    });
+    const scheduler = this._scheduler;
+    if (!scheduler || this._isDisposed) {
+      return Promise.resolve();
+    }
+    // The jobs queued by the handler run before the timer, not the code
+    // after an await of a timer or of a request: that one is not awaited
+    return new Promise(resolve => {
+      const end = (): void => {
+        this._openRequests.delete(end);
+        this._outputs.flush();
+        this._router.endRequest(request);
+        resolve();
+      };
+      this._openRequests.add(end);
+      scheduler.setTimeout(end, 0);
+    });
   }
 
   /**
@@ -628,7 +673,10 @@ export class JavaScriptRuntimeEvaluator {
         // blocks the runtime
         this._outputs.flush();
         try {
-          return requestInput(String(message), password, this._parentHeader);
+          const parent = this._router.current.header as
+            | Record<string, unknown>
+            | undefined;
+          return requestInput(String(message), password, parent);
         } finally {
           this._guard.resetClock();
         }
@@ -677,7 +725,14 @@ export class JavaScriptRuntimeEvaluator {
     });
     scope.Jupyter = jupyter;
 
-    this._timers.install(scope);
+    // The timers keep the cell which created them, for their outputs
+    const router = this._router;
+    this._timers.install(scope, {
+      capture: () => router.context(),
+      enter: context => router.enter(context as IParentMessage),
+      leave: (previous, threw) =>
+        router.leave(previous as IParentMessage | null, threw)
+    });
     this._wrapBlockingFunctions();
   }
 
@@ -822,6 +877,9 @@ export class JavaScriptRuntimeEvaluator {
   private _globalScope: Record<string, any>;
   private _guard: LoopGuard;
   private _timers = new TimerRegistry();
+  private _router = new OutputRouter();
+  // Ends the comm requests waiting for the jobs of their handler
+  private _openRequests = new Set<() => void>();
   private _restoreXhr: (() => void) | null = null;
   private _onOutput: RuntimeOutputHandler;
   private _outputs: OutputBatcher;
@@ -833,9 +891,21 @@ export class JavaScriptRuntimeEvaluator {
   private _scheduler?: JavaScriptRuntimeEvaluator.IScheduler;
   private _resetPromiseState = false;
   private _isDisposed = false;
-  private _parentHeader?: Record<string, unknown>;
   private _previousGlobals = new Map<string, PropertyDescriptor | undefined>();
   private _originalConsole = new Map<string, unknown>();
+}
+
+/**
+ * The parent message of a request of the host.
+ */
+function toParent(
+  id: string | undefined,
+  header: Record<string, unknown> | undefined
+): IParentMessage {
+  return {
+    id: id ?? (typeof header?.msg_id === 'string' ? header.msg_id : null),
+    header: header as KernelMessage.IHeader | undefined
+  };
 }
 
 /**

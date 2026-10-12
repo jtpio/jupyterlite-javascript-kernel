@@ -13,7 +13,8 @@ type StreamMessage = Extract<RuntimeOutputMessage, { type: 'stream' }>;
  * limits the volume of the stream outputs of a cell.
  *
  * The text written to stdout or stderr is kept until another output, a write
- * to the other stream or for another parent message, a call to flush(), or
+ * to the other stream or for another parent message (another `parentHeader`
+ * object), a call to flush(), or
  * flushInterval after the first write. It is also sent on a write when
  * flushInterval elapsed, so a long synchronous loop shows its output while
  * it runs, without timers. The frontend merges the consecutive stream
@@ -28,7 +29,6 @@ export class OutputBatcher {
     this._onOutput = options.onOutput;
     this._scheduler = options.scheduler ?? null;
     this._now = options.now ?? Date.now;
-    this._parent = options.parent ?? (() => null);
     this._flushInterval =
       options.flushInterval ?? OutputBatcher.DEFAULT_FLUSH_INTERVAL;
     this._maxBufferSize =
@@ -54,7 +54,11 @@ export class OutputBatcher {
     if (message.type === 'clear_output') {
       this.resetStreamOutput();
       // The pending text of the cell would be shown and cleared at once
-      if (!message.bundle.wait && this._bufferParent === this._parent()) {
+      if (
+        !message.bundle.wait &&
+        this._first &&
+        this._bufferParent === message.parentHeader
+      ) {
         this._discard();
       }
     }
@@ -136,8 +140,10 @@ export class OutputBatcher {
     // The notice starts on a new line of stderr
     const newLine =
       message.bundle.name === 'stderr' && kept && !kept.endsWith('\n');
+    // In the same place as the text it cuts
     this._write({
       type: 'stream',
+      parentHeader: message.parentHeader,
       bundle: {
         name: 'stderr',
         text:
@@ -158,7 +164,7 @@ export class OutputBatcher {
       this._onOutput(message);
       return;
     }
-    const parent = this._parent();
+    const parent = message.parentHeader;
     const first = this._first;
     if (
       first &&
@@ -194,7 +200,7 @@ export class OutputBatcher {
       this._timer = null;
     }
     this._first = null;
-    this._bufferParent = null;
+    this._bufferParent = undefined;
     this._chunks = [];
     this._size = 0;
   }
@@ -215,12 +221,11 @@ export class OutputBatcher {
   private _onOutput: RuntimeOutputHandler;
   private _scheduler: OutputBatcher.IScheduler | null;
   private _now: () => number;
-  private _parent: () => unknown;
   private _flushInterval: number;
   private _maxBufferSize: number;
   private _maxStreamOutput: number;
   private _first: StreamMessage | null = null;
-  private _bufferParent: unknown = null;
+  private _bufferParent: unknown = undefined;
   private _chunks: string[] = [];
   private _size = 0;
   private _start = 0;
@@ -269,12 +274,6 @@ export namespace OutputBatcher {
      * The current time in milliseconds. Defaults to Date.now.
      */
     now?: () => number;
-
-    /**
-     * The current parent message, compared with ===: the text written for
-     * another parent is sent in another message.
-     */
-    parent?: () => unknown;
 
     /**
      * The longest time in milliseconds the text is kept, 50 by default.

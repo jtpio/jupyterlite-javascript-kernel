@@ -293,6 +293,7 @@ The `console` methods print to the outputs of the cell, with the values formatte
 - `console.count`, `console.countReset`, `console.time`, `console.timeLog`, `console.timeEnd` and `console.assert` work like in the browser
 - `console.clear` clears the outputs of the cell
 - consecutive writes to the standard output or the standard error are sent together, at most every 50 ms, so printing thousands of lines in a loop is fast. The outputs keep their order: the pending text is sent before any rich output, error, widget message or prompt, and when the cell finishes. In the Web Worker kernel, a long loop shows its output while it runs
+- the code running after its cell prints in the outputs of the cell which started it, even after other cells ran: the callbacks of `setTimeout`, `setInterval` and `requestAnimationFrame` print in the cell which created them, so an interval or an animation keeps its outputs in its own cell, and the callbacks of the [widgets](#jupyter-widgets), like a click handler, print in the cell which registered them. The other code running later, like the code after an `await` in a callback, an event listener or the callback of a promise, prints in the cell that ran last. When a cell runs again, the notebook forgets the outputs of its previous run: the timers of that run which still print are not shown anymore, interrupt the kernel to stop them
 - a cell prints at most 5,000,000 characters on the standard output and the standard error, about 50,000 lines of 100 characters: the rest is not shown, and a notice is printed instead. This stops a runaway loop of `console.log` before it freezes the page. Change the limit with the **Output limit (characters)** [setting](#settings). The count starts again with the next cell, or when the cell calls `console.clear()` or `clearOutput()`. The errors thrown later by a cell that reached the limit, in a timer or an event listener, are printed in the console of the browser
 
 ## Errors
@@ -315,7 +316,7 @@ Error: boom
 - Values thrown that are not errors are shown as is, like `Uncaught 'x'` for `throw "x"`.
 - The `cause` of an error and the errors of an `AggregateError` are shown nested, under `[cause]:` and `[errors]:`.
 - `console.error(error)`, `console.trace()` and the errors shown as values use the same locations.
-- The errors thrown later, in a timer, an event listener or the handler of a widget, are printed on stderr as `Uncaught Error: ...`, in the outputs of the last cell that ran. The promises rejected without a handler, like an async function called without `await`, are printed as `Uncaught (in promise) Error: ...`. The kernel keeps running. These errors are shown in the notebook instead of the console of the browser.
+- The errors thrown later, in a timer, an event listener or the handler of a widget, are printed on stderr as `Uncaught Error: ...`, with the other outputs of the code that threw them (see [Console](#console)): the errors of a timer in the cell which created it, the ones of a widget handler in the cell which registered it, the others in the last cell that ran. The promises rejected without a handler, like an async function called without `await`, are printed as `Uncaught (in promise) Error: ...`. The kernel keeps running. These errors are shown in the notebook instead of the console of the browser.
 
 The columns can differ slightly between browsers, which point at different parts of the expression that failed.
 
@@ -377,6 +378,34 @@ jslink([slider, 'value'], [progress, 'value']);
 
 Widgets auto-display when they are the last expression in a cell. Use the global `display()` function to display a widget explicitly, for example when assigning to a variable.
 
+The outputs of the callbacks of the widgets, like `button.onClick()` and `slider.observe()`, go to the cell which registered the callback, even after other cells ran. When the code of a cell triggers the callback, like by setting `slider.value`, they go to that cell. To show them somewhere else, like under a button, capture them in an `Output` widget:
+
+```javascript
+const { Button, Output } = Jupyter.widgets;
+
+const button = new Button({ description: 'Count stars' });
+const out = new Output();
+button.onClick(
+  out.capture(
+    async () => {
+      console.log('Loading...');
+      const response = await fetch(
+        'https://api.github.com/repos/jupyterlite/javascript-kernel'
+      );
+      const { stargazers_count } = await response.json();
+      console.log(`${stargazers_count} stars`);
+    },
+    { clearOutput: true, wait: true }
+  )
+);
+display(button);
+display(out);
+```
+
+- `out.capture(callback, options?)`, or `out.capture(options)(callback)`, returns a function which runs `callback` with its outputs (the `console`, `display()`, `clearOutput()`) shown in the widget. The outputs of an async callback after an `await` are captured too, until its promise settles: while it runs, the outputs of the other code running outside of the cells, after an `await`, also go to the widget. With the `clearOutput` option, the outputs of the widget are removed first, when the next output arrives with `wait`. The errors of the callback go to the cell which registered it.
+- `out.appendStdout(text)` and `out.appendStderr(text)` add some text, and `out.appendDisplayData(value, metadata?)` adds a value shown like `display()` shows it, like a widget, or a MIME bundle like `{ 'text/html': '<b>Hi</b>' }`
+- `out.clearOutput({ wait })` removes the outputs of the widget, with `wait` when the next output arrives
+
 Widgets also work when JupyterLite is served over plain http, for example on a LAN, where the browser hides some APIs like `crypto.randomUUID` (only `prompt()` in `JavaScript (Web Worker)` needs the service worker, which needs `https` or `localhost`).
 
 ### Available widgets
@@ -407,7 +436,7 @@ The widget runtime is split into files that roughly follow the upstream `ipywidg
 | `packages/controls/src/widget_bool.ts`               | `packages/javascript-kernel-runtime/src/widgets/widget_bool.ts`               | Ported  | Boolean widgets; related styles live in `widget_style.ts`            |
 | `packages/controls/src/widget_selection.ts`          | `packages/javascript-kernel-runtime/src/widgets/widget_selection.ts`          | Partial | Selection semantics still differ from `ipywidgets` in some cases     |
 | `packages/controls/src/widget_string.ts`             | `packages/javascript-kernel-runtime/src/widgets/widget_string.ts`             | Ported  | String and display widgets; related styles live in `widget_style.ts` |
-| `packages/output/src/output.ts`                      | `packages/javascript-kernel-runtime/src/widgets/widget_output.ts`             | Partial | Output capture is supported but not feature-complete                 |
+| `packages/output/src/output.ts`                      | `packages/javascript-kernel-runtime/src/widgets/widget_output.ts`             | Ported  | Output capture, also of async callbacks, and the `append*` methods   |
 | `packages/controls/src/widget_button.ts`             | `packages/javascript-kernel-runtime/src/widgets/widget_button.ts`             | Partial | Button widget is present, but callback behavior differs slightly     |
 | `packages/controls/src/widget_color.ts`              | `packages/javascript-kernel-runtime/src/widgets/widget_color.ts`              | Ported  | Color picker                                                         |
 | `packages/controls/src/widget_box.ts`                | `packages/javascript-kernel-runtime/src/widgets/widget_box.ts`                | Ported  | Box, HBox, VBox, GridBox                                             |
@@ -439,7 +468,7 @@ Jupyter.comm.registerTarget('my-echo', (comm, data, buffers) => {
 - `Jupyter.comm.open(targetName, data?, metadata?, buffers?)` opens a comm and returns it
 - `Jupyter.comm.registerTarget(targetName, handler)` calls `handler(comm, data, buffers)` when the frontend opens a comm on the target, and `Jupyter.comm.unregisterTarget(targetName)` removes it. A comm opened on a target without a handler, or whose handler throws, is closed, like in `ipykernel`
 - a comm has a `commId` and a `targetName`, `send(data, metadata?, buffers?)` and `close(data?)` methods, and the `onMsg` and `onClose` callbacks, called with the data and the binary buffers (`ArrayBuffer`) of the messages of the frontend
-- the outputs of the callbacks, and their errors, go to the cell which ran last
+- the outputs of the comm callbacks, and their errors, go to the cell which ran last. The comm messages they send, and the outputs captured by an `Output` widget, go to the message of the frontend which they handle
 
 `context.registerCommTarget()` registers the target of a [startup extension](#kernel-startup-extensions) before the code of the cells runs.
 
@@ -539,7 +568,7 @@ Disabling `@jupyterlite/javascript-kernel-extension:kernel-settings` makes the k
 
 The repository contains three npm packages:
 
-- `@jupyterlite/javascript-kernel-runtime`: the code running next to the user code, in the iframe or the Web Worker. It executes the cells, formats the outputs, and implements comms and widgets. It does not depend on JupyterLite, so that other JavaScript kernels can reuse it. It is engine-neutral: it only needs the ECMAScript built-ins, and compiles without the DOM types, which the build checks. It also ships single-file builds, with `acorn`, `acorn-walk` and `astring` included, for kernels that do not use npm, and exports the engine-neutral helpers of the tracebacks, like `parseStack` and `formatError`, for other kernels. The evaluator batches the stream outputs: a host can pass its `scheduler` (or `null` when the engine has no host timers, and then calls `evaluator.flushOutputs()` itself), a `flushInterval` (0 turns the batching off) and a `maxStreamOutput` per cell. It interrupts the cells with `evaluator.interrupt()`, and stops the loops with a `loopTimeout` or, from another thread, an `interruptBuffer`. The `executorOptions` of the evaluator (an `IExecutorOptions`, as plain data) configure the magic imports, also of an existing executor, like `ExecutorConfig.update()`. See its [README](packages/javascript-kernel-runtime/README.md).
+- `@jupyterlite/javascript-kernel-runtime`: the code running next to the user code, in the iframe or the Web Worker. It executes the cells, formats the outputs, and implements comms and widgets. It does not depend on JupyterLite, so that other JavaScript kernels can reuse it. It is engine-neutral: it only needs the ECMAScript built-ins, and compiles without the DOM types, which the build checks. It also ships single-file builds, with `acorn`, `acorn-walk` and `astring` included, for kernels that do not use npm, and exports the engine-neutral helpers of the tracebacks, like `parseStack` and `formatError`, for other kernels. The evaluator batches the stream outputs: a host can pass its `scheduler` (or `null` when the engine has no host timers, and then calls `evaluator.flushOutputs()` itself), a `flushInterval` (0 turns the batching off) and a `maxStreamOutput` per cell. It interrupts the cells with `evaluator.interrupt()`, and stops the loops with a `loopTimeout` or, from another thread, an `interruptBuffer`. Its output messages carry the `parentHeader` of the message of the frontend they belong to (the cell which created a timer or registered a widget callback, or the comm message whose outputs an `Output` widget captures), given to `execute()` and to the comm handlers, and `JavaScriptKernel` publishes them with it. The `executorOptions` of the evaluator (an `IExecutorOptions`, as plain data) configure the magic imports, also of an existing executor, like `ExecutorConfig.update()`. See its [README](packages/javascript-kernel-runtime/README.md).
 - `@jupyterlite/javascript-kernel`: the JupyterLite kernel, with the iframe and Web Worker runtimes. It also exports everything from `@jupyterlite/javascript-kernel-runtime`. The iframe backend calls the runtime API directly in the page, and the Web Worker backend over Comlink. When the code of a cell reloads the iframe, `IFrameRuntimeBackend` calls its `onRestart` option and starts a new iframe, for which it calls `executorFactory` and `onReady` again: the `onRuntimeReady` method of the kernels building on `JavaScriptKernel`, like the p5.js kernel, runs again with the new global scope and executor. JupyterLite only cancels the queued cells on interrupt: `installKernelInterrupts(client)` makes its kernel client also call the `interrupt()` method of the kernels, like `JavaScriptKernel.interrupt()`. The extension calls it, and the extensions of kernels building on `JavaScriptKernel`, like the p5.js kernel, can call it too, since installing it twice does nothing. The `executorOptions`, `loopTimeout` and `maxStreamOutput` options of `JavaScriptKernel` configure the runtime when it starts: the extension sets them from the [settings](#settings), and the kernels building on `JavaScriptKernel` keep the defaults unless they pass them.
 - `@jupyterlite/javascript-kernel-extension`: the JupyterLite extension registering the kernels, with their settings.
 
