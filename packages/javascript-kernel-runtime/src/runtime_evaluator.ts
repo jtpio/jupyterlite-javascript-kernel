@@ -35,6 +35,21 @@ import {
 const GLOBALS = ['display', 'clearOutput', 'prompt', 'Jupyter'];
 
 /**
+ * The globals holding the last result and the last error of the cells, like
+ * in the REPL of Node.js, with their documentation.
+ */
+const LAST_VALUES = {
+  _: "The result of the last cell which showed one, like in the Node.js REPL. A cell which ends with a semicolon, or without a value, does not change it.\n\nAssigning _, or declaring or importing it in a cell, like `import _ from 'lodash-es'`, replaces it with that value: the next results do not change it.",
+  _error:
+    'The last error thrown by a cell, or later by its code, like in a timer, an event listener or a promise rejected without a handler.\n\nAssigning _error, or declaring it in a cell, replaces it with that value: the next errors do not change it.'
+};
+
+/**
+ * The name of a global holding the last result or the last error.
+ */
+type LastValueName = keyof typeof LAST_VALUES;
+
+/**
  * The functions of the global scope which block the page until the user
  * replies: the time they take does not count in the loop timeout.
  */
@@ -133,6 +148,7 @@ export class JavaScriptRuntimeEvaluator {
       now
     });
     this._setupGlobals();
+    this._installLastValues();
     this._setupConsole();
     this._listenForUncaughtErrors();
   }
@@ -150,6 +166,7 @@ export class JavaScriptRuntimeEvaluator {
     }
     this._restoreConsole();
     this._restoreGlobals();
+    this._removeLastValues();
     this._guard.dispose();
     if (this._executor.loopGuard === this._guard) {
       this._executor.loopGuard = null;
@@ -319,6 +336,7 @@ export class JavaScriptRuntimeEvaluator {
       const result = await this._evaluate(asyncFunction, cell);
 
       if (withReturn && result !== undefined && !silent) {
+        this._setLastValue('_', result);
         this._router.runInScope(cell, () => {
           if (result instanceof Widget) {
             this._commManager.displayWidget(result.commId);
@@ -441,6 +459,10 @@ export class JavaScriptRuntimeEvaluator {
   reportUncaught(error: unknown, inPromise = false): void {
     const prefix = inPromise ? 'Uncaught (in promise)' : 'Uncaught';
     this._router.runUncaught(() => {
+      // The errors of the silent code are not shown, and keep _error
+      if (!this._router.current.silent) {
+        this._setLastValue('_error', error);
+      }
       if (!this._outputs.isTruncated) {
         try {
           const { traceback } = this._executor.formatError(error, { prefix });
@@ -718,6 +740,7 @@ export class JavaScriptRuntimeEvaluator {
     };
 
     if (!silent) {
+      this._setLastValue('_error', error);
       this._onOutput({
         type: 'execute_error',
         bundle: content
@@ -830,6 +853,97 @@ export class JavaScriptRuntimeEvaluator {
         router.leave(previous as IParentMessage | null, threw)
     });
     this._wrapBlockingFunctions();
+  }
+
+  /**
+   * Install `_` and `_error`, the last result and the last error of the
+   * cells, like in the REPL of Node.js, unless the global scope already has
+   * them, like the `_` of a library loaded by the page.
+   *
+   * They are accessors of the global scope, which the cells see as globals:
+   * assigning them replaces the accessor with a plain property holding the
+   * value, which the next results do not change. A declaration or an import
+   * of the name in a cell, like `import _ from 'lodash-es'`, defines that
+   * property too, so the libraries using `_` keep working.
+   */
+  private _installLastValues(): void {
+    const scope = this._globalScope;
+    const introspection = this._executor.introspection;
+    for (const [name, doc] of Object.entries(LAST_VALUES) as [
+      LastValueName,
+      string
+    ][]) {
+      if (safe(() => name in scope, true)) {
+        continue;
+      }
+      const get = (): unknown => this._lastValues.get(name);
+      const set = (value: unknown): void => {
+        Object.defineProperty(scope, name, {
+          value,
+          writable: true,
+          configurable: true,
+          enumerable: true
+        });
+      };
+      try {
+        Object.defineProperty(scope, name, {
+          get,
+          set,
+          configurable: true,
+          enumerable: false
+        });
+      } catch {
+        continue;
+      }
+      this._lastValueGetters.set(name, get);
+      // The documentation is the one of the value once it was replaced
+      introspection.setGlobalDoc(name, () =>
+        this._ownsLastValue(name) ? doc : undefined
+      );
+    }
+  }
+
+  /**
+   * Keep the last result or the last error, unless the cells replaced the
+   * global.
+   */
+  private _setLastValue(name: LastValueName, value: unknown): void {
+    if (this._ownsLastValue(name)) {
+      this._lastValues.set(name, value);
+    }
+  }
+
+  /**
+   * Whether the global of the last result or of the last error is still the
+   * accessor of the evaluator.
+   */
+  private _ownsLastValue(name: LastValueName): boolean {
+    const get = this._lastValueGetters.get(name);
+    if (!get) {
+      return false;
+    }
+    return (
+      safe(
+        () => Object.getOwnPropertyDescriptor(this._globalScope, name)?.get,
+        undefined
+      ) === get
+    );
+  }
+
+  /**
+   * Remove the accessors of the last result and of the last error, and
+   * their values. The values the cells assigned to these names are kept.
+   */
+  private _removeLastValues(): void {
+    const introspection = this._executor.introspection;
+    for (const name of this._lastValueGetters.keys()) {
+      if (this._ownsLastValue(name)) {
+        safe(() => delete this._globalScope[name]);
+      }
+      introspection.setGlobalDoc(name, null);
+    }
+    this._lastValueGetters.clear();
+    this._lastValues.clear();
   }
 
   /**
@@ -1020,6 +1134,9 @@ export class JavaScriptRuntimeEvaluator {
   private _isDisposed = false;
   private _previousGlobals = new Map<string, PropertyDescriptor | undefined>();
   private _originalConsole = new Map<string, unknown>();
+  // The values of `_` and `_error`, and the getters of their accessors
+  private _lastValues = new Map<LastValueName, unknown>();
+  private _lastValueGetters = new Map<LastValueName, () => unknown>();
 }
 
 /**

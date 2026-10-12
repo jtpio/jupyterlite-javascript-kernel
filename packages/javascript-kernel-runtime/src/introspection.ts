@@ -485,6 +485,20 @@ export class Introspection {
   }
 
   /**
+   * Document a global of the kernel which may not be a function, like `_`:
+   * `doc` is called when the name is inspected and returns the documentation,
+   * or undefined to fall back to the documentation of the value. null
+   * removes it. The documented globals are not suggested for undefined names.
+   */
+  setGlobalDoc(name: string, doc: (() => string | undefined) | null): void {
+    if (doc) {
+      this._globalDocs.set(name, doc);
+    } else {
+      this._globalDocs.delete(name);
+    }
+  }
+
+  /**
    * Register the documentation of the declarations of a cell, after it ran.
    */
   registerDocs(docs: IDeclarationDoc[]): void {
@@ -618,8 +632,12 @@ export class Introspection {
     const indent = (text: string) =>
       text.split('\n').join('\n' + ' '.repeat(11));
     const lines: string[] = [];
+    const globalDoc = this._globalDocs.get(expression);
     const doc =
-      getDoc(value) ?? this._builtinDocumentation?.(expression) ?? undefined;
+      safe(() => globalDoc?.()) ??
+      getDoc(value) ??
+      this._builtinDocumentation?.(expression) ??
+      undefined;
     const page = this._mdnPage(value);
 
     if (typeof value === 'function') {
@@ -758,6 +776,11 @@ export class Introspection {
     const lower = expression.toLowerCase();
     const suggestions: string[] = [];
     for (const name of propertyTypes(this._globalScope).keys()) {
+      // The documented globals of the kernel, like `_`, are not suggested:
+      // most names would match them.
+      if (this._globalDocs.has(name)) {
+        continue;
+      }
       const candidate = name.toLowerCase();
       if (
         candidate !== lower &&
@@ -778,5 +801,6 @@ export class Introspection {
   private _evaluate: (expression: string) => unknown;
   private _builtinDocumentation?: (expression: string) => string | null;
   private _functionSource?: (fn: unknown) => string;
+  private _globalDocs = new Map<string, () => string | undefined>();
   private _pages: WeakMap<object, string> | null = null;
 }

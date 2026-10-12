@@ -82,29 +82,45 @@ const evaluator = new runtime.JavaScriptRuntimeEvaluator({
 const reply = await evaluator.execute('1 + 1', 1);
 ```
 
-| Option                   | Description                                                                                                                                                                                                                                                                     |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `globalScope`            | The global object of the realm running the cells. The evaluator installs `display`, `clearOutput`, `Jupyter` (and `prompt` with `requestInput`) on it, and a `require()` throwing a `ReferenceError` which suggests `import`, when it has no `require`.                         |
-| `onOutput`               | Called with the output messages, see below.                                                                                                                                                                                                                                     |
-| `requestInput`           | `(prompt, password, parentHeader?) => string \| null`: asks the user for some input, synchronously, for `prompt()`. Returns null when the user cancels. Throws a `StdinNotImplementedError` when the input can not be asked, for example when the request does not allow stdin. |
-| `now`                    | `() => number`: the current time in milliseconds, for `console.time()` and the batching of the outputs. Defaults to `performance.now()`, or `Date.now()`.                                                                                                                       |
-| `readFile`               | `(path) => Uint8Array`: reads a file, for `display.image(path)`, which is only available with it.                                                                                                                                                                               |
-| `promiseState`           | `(promise) => [state, value] \| null`: the state of a promise (0 pending, 1 fulfilled, 2 rejected), for engines which can tell it: the outputs then show it.                                                                                                                    |
-| `onCommTargetRegistered` | `(targetName) => void`: called when a comm target is registered, for kernels that must register it before the frontend can open comms on it.                                                                                                                                    |
-| `scheduler`              | `{ setTimeout(callback, ms), clearTimeout(handle) }`: the timers of the host, for the work the runtime defers, like sending the pending text of the streams. Defaults to the timers of `globalScope`, if any, read when the evaluator is created. `null` for none, see below.   |
-| `flushInterval`          | The longest time in milliseconds the text written to stdout or stderr is kept, to send the consecutive writes together. 50 by default, 0 sends one message per write.                                                                                                           |
-| `maxStreamBufferSize`    | The size of the pending text of a stream, in UTF-16 code units, from which it is sent. 1,000,000 by default.                                                                                                                                                                    |
-| `maxStreamOutput`        | The number of characters a cell can print on stdout and stderr, counted from the start of the cell or its last `clear_output`: the rest is dropped, with a notice on stderr. 5,000,000 by default, 0 for no limit.                                                              |
-| `executor`               | A `JavaScriptExecutor`, to configure it, for example to customize the compilation of the cells.                                                                                                                                                                                 |
-| `executorOptions`        | `IExecutorOptions`, plain data: the configuration of the magic imports, see below. Also applied to `executor`.                                                                                                                                                                  |
-| `loopTimeout`            | The time in milliseconds a loop of the cells can keep the page busy before it is stopped with a `LoopTimeoutError`, 0 (the default) for no limit. See [Interrupts and loop timeout](#interrupts-and-loop-timeout).                                                              |
-| `interruptBuffer`        | An `Int32Array` view of a `SharedArrayBuffer`, to interrupt the loops from another thread: the host sets its first element to 1 with `Atomics.store()`.                                                                                                                         |
+| Option                   | Description                                                                                                                                                                                                                                                                                                                        |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `globalScope`            | The global object of the realm running the cells. The evaluator installs `display`, `clearOutput`, `Jupyter` (and `prompt` with `requestInput`) on it, `_` and `_error` for the last result and the last error, when it has none, and a `require()` throwing a `ReferenceError` which suggests `import`, when it has no `require`. |
+| `onOutput`               | Called with the output messages, see below.                                                                                                                                                                                                                                                                                        |
+| `requestInput`           | `(prompt, password, parentHeader?) => string \| null`: asks the user for some input, synchronously, for `prompt()`. Returns null when the user cancels. Throws a `StdinNotImplementedError` when the input can not be asked, for example when the request does not allow stdin.                                                    |
+| `now`                    | `() => number`: the current time in milliseconds, for `console.time()` and the batching of the outputs. Defaults to `performance.now()`, or `Date.now()`.                                                                                                                                                                          |
+| `readFile`               | `(path) => Uint8Array`: reads a file, for `display.image(path)`, which is only available with it.                                                                                                                                                                                                                                  |
+| `promiseState`           | `(promise) => [state, value] \| null`: the state of a promise (0 pending, 1 fulfilled, 2 rejected), for engines which can tell it: the outputs then show it.                                                                                                                                                                       |
+| `onCommTargetRegistered` | `(targetName) => void`: called when a comm target is registered, for kernels that must register it before the frontend can open comms on it.                                                                                                                                                                                       |
+| `scheduler`              | `{ setTimeout(callback, ms), clearTimeout(handle) }`: the timers of the host, for the work the runtime defers, like sending the pending text of the streams. Defaults to the timers of `globalScope`, if any, read when the evaluator is created. `null` for none, see below.                                                      |
+| `flushInterval`          | The longest time in milliseconds the text written to stdout or stderr is kept, to send the consecutive writes together. 50 by default, 0 sends one message per write.                                                                                                                                                              |
+| `maxStreamBufferSize`    | The size of the pending text of a stream, in UTF-16 code units, from which it is sent. 1,000,000 by default.                                                                                                                                                                                                                       |
+| `maxStreamOutput`        | The number of characters a cell can print on stdout and stderr, counted from the start of the cell or its last `clear_output`: the rest is dropped, with a notice on stderr. 5,000,000 by default, 0 for no limit.                                                                                                                 |
+| `executor`               | A `JavaScriptExecutor`, to configure it, for example to customize the compilation of the cells.                                                                                                                                                                                                                                    |
+| `executorOptions`        | `IExecutorOptions`, plain data: the configuration of the magic imports, see below. Also applied to `executor`.                                                                                                                                                                                                                     |
+| `loopTimeout`            | The time in milliseconds a loop of the cells can keep the page busy before it is stopped with a `LoopTimeoutError`, 0 (the default) for no limit. See [Interrupts and loop timeout](#interrupts-and-loop-timeout).                                                                                                                 |
+| `interruptBuffer`        | An `Int32Array` view of a `SharedArrayBuffer`, to interrupt the loops from another thread: the host sets its first element to 1 with `Atomics.store()`.                                                                                                                                                                            |
 
 The `require()` installed by the evaluator is a global function of the
 realm, so `typeof require` is `'function'` for the cells and for the
 modules they load: a library which checks for CommonJS with
 `typeof require`, without catching the error, gets its `ReferenceError`.
 `delete globalThis.require` removes it.
+
+`_` holds the last result of `execute()` sent as an `execute_result`, and
+`_error` the last error of `execute()` sent as an `execute_error`, or
+reported by `reportUncaught()`: the silent executions do not change them.
+They are configurable accessors of `globalScope`, not enumerable, installed
+only when `globalScope` has no such name, like the `_` of a library loaded
+by the page. Assigning one replaces it with a plain property, and so does a
+declaration or an import of the name in a cell, like
+`import _ from 'lodash-es'`: the evaluator then stops changing it.
+`dispose()` removes the accessors, and keeps the values the cells assigned.
+The contextual help documents them with
+`executor.introspection.setGlobalDoc(name, doc)`, which documents a global
+which may not be a function: `doc` is called when the name is inspected and
+returns the documentation, or undefined to fall back to the documentation of
+the value; `null` removes it. The documented globals are not suggested for
+an undefined name.
 
 `requestInput` throws a `StdinNotImplementedError`, exported by the package,
 when the user can not be asked: when the `execute_request` of the cell has
@@ -160,7 +176,8 @@ The methods of the evaluator:
   execution on stderr, as `Uncaught Error: ...`, or
   `Uncaught (in promise) Error: ...` for the reason of a rejected promise.
   Once the cell reached `maxStreamOutput`, the error goes to the console of
-  the host instead.
+  the host instead. The error becomes `_error`, unless it belongs to a silent
+  execution.
 - `dispose()` removes the globals and the listeners of the evaluator.
 
 The `options` of `execute()` (`JavaScriptRuntimeEvaluator.IExecuteOptions`)

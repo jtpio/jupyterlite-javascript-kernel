@@ -157,5 +157,32 @@ for (const kernel of KERNELS) {
         /'addNumber' is not defined\. Did you mean: .*addNumbers\?/
       );
     });
+
+    test('Document _ and _error in the contextual help', async ({ page }) => {
+      const name = await createNotebook(page, kernel);
+      const index = await runCode(page, '21 * 2');
+
+      await page.menu.clickMenuItem('Help>Show Contextual Help');
+      await page.notebook.activate(name);
+      await typeInCell(page, index + 1, '_');
+      const help = page.locator('.jp-Inspector-content');
+      await expect(help).toContainText('Value:     42');
+      await expect(help).toContainText(
+        'Docstring: The result of the last cell which showed one'
+      );
+
+      await page.keyboard.press('ControlOrMeta+a');
+      await page.keyboard.type('_error');
+      await expect(help).toContainText(
+        'Docstring: The last error thrown by a cell'
+      );
+
+      // They are not suggested for the undefined names
+      await page.keyboard.press('ControlOrMeta+a');
+      await page.keyboard.type('parse_error');
+      await expect(help).toHaveText(
+        "'parse_error' is not defined. Did you mean: Error?"
+      );
+    });
   });
 }

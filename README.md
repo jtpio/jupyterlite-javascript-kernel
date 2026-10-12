@@ -199,6 +199,7 @@ The cells run like in a REPL, such as the Node.js REPL:
 - The `export` keywords are ignored, so the code of a module can be pasted in a cell: `export const x = 1` declares `x`, the `export { ... }` lists are removed, and `export ... from '...'` loads the module.
 - The cells can use top-level `await` and the `import` statements of the modules, and they run in sloppy mode, so the names reserved only in strict mode, like `package` or `interface`, can be declared, also in a cell with `import` or `export` statements.
 - The declarations named like a global of the browser keep their value: after `const name = { a: 1 }`, `name.a` is `1` in the next cells, instead of `window.name` turning the value to a string, and `function onmessage(event) {}` installs the event handler. The globals which can not be replaced, like `location`, `top`, `window` and `document` in `JavaScript (IFrame)`, can not be declared: `const location = 'Paris'` fails with `SyntaxError: 'location' is a built-in global and cannot be redeclared in a cell; pick another name`, instead of navigating the iframe away. As in a script, a `var` declaration without a value, like `var window;`, keeps the global.
+- `_` holds the result of the last cell which showed one, like in the Node.js REPL: after a cell showing `42`, `_ + 1` is `43`. A cell without a value, or ending with a semicolon, keeps it. `_error` holds the last error: the error of the last cell which failed, or the last error printed later as `Uncaught` (see [Errors](#errors)), like `_error.stack` after a failure. Assigning `_` or `_error`, declaring them, or importing `_`, like `import _ from 'lodash-es'`, replaces them with that value for good, so the libraries named `_` keep working, and `delete _` removes it. A script of the page looking for a global `_`, like a UMD bundle looking for Underscore, finds the last result: assign `_` before loading it. The [silent requests](#execute-requests-of-extensions) of the extensions do not change them.
 
 ## Imports
 
@@ -327,6 +328,7 @@ Error: boom
 - The `cause` of an error and the errors of an `AggregateError` are shown nested, under `[cause]:` and `[errors]:`.
 - `console.error(error)`, `console.trace()` and the errors shown as values use the same locations.
 - The errors thrown later, in a timer, an event listener or the handler of a widget, are printed on stderr as `Uncaught Error: ...`, with the other outputs of the code that threw them (see [Console](#console)): the errors of a timer in the cell which created it, the ones of a widget handler in the cell which registered it, the others in the last cell that ran. The promises rejected without a handler, like an async function called without `await`, are printed as `Uncaught (in promise) Error: ...`. The kernel keeps running. These errors are shown in the notebook instead of the console of the browser.
+- The last error, of a cell or printed later, is in `_error`, to look at it in the next cell (see [Cells](#cells)).
 
 The columns can differ slightly between browsers, which point at different parts of the expression that failed.
 

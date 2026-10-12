@@ -151,6 +151,59 @@ for (const kernel of KERNELS) {
       ).toHaveText(['undefined\n']);
     });
 
+    test('Keep the last result in _ and the last error in _error', async ({
+      page
+    }) => {
+      await runCode(page, '21 * 2');
+      let index = await runCode(page, '_ + 1');
+      expect(await page.notebook.getCellTextOutput(index)).toEqual(['43']);
+
+      // The cells without a value keep it
+      await runCode(page, 'const unused = 1;');
+      await runCode(page, '_ * 2;');
+      index = await runCode(page, '_');
+      expect(await page.notebook.getCellTextOutput(index)).toEqual(['43']);
+
+      index = await runCode(page, 'null.x');
+      await expect(await getOutputs(page, index)).toContainText('TypeError');
+      index = await runCode(page, '_error.name');
+      expect(await page.notebook.getCellTextOutput(index)).toEqual([
+        "'TypeError'"
+      ]);
+
+      // The errors thrown later, like in a timer
+      index = await runCode(
+        page,
+        'setTimeout(() => { throw new RangeError("later") }, 0);'
+      );
+      await expect(
+        await getOutputs(page, index, 'application/vnd.jupyter.stderr')
+      ).toContainText('Uncaught RangeError: later');
+      index = await runCode(page, '_error.message');
+      expect(await page.notebook.getCellTextOutput(index)).toEqual(["'later'"]);
+    });
+
+    test('Replace _ with an import or an assignment', async ({ page }) => {
+      // Like lodash, imported as _
+      await runCode(
+        page,
+        'import _ from \'data:text/javascript,export default "lodash"\';'
+      );
+      await runCode(page, '1 + 1');
+      let index = await runCode(page, '_');
+      expect(await page.notebook.getCellTextOutput(index)).toEqual([
+        "'lodash'"
+      ]);
+
+      await runCode(page, 'null.x');
+      await runCode(page, '_error = "handled";');
+      await runCode(page, 'undefined.y');
+      index = await runCode(page, '_error');
+      expect(await page.notebook.getCellTextOutput(index)).toEqual([
+        "'handled'"
+      ]);
+    });
+
     test('Await promises at the top level', async ({ page }) => {
       const index = await runCode(
         page,
