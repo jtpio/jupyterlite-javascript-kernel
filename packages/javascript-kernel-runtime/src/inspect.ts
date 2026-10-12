@@ -8,7 +8,7 @@
 // types are checked with the internal slots of the values (for instance with
 // the getter of Map.prototype.size) rather than with instanceof.
 
-import { color, hasOwn, safe, stripAnsi } from './utils';
+import { color, hasOwn, isThenable, safe, stripAnsi } from './utils';
 
 /**
  * Options of inspect.
@@ -509,7 +509,217 @@ export const isModuleNamespace = (value: any): boolean =>
     false
   );
 
-const isBoxedPrimitive = (value: unknown): boolean =>
+const NATIVE_CODE_RE = /\{\s*\[native code\]\s*\}\s*$/;
+
+/**
+ * Whether a function is built in the engine or the host, like the getters of
+ * the web APIs, from its source.
+ */
+const isNativeFunction = (fn: unknown): boolean =>
+  typeof fn === 'function' &&
+  NATIVE_CODE_RE.test(safe(() => Function.prototype.toString.call(fn), ''));
+
+/**
+ * The native accessor or method of an object, inherited from its
+ * prototypes: the getter of an accessor, or the function of a method.
+ */
+function nativeMember(
+  object: unknown,
+  key: string,
+  kind: 'get' | 'value'
+): ((...args: any[]) => unknown) | null {
+  let current = safe(() => Object.getPrototypeOf(object), null);
+  for (let i = 0; current !== null && i < 100; i++) {
+    const descriptor = safe(() =>
+      Object.getOwnPropertyDescriptor(current, key)
+    );
+    if (descriptor) {
+      const member = descriptor[kind];
+      return isNativeFunction(member) ? member : null;
+    }
+    current = safe(() => Object.getPrototypeOf(current), null);
+  }
+  return null;
+}
+
+/**
+ * Whether a value is a DOM node, like an element or a text node, from any
+ * realm. Its type is checked with the native getter of `nodeType`, so that
+ * the engines without the DOM APIs are not needed.
+ */
+export const isDomNode = (value: unknown): boolean =>
+  value !== null &&
+  typeof value === 'object' &&
+  nativeMember(value, 'nodeType', 'get') !== null &&
+  typeof safe(() => (value as any).nodeType) === 'number';
+
+/**
+ * The longest value of the attributes shown in the tag of an element.
+ */
+const MAX_ATTRIBUTE_LENGTH = 100;
+
+/**
+ * Format an attribute of an element, like `id="main"`, with its value
+ * shortened.
+ */
+function formatAttribute(attribute: any): string {
+  let value = safe(() => String(attribute.value), '');
+  if (value.length > MAX_ATTRIBUTE_LENGTH) {
+    value = value.slice(0, MAX_ATTRIBUTE_LENGTH) + '…';
+  }
+  return `${safe(() => String(attribute.name), '')}="${value.replace(/"/g, '&quot;')}"`;
+}
+
+/**
+ * Format a DOM node shortly, like the opening tag of an element:
+ * `<div id="main">`.
+ */
+function formatDomNode(ctx: IContext, node: any): string {
+  const text = (key: string) => safe(() => String(node[key]), '');
+  switch (safe(() => node.nodeType)) {
+    case 1: {
+      const localName = safe(() => node.localName);
+      const name = typeof localName === 'string' ? localName : text('nodeName');
+      let tag = `<${name}`;
+      const attributes = safe(() => Array.from(node.attributes), []) as any[];
+      for (const attribute of attributes) {
+        tag += ` ${formatAttribute(attribute)}`;
+      }
+      return stylize(ctx, `${tag}>`, 'special');
+    }
+    case 2:
+      return stylize(ctx, formatAttribute(node), 'special');
+    case 3:
+      return `${stylize(ctx, '#text', 'special')} ${formatPrimitiveValue(ctx, text('data'))}`;
+    case 8:
+      return stylize(ctx, `<!--${text('data')}-->`, 'special');
+    case 10:
+      return stylize(ctx, `<!DOCTYPE ${text('name')}>`, 'special');
+    default:
+      return stylize(ctx, text('nodeName'), 'special');
+  }
+}
+
+/**
+ * The names of the native getters of an object, inherited from its
+ * prototypes, like the `size` and the `type` of a Blob. The getters of the
+ * prototype of the objects, like `__proto__`, and `constructor`, an accessor
+ * of the prototype of the iterators, are left out.
+ */
+export function nativeGetterNames(object: unknown): string[] {
+  const names: string[] = [];
+  const seen = new Set<string>();
+  let current = safe(() => Object.getPrototypeOf(object), null);
+  for (let i = 0; current !== null && i < 100; i++) {
+    const next = safe(() => Object.getPrototypeOf(current), null);
+    if (next === null) {
+      // The prototype of the objects, of any realm
+      break;
+    }
+    for (const name of safe(() => Object.getOwnPropertyNames(current), [])) {
+      if (seen.has(name) || name === 'constructor') {
+        continue;
+      }
+      seen.add(name);
+      const descriptor = safe(() =>
+        Object.getOwnPropertyDescriptor(current, name)
+      );
+      if (descriptor && isNativeFunction(descriptor.get)) {
+        names.push(name);
+      }
+    }
+    current = next;
+  }
+  return names;
+}
+
+/**
+ * Format the state of a platform object, like a Response, a Blob or a
+ * DOMRect, from the values of its native getters, and with `withEntries`,
+ * the entries of the objects with a native `entries()` method, like Headers.
+ */
+function formatNativeState(
+  ctx: IContext,
+  object: any,
+  level: number,
+  skip: (name: string) => boolean,
+  withEntries = true
+): string[] {
+  const output: string[] = [];
+  const entries = withEntries ? nativeMember(object, 'entries', 'value') : null;
+  if (entries) {
+    const iterator = safe(() => entries.call(object) as Iterator<unknown>);
+    // The asynchronous iterables, like a FileSystemDirectoryHandle, are not
+    // listed: their steps are promises
+    const isSync =
+      iterator !== undefined &&
+      iterator !== null &&
+      !safe(() => Symbol.asyncIterator in iterator, true);
+    for (let i = 0; isSync; i++) {
+      const step = safe(() => iterator.next());
+      if (
+        step === null ||
+        typeof step !== 'object' ||
+        isThenable(step) ||
+        typeof step.done !== 'boolean' ||
+        step.done
+      ) {
+        break;
+      }
+      if (i >= ctx.maxArrayLength) {
+        output.push('... more items');
+        break;
+      }
+      const pair = safe(() =>
+        Array.isArray(step.value) ? step.value : undefined
+      );
+      if (!pair || pair.length !== 2) {
+        // Not a pair of a key and a value
+        break;
+      }
+      const [key, item] = pair;
+      output.push(
+        `${formatNested(ctx, key, level)} => ${formatNested(ctx, item, level)}`
+      );
+    }
+  }
+  const getters = nativeGetterNames(object).filter(name => !skip(name));
+  let shown = 0;
+  for (const name of getters) {
+    if (shown >= ctx.maxArrayLength) {
+      output.push(`... ${getters.length - shown} more properties`);
+      break;
+    }
+    let value: unknown;
+    try {
+      value = object[name];
+    } catch {
+      // Getters which throw, like the ones called on a prototype
+      continue;
+    }
+    if (value === null && /^on/.test(name)) {
+      // The event handlers which are not set
+      continue;
+    }
+    output.push(`${formatKey(ctx, name)}: ${formatNested(ctx, value, level)}`);
+    shown++;
+  }
+  return output;
+}
+
+/**
+ * Whether an object is a list of the web APIs, like a NodeList, with a
+ * native `length` getter and a native `item()` method.
+ */
+const isNativeArrayLike = (value: unknown): boolean =>
+  nativeMember(value, 'length', 'get') !== null &&
+  nativeMember(value, 'item', 'value') !== null;
+
+/**
+ * Whether a value is a boxed primitive, like `new String('a')`, from any
+ * realm.
+ */
+export const isBoxedPrimitive = (value: unknown): boolean =>
   safe(
     () =>
       [
@@ -523,6 +733,9 @@ const isBoxedPrimitive = (value: unknown): boolean =>
   );
 
 function formatObject(ctx: IContext, value: any, level: number): string {
+  if (isDomNode(value)) {
+    return formatDomNode(ctx, value);
+  }
   const constructorName = getConstructorName(value);
   let tag = safe(() => value[Symbol.toStringTag], '');
   if (typeof tag !== 'string' || tag === constructorName) {
@@ -679,8 +892,29 @@ function formatObject(ctx: IContext, value: any, level: number): string {
     if (keys.length === 0 && symbols.length === 0) {
       return base;
     }
+  } else if (isNativeArrayLike(value)) {
+    // The lists of the web APIs, like NodeList
+    isArrayLike = true;
+    const length = safe(() => Number(value.length), 0);
+    braces = [
+      `${getPrefix(constructorName, tag, 'Object', `(${length})`)}[`,
+      ']'
+    ];
+    keys = keys.filter(key => !/^(0|[1-9][0-9]*)$/.test(key));
+    formatter = () => [
+      ...formatArrayLike(ctx, value, level, length, i => safe(() => value[i])),
+      ...formatNativeState(
+        ctx,
+        value,
+        level,
+        name => name === 'length' || hasOwn(value, name),
+        false
+      )
+    ];
   } else if (constructorName !== 'Object' || tag) {
     braces = [`${getPrefix(constructorName, tag, 'Object')}{`, '}'];
+    formatter = () =>
+      formatNativeState(ctx, value, level, name => hasOwn(value, name));
   }
 
   if (level > ctx.depth) {

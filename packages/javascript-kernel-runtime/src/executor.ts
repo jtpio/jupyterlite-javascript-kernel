@@ -9,17 +9,9 @@ import { generate, GENERATOR } from 'astring';
 
 import type { IMimeBundle } from '@jupyterlab/nbformat';
 
-import { normalizeBundle } from './display';
+import { isKnownMimeType, normalizeBundle, toJsonTree } from './display';
 import { resolveUrl } from './env';
-import {
-  inspect,
-  isDate,
-  isError,
-  isMap,
-  isModuleNamespace,
-  isRegExp,
-  isSet
-} from './inspect';
+import { inspect, isError } from './inspect';
 import {
   LOOP_GUARD_NAME,
   loopGuardCall,
@@ -45,7 +37,7 @@ import {
   type IErrorParts,
   type ITracebackContext
 } from './traceback';
-import { escapeHtml, safe, stripAnsi } from './utils';
+import { escapeHtml, isPlainObject, safe, stripAnsi } from './utils';
 
 /**
  * The source URL of the probe measuring how the engine reports the
@@ -1118,7 +1110,8 @@ export class JavaScriptExecutor {
    *   or _toJson() methods
    *
    * The plain text representation is formatted like util.inspect in Node.js,
-   * and the data with a JSON representation is also shown as a tree.
+   * and the data with a faithful JSON representation, within the limits of
+   * toJsonTree(), is also shown as a tree.
    *
    * @param value - The value to convert to a MIME bundle.
    * @returns The MIME bundle representation of the value.
@@ -1173,12 +1166,11 @@ export class JavaScriptExecutor {
       return this._getDOMElementMimeBundle(value);
     }
 
-    // Objects which are already a MIME bundle, with MIME types in their data
-    if (value.data && typeof value.data === 'object') {
-      const dataKeys = Object.keys(value.data);
-      if (dataKeys.some(key => key.includes('/'))) {
-        return value.data;
-      }
+    // Objects which are already a MIME bundle, with MIME types in their data,
+    // like { data: { 'text/html': '<b>Hi</b>' } }, but not { data: { '2024/01': 5 } }
+    const bundle = this._mimeBundleData(value);
+    if (bundle) {
+      return bundle;
     }
 
     // Data with a JSON representation is also shown as an interactive tree
@@ -2087,10 +2079,6 @@ export class JavaScriptExecutor {
    * undefined for values without one.
    */
   private _toJson(value: any): any {
-    // Copy the data, so that it can be sent whatever its realm
-    const copy = (data: unknown) =>
-      safe(() => JSON.parse(JSON.stringify(data)), undefined);
-
     if (isError(value)) {
       return {
         name: safe(() => String(value.name), 'Error'),
@@ -2098,36 +2086,23 @@ export class JavaScriptExecutor {
         stack: safe(() => this.cleanStackTrace(value), '')
       };
     }
-    if (isDate(value)) {
-      const time = Date.prototype.getTime.call(value);
-      return Number.isNaN(time)
-        ? undefined
-        : Date.prototype.toISOString.call(value);
+    return toJsonTree(value);
+  }
+
+  /**
+   * The MIME bundle of an object with the shape of the outputs, with a
+   * `data` object whose keys are all known MIME types, or null.
+   */
+  private _mimeBundleData(value: any): IMimeBundle | null {
+    const data = safe(() => value.data);
+    if (!isPlainObject(data)) {
+      return null;
     }
-    if (isMap(value)) {
-      return copy(Object.fromEntries(Map.prototype.entries.call(value)));
+    const keys = safe(() => Object.keys(data), []);
+    if (keys.length === 0 || !keys.every(isKnownMimeType)) {
+      return null;
     }
-    if (isSet(value)) {
-      return copy(Array.from(Set.prototype.values.call(value)));
-    }
-    if (
-      isRegExp(value) ||
-      ArrayBuffer.isView(value) ||
-      isModuleNamespace(value) ||
-      safe(
-        () =>
-          [
-            '[object Promise]',
-            '[object WeakMap]',
-            '[object WeakSet]',
-            '[object ArrayBuffer]'
-          ].includes(Object.prototype.toString.call(value)),
-        false
-      )
-    ) {
-      return undefined;
-    }
-    return copy(value);
+    return safe(() => normalizeBundle(data), null);
   }
 
   /**

@@ -248,7 +248,9 @@ Limitations:
 
 ## Rich output
 
-The last expression of a cell is shown as its result. The values are printed like with `util.inspect` in Node.js, and the data with a JSON representation, like objects and arrays, is also shown as an interactive tree.
+The last expression of a cell is shown as its result. The values are printed like with `util.inspect` in Node.js. The objects of the web APIs show their state, like `Blob { size: 2, type: 'text/plain' }`, or the `status` and the `headers` of the `Response` of `await fetch(url)`. In the console and inside other values, the DOM nodes show as their opening tag, like `{ el: <div id="main"> }`, while an element that is the result of a cell is still rendered as HTML, and a canvas as an image.
+
+The data that JSON can represent as it is, like objects and arrays of strings, numbers, booleans and `null`, is also shown as an interactive tree. The values JSON would change, with `NaN`, `Infinity`, `undefined`, functions, symbols or BigInt, the objects without own properties, like a `Blob`, the objects of the web APIs, like an `Event`, and the large values, with more than 10,000 items or 1 MB of JSON, are shown as text only: the text lists the first 100 items of a large array, which is not saved in full in the notebook.
 
 `display(value, options)` shows values in the middle of a cell. With the `id` option (`true` to generate one), it returns a handle to update the output later, also from other cells:
 
@@ -263,9 +265,9 @@ The `metadata` option sets the metadata of the output. `handle.display(value)` s
 The helpers of `display` show content for the common MIME types:
 
 - `display.html`, `display.markdown`, `display.svg`, `display.latex` and `display.text` take a string, or are used as tagged templates: ``display.markdown`**${name}**` ``
-- `display.json(value)` shows an interactive JSON tree
+- `display.json(value)` shows an interactive JSON tree, or the text of the values JSON can not represent, like above
 - `display.png(bytes, { width, height })` and `display.jpeg(...)` show images, from their bytes or base64
-- `display.mime(bundle)` shows a MIME bundle, like `{ 'text/html': '<b>Hi</b>', 'text/plain': 'Hi' }`
+- `display.mime(bundle)` shows a MIME bundle, like `{ 'text/html': '<b>Hi</b>', 'text/plain': 'Hi' }`. A value with a `data` object of MIME types, like `{ data: { 'text/html': '<b>Hi</b>' } }` or `{ data: { 'text/vnd.mermaid': 'graph TD; A-->B' } }`, is also shown as its MIME bundle, while `{ data: { '2024/01': 5 } }` is shown as data
 
 `clearOutput(wait)` clears the outputs of the cell. With `wait` set to `true`, they are cleared when the next output arrives, to avoid flickering.
 

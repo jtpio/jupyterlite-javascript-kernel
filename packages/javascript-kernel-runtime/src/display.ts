@@ -4,9 +4,20 @@
 import type { IMimeBundle } from '@jupyterlab/nbformat';
 
 import { decodeUtf8 } from './env';
-import { inspect } from './inspect';
+import {
+  inspect,
+  isBoxedPrimitive,
+  isDate,
+  isDomNode,
+  isError,
+  isMap,
+  isModuleNamespace,
+  isRegExp,
+  isSet,
+  nativeGetterNames
+} from './inspect';
 import { setDoc } from './introspection';
-import { bytesToBase64, toBytes } from './utils';
+import { bytesToBase64, isArrayBuffer, isPlainObject, toBytes } from './utils';
 
 /**
  * Options of display() and of its helpers.
@@ -122,6 +133,231 @@ const IMAGE_TYPES: Record<string, string> = {
  */
 export function isJsonMimeType(mimeType: string): boolean {
   return mimeType === 'application/json' || /\+json$/.test(mimeType);
+}
+
+/**
+ * The MIME types of the outputs which JupyterLab renders, besides the
+ * vendor types like `text/vnd.mermaid` or `application/vnd.vegalite.v5+json`
+ * and the JSON types like `application/geo+json`.
+ */
+const KNOWN_MIME_TYPES = new Set([
+  'text/plain',
+  'text/html',
+  'text/markdown',
+  'text/latex',
+  'image/png',
+  'image/jpeg',
+  'image/gif',
+  'image/webp',
+  'image/bmp',
+  'image/svg+xml',
+  'application/json',
+  'application/javascript',
+  'application/pdf'
+]);
+
+/**
+ * Whether a string is the MIME type of a Jupyter output, like `text/html` or
+ * `application/vnd.jupyter.widget-view+json`, rather than a key of some data
+ * with a slash, like `2024/01`.
+ */
+export function isKnownMimeType(mimeType: string): boolean {
+  return (
+    KNOWN_MIME_TYPES.has(mimeType) ||
+    /^(?:(?:text|image|application)\/vnd\.[\w.+-]+|application\/[\w.-]+\+json)$/.test(
+      mimeType
+    )
+  );
+}
+
+/**
+ * The limits of the JSON trees of the outputs.
+ */
+export interface IJsonTreeLimits {
+  /**
+   * The maximum number of values in the tree, besides its arrays and
+   * objects, 10,000 by default.
+   */
+  maxNodes: number;
+
+  /**
+   * The maximum length of the JSON text of the tree, about its size in
+   * bytes, 1,000,000 by default.
+   */
+  maxLength: number;
+}
+
+/**
+ * The default limits of the JSON trees.
+ */
+export const JSON_TREE_LIMITS: IJsonTreeLimits = {
+  maxNodes: 10000,
+  maxLength: 1000000
+};
+
+/**
+ * The maximum nesting of the JSON trees.
+ */
+const MAX_JSON_DEPTH = 100;
+
+/**
+ * Thrown while building a JSON tree, when the value has no faithful one.
+ */
+const NO_JSON_TREE = Symbol('NoJsonTree');
+
+/**
+ * Convert a value to the data of the JSON tree of an output, or undefined
+ * when JSON can not show it as it is, so that the output only has its text.
+ *
+ * Unlike `JSON.parse(JSON.stringify(value))`, which turns NaN, Infinity and
+ * undefined into null and drops the functions, the tree is undefined when
+ * the value has one of them, or a symbol, a BigInt, a hole in an array, a
+ * cycle, an object which is not plain and has no own enumerable keys, like a
+ * Blob or a class instance with only private fields, or an object of the
+ * host APIs, with native getters, like an Event. It is also
+ * undefined when it is larger than the limits, so that a large array is not
+ * saved in full in the notebook. Dates are shown as ISO strings, maps with
+ * string keys as objects and sets as arrays. The tree is made of new objects
+ * and arrays, which can be sent whatever the realm of the value.
+ */
+export function toJsonTree(
+  value: unknown,
+  limits: Partial<IJsonTreeLimits> = {}
+): unknown {
+  const { maxNodes, maxLength } = { ...JSON_TREE_LIMITS, ...limits };
+  let nodes = 0;
+  let length = 0;
+  const ancestors: unknown[] = [];
+
+  const omit = (): never => {
+    throw NO_JSON_TREE;
+  };
+  const count = (size: number, items = 1) => {
+    nodes += items;
+    length += size;
+    if (nodes > maxNodes || length > maxLength) {
+      omit();
+    }
+  };
+  const setKey = (object: object, key: string, item: unknown) => {
+    // Defined rather than assigned, for keys like __proto__
+    Object.defineProperty(object, key, {
+      value: item,
+      enumerable: true,
+      writable: true,
+      configurable: true
+    });
+    count(key.length + 4, 0);
+  };
+
+  const walk = (item: any): unknown => {
+    switch (typeof item) {
+      case 'string':
+        count(item.length + 2);
+        return item;
+      case 'boolean':
+        count(5);
+        return item;
+      case 'number':
+        if (!Number.isFinite(item)) {
+          omit();
+        }
+        count(String(item).length);
+        return item;
+      case 'object':
+        break;
+      default:
+        // undefined, functions, symbols and BigInt
+        return omit();
+    }
+    if (item === null) {
+      count(4);
+      return null;
+    }
+    if (ancestors.length >= MAX_JSON_DEPTH || ancestors.includes(item)) {
+      omit();
+    }
+    // The arrays and the objects are not counted as values
+    count(2, 0);
+    ancestors.push(item);
+    try {
+      return walkObject(item);
+    } finally {
+      ancestors.pop();
+    }
+  };
+
+  const walkObject = (item: any): unknown => {
+    if (isDate(item)) {
+      const time = Date.prototype.getTime.call(item);
+      return Number.isNaN(time)
+        ? omit()
+        : walk(Date.prototype.toISOString.call(item));
+    }
+    if (isMap(item)) {
+      const result = {};
+      for (const [key, entry] of Map.prototype.entries.call(item)) {
+        if (typeof key !== 'string') {
+          omit();
+        }
+        setKey(result, key, walk(entry));
+      }
+      return result;
+    }
+    if (isSet(item)) {
+      return Array.from(Set.prototype.values.call(item), walk);
+    }
+    if (
+      isError(item) ||
+      isRegExp(item) ||
+      isBoxedPrimitive(item) ||
+      ArrayBuffer.isView(item) ||
+      isArrayBuffer(item) ||
+      isModuleNamespace(item) ||
+      isDomNode(item)
+    ) {
+      omit();
+    }
+    if (
+      Object.getOwnPropertySymbols(item).some(symbol =>
+        Object.prototype.propertyIsEnumerable.call(item, symbol)
+      )
+    ) {
+      omit();
+    }
+    if (Array.isArray(item)) {
+      // Check the length first, to not list the keys of a huge array
+      if (item.length > maxNodes || Object.keys(item).length !== item.length) {
+        // Holes, and other keys like the index of a RegExp match
+        omit();
+      }
+      return Array.from(item, walk);
+    }
+    const keys = Object.keys(item);
+    if (
+      !isPlainObject(item) &&
+      (keys.length === 0 || nativeGetterNames(item).length > 0)
+    ) {
+      // A Promise, a Blob, a class instance with private fields, an Event
+      // whose state is in its getters...
+      omit();
+    }
+    if (keys.length > maxNodes) {
+      omit();
+    }
+    const result = {};
+    for (const key of keys) {
+      setKey(result, key, walk(item[key]));
+    }
+    return result;
+  };
+
+  try {
+    return walk(value);
+  } catch {
+    // No faithful tree, or a getter or a proxy which throws
+    return undefined;
+  }
 }
 
 /**
@@ -342,10 +578,15 @@ export function createDisplay(host: IDisplayHost): IDisplay {
   display.json = setDoc(
     (content: unknown, options: IDisplayOptions = {}) =>
       show(
-        { 'application/json': content, 'text/plain': inspect(content) },
+        {
+          'application/json': toJsonTree(content),
+          'text/plain': inspect(content)
+        },
         { ...options, raw: true }
       ),
-    'Displays JSON data as an interactive tree.\n\ndisplay.json(value, options?)'
+    'Displays JSON data as an interactive tree.\n\ndisplay.json(value, options?)\n\n' +
+      'The values JSON can not show as they are, like NaN or undefined, and the large\n' +
+      'ones, more than 10,000 values or 1 MB, are shown as text.'
   );
   display.png = setDoc(
     imageHelper('image/png'),

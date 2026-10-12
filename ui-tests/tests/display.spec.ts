@@ -152,6 +152,100 @@ for (const kernel of KERNELS) {
       await expect(outputs.nth(1)).toContainText('kernel');
     });
 
+    test('Show the values JSON can not represent as text', async ({ page }) => {
+      // JSON would show NaN and undefined as null
+      let index = await runCode(page, '[1, NaN, undefined]');
+      let outputs = await getOutputs(page, index);
+      await expect(outputs).toHaveText(['[ 1, NaN, undefined ]']);
+      await expect(outputs).toHaveAttribute('data-mime-type', 'text/plain');
+
+      index = await runCode(page, 'display.json({ ratio: Infinity })');
+      outputs = await getOutputs(page, index);
+      await expect(outputs).toHaveText(['{ ratio: Infinity }']);
+      await expect(outputs).toHaveAttribute('data-mime-type', 'text/plain');
+    });
+
+    test('Show the state of platform objects', async ({ page }) => {
+      let index = await runCode(
+        page,
+        'new Blob(["hi"], { type: "text/plain" })'
+      );
+      let outputs = await getOutputs(page, index);
+      await expect(outputs).toHaveText([
+        "Blob { size: 2, type: 'text/plain' }"
+      ]);
+      await expect(outputs).toHaveAttribute('data-mime-type', 'text/plain');
+
+      index = await runCode(
+        page,
+        'new Response("hello", { status: 201, headers: { "X-Kernel": "JavaScript" } })'
+      );
+      outputs = await getOutputs(page, index);
+      await expect(outputs).toContainText('Response {');
+      await expect(outputs).toContainText('status: 201');
+      await expect(outputs).toContainText("'x-kernel' => 'JavaScript'");
+      await expect(outputs).toContainText('bodyUsed: false');
+      await expect(outputs).toHaveAttribute('data-mime-type', 'text/plain');
+
+      // The own isTrusted key of an event does not hide its state in a tree
+      index = await runCode(page, 'new CustomEvent("ping", { detail: 42 })');
+      outputs = await getOutputs(page, index);
+      await expect(outputs).toContainText("type: 'ping'");
+      await expect(outputs).toContainText('detail: 42');
+      await expect(outputs).toHaveAttribute('data-mime-type', 'text/plain');
+
+      // The entries of an asynchronous iterable are not listed
+      index = await runCode(page, 'await navigator.storage.getDirectory()');
+      outputs = await getOutputs(page, index);
+      await expect(outputs).toHaveText([
+        "FileSystemDirectoryHandle { kind: 'directory', name: '' }"
+      ]);
+    });
+
+    test('Limit the JSON tree of large values', async ({ page }) => {
+      let index = await runCode(
+        page,
+        'Array.from({ length: 100000 }, (_, i) => i)'
+      );
+      let outputs = await getOutputs(page, index);
+      await expect(outputs).toContainText('... 99900 more items');
+      await expect(outputs).toHaveAttribute('data-mime-type', 'text/plain');
+
+      // An array at the limit is still shown as a tree
+      index = await runCode(page, 'Array.from({ length: 10000 }, (_, i) => i)');
+      outputs = await getOutputs(page, index);
+      await expect(outputs).toHaveClass(/jp-RenderedJSON/);
+      await expect(outputs).toContainText('10000 items');
+    });
+
+    test('Show objects with a data key', async ({ page }) => {
+      // Keys with a slash are not MIME types
+      let index = await runCode(page, '({ data: { "2024/01": 5 } })');
+      let outputs = await getOutputs(page, index);
+      await expect(outputs).toHaveClass(/jp-RenderedJSON/);
+      // Expand the data in the tree
+      await outputs.getByText('data', { exact: true }).click();
+      await expect(outputs).toContainText('2024/01');
+      await expect(outputs).not.toContainText('No renderer');
+
+      // A MIME bundle in the data is shown
+      index = await runCode(
+        page,
+        '({ data: { "text/html": "<b>From the bundle</b>" } })'
+      );
+      outputs = await getOutputs(page, index, 'text/html');
+      await expect(outputs.locator('b')).toHaveText('From the bundle');
+
+      // And the vendor MIME types, like the Mermaid diagrams
+      index = await runCode(
+        page,
+        '({ data: { "text/vnd.mermaid": "graph TD; Kernel-->Diagram" } })'
+      );
+      outputs = await getOutputs(page, index);
+      await expect(outputs.getByRole('figure')).toBeVisible();
+      await expect(outputs).not.toHaveClass(/jp-RenderedJSON/);
+    });
+
     test('Format built-in objects', async ({ page }) => {
       let index = await runCode(page, 'new Date(0)');
       await expect(await getOutputs(page, index)).toContainText(

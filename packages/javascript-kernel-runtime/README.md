@@ -317,6 +317,40 @@ value. `new ExecutorConfig(options)` creates a configuration from them, and
 `executor.config.update(options)` changes the configuration of an executor:
 the next cells use it.
 
+## Outputs
+
+`executor.getMimeBundle(value)` returns the MIME bundle of a result, or of
+a value given to `display()`: its custom representations, the HTML of the
+DOM elements and an image of the canvases, and else its text, formatted by
+`inspect()`, with a JSON tree:
+
+- `inspect(value, options?)` formats values like `util.inspect` in Node.js.
+  The objects of the host APIs show the values of their native getters,
+  the inherited accessors whose source is `[native code]`, like
+  `Blob { size: 2, type: '' }`, and the entries of a native `entries()`
+  method, like `URLSearchParams { 'a' => '1', size: 1 }`. The lists with a native
+  `length` getter and `item()` method, like a `NodeList`, show their items,
+  and the DOM nodes show as their opening tag, like `<div id="main">`. The
+  values are recognized from their internal slots and their native members,
+  without the DOM types or the host globals, so it works in any engine and
+  with the values of another realm.
+- `toJsonTree(value, limits?)` returns the `application/json` data of a
+  value, made of new objects and arrays, or `undefined` when JSON can not
+  show the value as it is: when it has `NaN`, `Infinity`, `undefined`, a
+  function, a symbol, a BigInt, a hole in an array or a cycle, or an object
+  which is not plain and has no own enumerable keys, like a `Blob`, a
+  `Promise` or a class instance with only private fields, or which has
+  native getters, like an `Event`. It is also `undefined` above the
+  limits, `JSON_TREE_LIMITS` by default: 10,000 values besides the arrays
+  and the objects (`maxNodes`) and 1,000,000 characters of JSON
+  (`maxLength`). Dates
+  are ISO strings, maps with string keys objects, and sets arrays.
+  `display.json()` uses it too, and shows the text alone without a tree.
+- An object with a `data` object whose keys are all MIME types of the
+  outputs, checked with `isKnownMimeType(mimeType)`, like `text/html` or
+  the vendor types like `text/vnd.mermaid`, is shown as this MIME bundle: `{ data: { 'text/html': '<b>Hi</b>' } }` shows bold text, and
+  `{ data: { '2024/01': 5 } }` a JSON tree.
+
 ## Cells
 
 `executor.makeAsyncFromCode(code, { name })` compiles a cell to an async
