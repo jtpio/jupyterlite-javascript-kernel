@@ -1,9 +1,17 @@
 // Copyright (c) Jupyter Development Team.
 // Distributed under the terms of the Modified BSD License.
 
-import { DOMWidget } from './widget';
+import { DOMWidget } from './widget_dom';
+import {
+  HTMLMathStyle,
+  HTMLStyle,
+  LabelStyle,
+  TextStyle
+} from './widget_style';
 
 class _TextBase extends DOMWidget {
+  static override styleClass = TextStyle;
+
   protected override _defaults() {
     return {
       ...super._defaults(),
@@ -94,14 +102,17 @@ class _DisplayBase extends DOMWidget {
 export class Label extends _DisplayBase {
   static override modelName = 'LabelModel';
   static override viewName = 'LabelView';
+  static override styleClass = LabelStyle;
 }
 
 export class HTML extends _DisplayBase {
   static override modelName = 'HTMLModel';
   static override viewName = 'HTMLView';
+  static override styleClass = HTMLStyle;
 }
 
 export class HTMLMath extends _DisplayBase {
   static override modelName = 'HTMLMathModel';
   static override viewName = 'HTMLMathView';
+  static override styleClass = HTMLMathStyle;
 }

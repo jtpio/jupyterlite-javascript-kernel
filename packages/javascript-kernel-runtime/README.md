@@ -532,6 +532,50 @@ const { ename, evalue, traceback } = runtime.formatError(error, context);
 - `CellSyntaxError` is a syntax error with its location in a cell, shown with
   a caret.
 
+## Widgets
+
+The evaluator gives the cells the widget classes of `createWidgetClasses(commManager)`
+as `Jupyter.widgets`: subclasses of the exported classes, like `IntSlider`,
+bound to the comm manager of the evaluator. A widget creates its default
+layout and style, and the ones of the plain objects given as `layout` or
+`style`, with the bound classes (`Widget._boundClasses` maps the exported
+classes to them), so that `slider.layout instanceof Jupyter.widgets.Layout`.
+A class without a bound class is created with the manager of the widget
+creating it.
+
+A widget class, like a custom model, describes its state with:
+
+- `modelName`, `modelModule`, `modelModuleVersion`, `viewName` (null for a
+  widget without view), `viewModule` and `viewModuleVersion`, static
+- `_defaults()`, the default state: the properties not starting with `_`
+  get accessors on the prototype of the class, like `slider.value`, unless
+  the class defines them. `declare` fields type them in TypeScript
+- `styleClass`, static, for a `DOMWidget`: the class of its style, like
+  `SliderStyle`, or null for a widget without style, like a box
+- `_validate(state, names)`, which validates a new state before it is
+  applied, like the validators of ipywidgets: it coerces the values of the
+  whole new state in place, or throws to reject it. It is called with the
+  names of the properties given to the constructor (after the defaults are
+  applied, so `{ value: 150, max: 200 }` is valid), to `set()`, or sent by
+  the frontend, which gets back the values it changed, like a clamped value.
+  The properties given as `undefined` are left out, so they keep their
+  default or their value.
+  The numeric widgets clamp their value to their bounds, round the values of
+  the integer widgets, and throw a `RangeError` when `min > max` or
+  `lower > upper`. The selection widgets turn `options`, `value` and `label`
+  into the synced `_options_labels` and `index`
+- `_notify(changes)`, which calls the listeners of the changes of the state
+  (`[name, value, old]`): the selection widgets add the changes of the value
+  and the label, derived from the index
+- `_createWidget(cls, state?)`, which creates a widget of another class with
+  the manager of this one
+- `send(content, buffers?)` and `onMsg(callback)` / `offMsg(callback)`, for
+  the custom messages of the model in the frontend (`msg:custom`)
+
+`DOMWidget` is in `widgets/widget_dom.ts`, apart from `Widget` in
+`widgets/widget.ts`, since it uses `Layout` and `Style`, which extend
+`Widget`.
+
 ## Engine requirements
 
 - The ES2020 syntax, and the ES2022 built-ins.

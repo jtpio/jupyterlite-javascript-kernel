@@ -6,7 +6,7 @@ import type { IOutputCapture, IOutputSink } from '../output_router';
 import type { RuntimeOutputMessage } from '../protocol';
 import { isThenable } from '../utils';
 
-import { DOMWidget } from './widget';
+import { DOMWidget } from './widget_dom';
 import { OUTPUT_MODULE, OUTPUT_MODULE_VERSION } from './version';
 
 export interface IOutputCaptureOptions {

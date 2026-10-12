@@ -15,6 +15,17 @@ export function safe<T, F>(f: () => T, fallback?: F): T | F | undefined {
 }
 
 /**
+ * Whether a value is a plain object, from any realm.
+ */
+export function isPlainObject(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+  const proto = Object.getPrototypeOf(value);
+  return proto === null || Object.getPrototypeOf(proto) === null;
+}
+
+/**
  * Whether an object has an own property.
  */
 export function hasOwn(object: unknown, key: PropertyKey): boolean {

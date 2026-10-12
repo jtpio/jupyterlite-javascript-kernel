@@ -1,7 +1,7 @@
 // Copyright (c) Jupyter Development Team.
 // Distributed under the terms of the Modified BSD License.
 
-import { DOMWidget } from './widget';
+import { DOMWidget } from './widget_dom';
 
 /**
  * An image, from its bytes.

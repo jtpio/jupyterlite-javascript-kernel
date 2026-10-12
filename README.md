@@ -410,6 +410,89 @@ When a notebook is closed and opened again while its kernel keeps running, like 
 
 Widgets also work when JupyterLite is served over plain http, for example on a LAN, where the browser hides some APIs like `crypto.randomUUID` (only `prompt()` in `JavaScript (Web Worker)` needs the service worker, which needs `https` or `localhost`).
 
+### Selection widgets
+
+The options of `Dropdown`, `RadioButtons`, `Select`, `ToggleButtons`, `SelectionSlider`, `SelectMultiple` and `SelectionRangeSlider` are values, labelled with their string, `[label, value]` pairs, or an object of the values by label. Select an option with its `value`, its `label` or its `index`:
+
+```javascript
+const { Dropdown } = Jupyter.widgets;
+
+const size = new Dropdown({
+  options: [
+    ['Small', 1],
+    ['Medium', 2],
+    ['Large', 3]
+  ],
+  value: 2,
+  description: 'Size'
+});
+size.observe(({ new: value }) => console.log('Size:', value), 'value');
+size;
+```
+
+- `value` is the value of the selected option (`2`), `label` its label (`'Medium'`), and `index` its index, null when nothing is selected. Like ipywidgets, the frontend syncs the index: `value` and `label` follow it, and their observers get the value and the label. The values can be anything, like objects or bigints, and are compared like `Array.includes()`
+- a value or a label which is not an option throws a `RangeError` (`Invalid selection: value not found`)
+- when the `options` change, the selected value stays selected if it is still an option, or else the first option is selected
+- `SelectMultiple` and `SelectionRangeSlider` select a list of values, labels and indices. The range of a `SelectionRangeSlider` has two options, the lower one first, or else it throws a `RangeError`
+
+### Layout and style
+
+Every widget with a view has a `layout`, and a `style` of its kind, like a `ButtonStyle` for a `Button` (the boxes, `Image` and `Output` have no style). Their properties, like the CSS properties of the layout, can be set when the widget is created, as plain objects, or later:
+
+```javascript
+const { Button, IntSlider } = Jupyter.widgets;
+
+const button = new Button({
+  description: 'Save',
+  style: { button_color: 'lightgreen' },
+  layout: { width: '200px', border: '1px solid gray' }
+});
+button.tooltip = 'Save the results';
+button.layout.height = '40px';
+display(button);
+
+const slider = new IntSlider({ description: 'A long description' });
+slider.style.description_width = 'initial';
+slider;
+```
+
+- `layout.border` sets the four borders, `border_top`, `border_right`, `border_bottom` and `border_left`
+- assigning a plain object to `layout` or `style` replaces them with new ones
+- `tooltip`, `tabbable`, and `addClass(name)` and `removeClass(name)` for the CSS classes of the view, are available on all these widgets
+- the properties given as `undefined`, like `new IntSlider({ max: options.max })` without a `max`, keep their default, and setting a property to `undefined` keeps its value
+
+### Values in their bounds
+
+Like ipywidgets, the numeric widgets keep their value in their bounds, so the value in the kernel is the one the widget shows: `new IntSlider({ value: 150 })` has the value 100, and lowering `max` lowers the value. The bounds of the constructor are applied first, so `new IntSlider({ value: 150, max: 200 })` keeps 150. The integer widgets round their values (`slider.value = 3.7` gives 4), and the widgets throw a `RangeError` when `min > max` (`setting min > max`), or when the lower value of a range slider is above the upper one.
+
+### Buttons and custom messages
+
+`button.onClick(callback)` calls the callback with the button, like `button.onClick(b => { b.description = 'Clicked'; })`, and `button.offClick(callback)` removes it.
+
+Every widget can exchange custom messages with its model in the frontend: `widget.send(content, buffers?)` sends one, and `widget.onMsg((content, buffers) => ...)` handles the ones of the frontend (`offMsg` removes the handler), like the clicks of a button. To use the widgets of a library installed in JupyterLite, subclass `Widget`, or `DOMWidget` for a widget with a view, with the names of its model and view:
+
+```javascript
+const { DOMWidget } = Jupyter.widgets;
+
+class Counter extends DOMWidget {
+  static modelName = 'CounterModel';
+  static modelModule = 'my-widgets';
+  static modelModuleVersion = '1.0.0';
+  static viewName = 'CounterView';
+  static viewModule = 'my-widgets';
+  static viewModuleVersion = '1.0.0';
+
+  // The default state: its properties get accessors, like counter.count
+  _defaults() {
+    return { ...super._defaults(), count: 0 };
+  }
+}
+
+const counter = new Counter({ count: 1 });
+counter.onMsg(content => console.log('The view says', content));
+counter;
+```
+
 ### Available widgets
 
 - **Numeric**: `IntSlider`, `FloatSlider`, `FloatLogSlider`, `IntRangeSlider`, `FloatRangeSlider`, `Play`, `IntProgress`, `FloatProgress`, `IntText`, `FloatText`, `BoundedIntText`, `BoundedFloatText`
@@ -417,7 +500,7 @@ Widgets also work when JupyterLite is served over plain http, for example on a L
 - **Selection**: `Dropdown`, `RadioButtons`, `Select`, `SelectMultiple`, `ToggleButtons`, `SelectionSlider`, `SelectionRangeSlider`
 - **String**: `Text`, `Textarea`, `Password`, `Combobox`
 - **Display**: `Label`, `HTML`, `HTMLMath`, `Output`
-- **Button**: `Button` (with `.onClick()` handler)
+- **Button**: `Button` (with `.onClick()` handler, called with the button)
 - **Color**: `ColorPicker`
 - **Media**: `Image` (from bytes, sent as binary buffers)
 - **Layout / Style**: `Layout`, `DescriptionStyle`, `SliderStyle`, `ProgressStyle`, `ButtonStyle`, `CheckboxStyle`, `ToggleButtonStyle`, `ToggleButtonsStyle`, `TextStyle`, `HTMLStyle`, `HTMLMathStyle`, `LabelStyle`
@@ -428,23 +511,24 @@ Widgets also work when JupyterLite is served over plain http, for example on a L
 
 The widget runtime is split into files that roughly follow the upstream `ipywidgets` package structure so it is easier to track what has been ported.
 
-| Upstream `ipywidgets` file                           | Local file                                                                    | Status  | Notes                                                                |
-| ---------------------------------------------------- | ----------------------------------------------------------------------------- | ------- | -------------------------------------------------------------------- |
-| `packages/base/src/widget.ts`                        | `packages/javascript-kernel-runtime/src/widgets/widget.ts`                    | Ported  | Kernel-side `Widget` and `DOMWidget` equivalents                     |
-| `packages/base/src/widget_layout.ts`                 | `packages/javascript-kernel-runtime/src/widgets/widget_layout.ts`             | Ported  | Layout models                                                        |
-| `packages/base/src/widget_style.ts`                  | `packages/javascript-kernel-runtime/src/widgets/widget_style.ts`              | Ported  | Shared style models, plus control-specific styles gathered here      |
-| `packages/controls/src/widget_int.ts`                | `packages/javascript-kernel-runtime/src/widgets/widget_int.ts`                | Ported  | Integer widgets, play, progress, and text inputs                     |
-| `packages/controls/src/widget_float.ts`              | `packages/javascript-kernel-runtime/src/widgets/widget_float.ts`              | Ported  | Float widgets                                                        |
-| `packages/controls/src/widget_bool.ts`               | `packages/javascript-kernel-runtime/src/widgets/widget_bool.ts`               | Ported  | Boolean widgets; related styles live in `widget_style.ts`            |
-| `packages/controls/src/widget_selection.ts`          | `packages/javascript-kernel-runtime/src/widgets/widget_selection.ts`          | Partial | Selection semantics still differ from `ipywidgets` in some cases     |
-| `packages/controls/src/widget_string.ts`             | `packages/javascript-kernel-runtime/src/widgets/widget_string.ts`             | Ported  | String and display widgets; related styles live in `widget_style.ts` |
-| `packages/output/src/output.ts`                      | `packages/javascript-kernel-runtime/src/widgets/widget_output.ts`             | Ported  | Output capture, also of async callbacks, and the `append*` methods   |
-| `packages/controls/src/widget_button.ts`             | `packages/javascript-kernel-runtime/src/widgets/widget_button.ts`             | Partial | Button widget is present, but callback behavior differs slightly     |
-| `packages/controls/src/widget_color.ts`              | `packages/javascript-kernel-runtime/src/widgets/widget_color.ts`              | Ported  | Color picker                                                         |
-| `packages/controls/src/widget_box.ts`                | `packages/javascript-kernel-runtime/src/widgets/widget_box.ts`                | Ported  | Box, HBox, VBox, GridBox                                             |
-| `packages/controls/src/widget_selectioncontainer.ts` | `packages/javascript-kernel-runtime/src/widgets/widget_selectioncontainer.ts` | Ported  | Accordion, Tab, Stack                                                |
-| `packages/controls/src/widget_link.ts`               | `packages/javascript-kernel-runtime/src/widgets/widget_link.ts`               | Ported  | `jslink`, `jsdlink`, `Link`, and `DirectionalLink`                   |
-| `packages/controls/src/widget_image.ts`              | `packages/javascript-kernel-runtime/src/widgets/widget_image.ts`              | Ported  | `Image`; `Video` and `Audio` are not ported yet                      |
+| Upstream `ipywidgets` file                           | Local file                                                                    | Status | Notes                                                                |
+| ---------------------------------------------------- | ----------------------------------------------------------------------------- | ------ | -------------------------------------------------------------------- |
+| `packages/base/src/widget.ts`                        | `packages/javascript-kernel-runtime/src/widgets/widget.ts`                    | Ported | Kernel-side `Widget`, with validation and custom messages            |
+| `packages/base/src/widget.ts`                        | `packages/javascript-kernel-runtime/src/widgets/widget_dom.ts`                | Ported | `DOMWidget`, with default layout and style instances                 |
+| `packages/base/src/widget_layout.ts`                 | `packages/javascript-kernel-runtime/src/widgets/widget_layout.ts`             | Ported | Layout models                                                        |
+| `packages/base/src/widget_style.ts`                  | `packages/javascript-kernel-runtime/src/widgets/widget_style.ts`              | Ported | Shared style models, plus control-specific styles gathered here      |
+| `packages/controls/src/widget_int.ts`                | `packages/javascript-kernel-runtime/src/widgets/widget_int.ts`                | Ported | Integer widgets, play, progress, and text inputs                     |
+| `packages/controls/src/widget_float.ts`              | `packages/javascript-kernel-runtime/src/widgets/widget_float.ts`              | Ported | Float widgets                                                        |
+| `packages/controls/src/widget_bool.ts`               | `packages/javascript-kernel-runtime/src/widgets/widget_bool.ts`               | Ported | Boolean widgets; related styles live in `widget_style.ts`            |
+| `packages/controls/src/widget_selection.ts`          | `packages/javascript-kernel-runtime/src/widgets/widget_selection.ts`          | Ported | Values, `[label, value]` pairs and objects of the values by label    |
+| `packages/controls/src/widget_string.ts`             | `packages/javascript-kernel-runtime/src/widgets/widget_string.ts`             | Ported | String and display widgets; related styles live in `widget_style.ts` |
+| `packages/output/src/output.ts`                      | `packages/javascript-kernel-runtime/src/widgets/widget_output.ts`             | Ported | Output capture, also of async callbacks, and the `append*` methods   |
+| `packages/controls/src/widget_button.ts`             | `packages/javascript-kernel-runtime/src/widgets/widget_button.ts`             | Ported | The click handlers get the button                                    |
+| `packages/controls/src/widget_color.ts`              | `packages/javascript-kernel-runtime/src/widgets/widget_color.ts`              | Ported | Color picker                                                         |
+| `packages/controls/src/widget_box.ts`                | `packages/javascript-kernel-runtime/src/widgets/widget_box.ts`                | Ported | Box, HBox, VBox, GridBox                                             |
+| `packages/controls/src/widget_selectioncontainer.ts` | `packages/javascript-kernel-runtime/src/widgets/widget_selectioncontainer.ts` | Ported | Accordion, Tab, Stack                                                |
+| `packages/controls/src/widget_link.ts`               | `packages/javascript-kernel-runtime/src/widgets/widget_link.ts`               | Ported | `jslink`, `jsdlink`, `Link`, and `DirectionalLink`                   |
+| `packages/controls/src/widget_image.ts`              | `packages/javascript-kernel-runtime/src/widgets/widget_image.ts`              | Ported | `Image`; `Video` and `Audio` are not ported yet                      |
 
 > **Note:** `jupyterlab-widgets`, `@jupyter-widgets/controls`, and `@jupyter-widgets/output` must be available in the JupyterLite deployment for the full widget set to render.
 

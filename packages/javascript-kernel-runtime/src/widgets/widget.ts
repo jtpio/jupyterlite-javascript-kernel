@@ -3,7 +3,7 @@
 
 import type { CommManager, IComm } from '../comm';
 import type { IParentMessage } from '../output_router';
-import { toBytes } from '../utils';
+import { isPlainObject, toBytes } from '../utils';
 
 import {
   CONTROLS_MODULE,
@@ -11,10 +11,16 @@ import {
   WIDGET_PROTOCOL_VERSION
 } from './version';
 
-import type { Layout } from './widget_layout';
-import type { Style } from './widget_style';
-
 export type WidgetEventCallback = (...args: any[]) => void;
+
+/**
+ * A callback of the custom messages of the frontend, with their content and
+ * their binary buffers.
+ */
+export type WidgetMessageCallback = (
+  content: unknown,
+  buffers: ArrayBuffer[]
+) => void;
 
 export interface IWidgetChange {
   name: string;
@@ -27,6 +33,19 @@ export interface IWidgetChange {
 export type WidgetObserveCallback = (change: IWidgetChange) => void;
 
 export type WidgetTraitPair = [Widget, string];
+
+/**
+ * A change of the state of a widget: the name of the property, its new
+ * value and its old value.
+ */
+export type WidgetStateChange = [string, unknown, unknown];
+
+/**
+ * A widget class, which creates its widget from its state.
+ */
+export type WidgetClass<T extends Widget = Widget> = new (
+  state?: Record<string, unknown>
+) => T;
 
 /**
  * The path of a binary value in the state of a widget: the keys of the
@@ -46,6 +65,17 @@ export interface ISerializedState {
 }
 
 /**
+ * The manager of the widgets created by `_createWidget()` from a class
+ * without a default manager.
+ */
+let creatingManager: CommManager | null = null;
+
+/**
+ * The prototypes which have the accessors of their traits.
+ */
+const prototypesWithTraits = new WeakSet<object>();
+
+/**
  * Base class for Jupyter widgets.
  *
  * Wraps the low-level comm protocol so user code can work with
@@ -62,15 +92,29 @@ export class Widget {
   protected static _defaultManager: CommManager | null = null;
 
   /**
+   * The classes bound to the default manager of this class, by base class,
+   * which `_createWidget()` creates.
+   *
+   * @internal
+   */
+  static _boundClasses: ReadonlyMap<WidgetClass, WidgetClass> | null = null;
+
+  /**
    * Set the default CommManager used by all Widget instances.
    */
   static setDefaultManager(manager: CommManager | null): void {
     this._defaultManager = manager;
   }
 
+  /**
+   * Create a widget from its state. The properties of `_defaults()` get
+   * accessors, like `widget.value`, and the state is validated with
+   * `_validate()` before it is sent to the frontend. The properties given
+   * as `undefined` keep their default, like the ones left out.
+   */
   constructor(state?: Record<string, unknown>) {
     const ctor = this.constructor as typeof Widget;
-    const manager = ctor._defaultManager;
+    const manager = ctor._defaultManager ?? creatingManager;
     if (!manager) {
       throw new Error(
         'Widget manager not initialized. Widgets can only be created inside the kernel runtime.'
@@ -78,13 +122,14 @@ export class Widget {
     }
 
     this._manager = manager;
-    this._state = {
-      ...this._defaults(),
-      ...state,
-      ...this._modelState(ctor)
-    };
     this._listeners = new Map();
     this._observerWrappers = new Map();
+    const defaults = this._defaults();
+    defineTraits(Object.getPrototypeOf(this), Object.keys(defaults));
+    const given = withoutUndefined(state ?? {});
+    const initial = { ...defaults, ...given };
+    this._validate(initial, new Set(Object.keys(given)));
+    this._state = { ...initial, ...this._modelState(ctor) };
 
     const {
       state: serialized,
@@ -123,30 +168,56 @@ export class Widget {
   }
 
   /**
-   * Set one or more state properties and sync to the frontend.
+   * Set one or more state properties and sync to the frontend. The new
+   * state is validated first, like a value clamped to the bounds of a
+   * slider. The properties set to `undefined` keep their value.
    */
   set(name: string, value: unknown): void;
   set(state: Record<string, unknown>): void;
   set(nameOrState: string | Record<string, unknown>, value?: unknown): void {
-    const updates: Record<string, unknown> =
-      typeof nameOrState === 'string' ? { [nameOrState]: value } : nameOrState;
+    const updates = withoutUndefined(
+      typeof nameOrState === 'string' ? { [nameOrState]: value } : nameOrState
+    );
+    const next = { ...this._state, ...updates };
+    this._validate(next, new Set(Object.keys(updates)));
 
-    const changes: Array<[string, unknown, unknown]> = [];
-    for (const [key, val] of Object.entries(updates)) {
-      const old = this._state[key];
-      if (old !== val) {
-        this._state[key] = val;
-        changes.push([key, val, old]);
-      }
-    }
-
+    const changes = this._applyState(next);
     if (changes.length > 0) {
-      this._sendState(updates);
-      for (const [key, val, old] of changes) {
-        this._trigger(`change:${key}`, val, old);
-      }
-      this._trigger('change', changes);
+      this._sendState(Object.fromEntries(changes));
     }
+    this._notify(changes);
+  }
+
+  /**
+   * Send a custom message to the frontend, like the model of a custom
+   * widget handles in `model.on('msg:custom', ...)`.
+   */
+  send(content: unknown, buffers?: Array<ArrayBuffer | ArrayBufferView>): void {
+    const bytes = (buffers ?? []).map(buffer => {
+      const data = toBytes(buffer);
+      if (data === null) {
+        throw new TypeError(
+          'The buffers of a message must be ArrayBuffers or typed arrays'
+        );
+      }
+      return data.slice().buffer;
+    });
+    this._comm.send({ method: 'custom', content }, undefined, bytes);
+  }
+
+  /**
+   * Call a function with the content and the buffers of the custom messages
+   * of the frontend, like the clicks of a button.
+   */
+  onMsg(callback: WidgetMessageCallback): this {
+    return this.on('msg:custom', callback);
+  }
+
+  /**
+   * Remove a callback added with `onMsg()`.
+   */
+  offMsg(callback: WidgetMessageCallback): this {
+    return this.off('msg:custom', callback);
   }
 
   /**
@@ -155,6 +226,7 @@ export class Widget {
    * Events:
    * - `'change:propName'` - property changed `(newValue, oldValue)`
    * - `'change'` - any property changed `(changes)`
+   * - `'msg:custom'` - custom message of the frontend `(content, buffers)`
    * - `'close'` - comm closed
    *
    * When the frontend triggers the event, like when the user moves a slider,
@@ -241,8 +313,50 @@ export class Widget {
     this.set('disabled', v);
   }
 
+  /**
+   * The default state of the widget. Its properties not starting with `_`
+   * get accessors, like `widget.value`.
+   */
   protected _defaults(): Record<string, unknown> {
     return { description: '', disabled: false };
+  }
+
+  /**
+   * Validate a new state of the widget before it is applied, like the
+   * validators of ipywidgets: coerce its values in place, or throw to reject
+   * it. It is called with the whole state, in the constructor, for `set()`
+   * and for the updates of the frontend, which get back the values changed
+   * here.
+   *
+   * @param state - The whole new state, to update in place.
+   * @param names - The names of the properties being set: the ones given to
+   * the constructor, to `set()`, or sent by the frontend.
+   */
+  protected _validate(
+    _state: Record<string, unknown>,
+    _names: ReadonlySet<string>
+  ): void {
+    // Nothing to validate
+  }
+
+  /**
+   * Create a widget of another class with the manager of this one, like the
+   * default layout of a widget: the class of `Jupyter.widgets` bound to the
+   * manager when there is one, so that `instanceof` works with it.
+   */
+  protected _createWidget<T extends Widget>(
+    cls: WidgetClass<T>,
+    state?: Record<string, unknown>
+  ): T {
+    const ctor = this.constructor as typeof Widget;
+    const bound = (ctor._boundClasses?.get(cls) ?? cls) as WidgetClass<T>;
+    const previous = creatingManager;
+    creatingManager = this._manager;
+    try {
+      return new bound(state);
+    } finally {
+      creatingManager = previous;
+    }
   }
 
   protected _handleMsg(
@@ -257,25 +371,64 @@ export class Widget {
         (data.buffer_paths as BufferPath[] | undefined) ?? [],
         buffers
       );
-      const changes: Array<[string, unknown, unknown]> = [];
+      const received: Record<string, unknown> = {};
       for (const [key, val] of Object.entries(state)) {
-        const next = this._deserializeProperty(key, val);
-        const old = this._state[key];
-        if (old !== next) {
-          this._state[key] = next;
-          changes.push([key, next, old]);
+        received[key] = this._deserializeProperty(key, val);
+      }
+      const next = { ...this._state, ...received };
+      this._validate(next, new Set(Object.keys(received)));
+
+      // Send back the values changed by the validation, like a clamped value
+      const corrected: Record<string, unknown> = {};
+      for (const [key, val] of Object.entries(next)) {
+        const sent = Object.prototype.hasOwnProperty.call(received, key)
+          ? received[key]
+          : this._state[key];
+        if (sent !== val) {
+          corrected[key] = val;
         }
       }
-      for (const [key, val, old] of changes) {
-        this._trigger(`change:${key}`, val, old);
+      const changes = this._applyState(next);
+      if (Object.keys(corrected).length > 0) {
+        this._sendState(corrected);
       }
-      if (changes.length > 0) {
-        this._trigger('change', changes);
-      }
+      this._notify(changes);
     }
 
     if (data.method === 'request_state') {
       this._sendState(this._state);
+    }
+
+    if (data.method === 'custom') {
+      this._trigger('msg:custom', data.content, buffers ?? []);
+    }
+  }
+
+  /**
+   * Store a new state, and return its changes.
+   */
+  private _applyState(next: Record<string, unknown>): WidgetStateChange[] {
+    const changes: WidgetStateChange[] = [];
+    for (const [key, val] of Object.entries(next)) {
+      const old = this._state[key];
+      if (old !== val) {
+        this._state[key] = val;
+        changes.push([key, val, old]);
+      }
+    }
+    return changes;
+  }
+
+  /**
+   * Call the listeners of some changes of the state: the ones of each
+   * property, then the ones of all the changes.
+   */
+  protected _notify(changes: WidgetStateChange[]): void {
+    for (const [key, val, old] of changes) {
+      this._trigger(`change:${key}`, val, old);
+    }
+    if (changes.length > 0) {
+      this._trigger('change', changes);
     }
   }
 
@@ -390,7 +543,7 @@ export class Widget {
 
     const wrapper: WidgetEventCallback =
       name === '*'
-        ? (changes: Array<[string, unknown, unknown]>) => {
+        ? (changes: WidgetStateChange[]) => {
             for (const [changeName, next, old] of changes) {
               callback({
                 name: changeName,
@@ -426,45 +579,39 @@ export class Widget {
 }
 
 /**
- * A widget with layout/style support.
+ * The properties of a state which are not `undefined`: like an option left
+ * out, an `undefined` property keeps the default or the current value.
  */
-export class DOMWidget extends Widget {
-  protected override _defaults(): Record<string, unknown> {
-    return { ...super._defaults(), layout: null, style: null };
-  }
+function withoutUndefined(
+  state: Record<string, unknown>
+): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(state).filter(([, value]) => value !== undefined)
+  );
+}
 
-  get layout(): Layout | null {
-    return (this.get('layout') as Layout | null) ?? null;
+/**
+ * Define the accessors of the traits of a widget class on its prototype,
+ * like `slider.value`, for the properties of its default state without one.
+ */
+function defineTraits(prototype: object, names: string[]): void {
+  if (prototypesWithTraits.has(prototype)) {
+    return;
   }
-  set layout(v: Layout | null) {
-    this.set('layout', v);
-  }
-
-  get style(): Style | null {
-    return (this.get('style') as Style | null) ?? null;
-  }
-  set style(v: Style | null) {
-    this.set('style', v);
-  }
-
-  protected override _serializeProperty(name: string, value: unknown): unknown {
-    if (
-      (name === 'layout' || name === 'style') &&
-      (value instanceof Widget || value === null)
-    ) {
-      return _serializeWidgetReference(value);
+  prototypesWithTraits.add(prototype);
+  for (const name of names) {
+    if (name.startsWith('_') || name in prototype) {
+      continue;
     }
-    return super._serializeProperty(name, value);
-  }
-
-  protected override _deserializeProperty(
-    name: string,
-    value: unknown
-  ): unknown {
-    if (name === 'layout' || name === 'style') {
-      return _deserializeWidgetReference(this._manager, value);
-    }
-    return super._deserializeProperty(name, value);
+    Object.defineProperty(prototype, name, {
+      get(this: Widget) {
+        return this.get(name);
+      },
+      set(this: Widget, value: unknown) {
+        this.set(name, value);
+      },
+      configurable: true
+    });
   }
 }
 
@@ -610,15 +757,4 @@ function putBuffers(
       );
     }
   });
-}
-
-/**
- * Whether a value is a plain object, from any realm.
- */
-function isPlainObject(value: unknown): boolean {
-  if (typeof value !== 'object' || value === null) {
-    return false;
-  }
-  const proto = Object.getPrototypeOf(value);
-  return proto === null || Object.getPrototypeOf(proto) === null;
 }

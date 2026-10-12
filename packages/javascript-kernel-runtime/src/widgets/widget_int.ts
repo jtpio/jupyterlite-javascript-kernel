@@ -5,9 +5,11 @@ import {
   _NumericTextBase,
   _ProgressBase,
   _RangeSliderBase,
-  _SliderBase
+  _SliderBase,
+  _validateBounded
 } from './widget_number';
-import { DOMWidget } from './widget';
+import { DOMWidget } from './widget_dom';
+import { DescriptionStyle } from './widget_style';
 
 export class IntSlider extends _SliderBase {
   static override modelName = 'IntSliderModel';
@@ -18,6 +20,10 @@ export class IntSlider extends _SliderBase {
       ...super._defaults(),
       readout_format: 'd'
     };
+  }
+
+  protected override get _integer(): boolean {
+    return true;
   }
 
   get readout_format(): string {
@@ -36,6 +42,10 @@ export class IntRangeSlider extends _RangeSliderBase {
     return { ...super._defaults(), readout_format: 'd' };
   }
 
+  protected override get _integer(): boolean {
+    return true;
+  }
+
   get readout_format(): string {
     return this.get('readout_format') as string;
   }
@@ -47,6 +57,7 @@ export class IntRangeSlider extends _RangeSliderBase {
 export class Play extends DOMWidget {
   static override modelName = 'PlayModel';
   static override viewName = 'PlayView';
+  static override styleClass = DescriptionStyle;
 
   protected override _defaults() {
     return {
@@ -60,6 +71,14 @@ export class Play extends DOMWidget {
       show_repeat: true,
       interval: 100
     };
+  }
+
+  protected override _validate(
+    state: Record<string, unknown>,
+    names: ReadonlySet<string>
+  ): void {
+    _validateBounded(state, names, true);
+    super._validate(state, names);
   }
 
   get value(): number {
@@ -115,11 +134,19 @@ export class Play extends DOMWidget {
 export class IntProgress extends _ProgressBase {
   static override modelName = 'IntProgressModel';
   static override viewName = 'ProgressView';
+
+  protected override get _integer(): boolean {
+    return true;
+  }
 }
 
 export class IntText extends _NumericTextBase {
   static override modelName = 'IntTextModel';
   static override viewName = 'IntTextView';
+
+  protected override get _integer(): boolean {
+    return true;
+  }
 }
 
 export class BoundedIntText extends _NumericTextBase {
@@ -128,6 +155,18 @@ export class BoundedIntText extends _NumericTextBase {
 
   protected override _defaults() {
     return { ...super._defaults(), min: 0, max: 100 };
+  }
+
+  protected override _validate(
+    state: Record<string, unknown>,
+    names: ReadonlySet<string>
+  ): void {
+    _validateBounded(state, names, true);
+    super._validate(state, names);
+  }
+
+  protected override get _integer(): boolean {
+    return true;
   }
 
   get min(): number {

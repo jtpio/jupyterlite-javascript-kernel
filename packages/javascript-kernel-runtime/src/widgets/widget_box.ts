@@ -1,7 +1,8 @@
 // Copyright (c) Jupyter Development Team.
 // Distributed under the terms of the Modified BSD License.
 
-import { DOMWidget, Widget, _deserializeWidgetReference } from './widget';
+import { Widget, _deserializeWidgetReference } from './widget';
+import { DOMWidget } from './widget_dom';
 
 /**
  * Serialize an array of Widget instances to `"IPY_MODEL_<id>"` references

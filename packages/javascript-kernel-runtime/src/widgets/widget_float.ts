@@ -5,7 +5,9 @@ import {
   _NumericTextBase,
   _ProgressBase,
   _RangeSliderBase,
-  _SliderBase
+  _SliderBase,
+  _toNumber,
+  _validateBounded
 } from './widget_number';
 
 export class FloatSlider extends _SliderBase {
@@ -43,6 +45,19 @@ export class FloatLogSlider extends _SliderBase {
       step: 0.1,
       readout_format: '.3g'
     };
+  }
+
+  /**
+   * The value is between the powers of the base of min and max.
+   */
+  protected override _valueBounds(
+    min: number,
+    max: number,
+    state: Record<string, unknown>
+  ): [number, number] {
+    const base = _toNumber('base', state.base, false);
+    state.base = base;
+    return [base ** min, base ** max];
   }
 
   get base(): number {
@@ -110,6 +125,14 @@ export class BoundedFloatText extends _NumericTextBase {
       min: 0.0,
       max: 100.0
     };
+  }
+
+  protected override _validate(
+    state: Record<string, unknown>,
+    names: ReadonlySet<string>
+  ): void {
+    _validateBounded(state, names, false);
+    super._validate(state, names);
   }
 
   get min(): number {

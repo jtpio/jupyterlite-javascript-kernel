@@ -1,11 +1,17 @@
 // Copyright (c) Jupyter Development Team.
 // Distributed under the terms of the Modified BSD License.
 
-import { DOMWidget } from './widget';
+import { DOMWidget } from './widget_dom';
+import {
+  CheckboxStyle,
+  DescriptionStyle,
+  ToggleButtonStyle
+} from './widget_style';
 
 export class Checkbox extends DOMWidget {
   static override modelName = 'CheckboxModel';
   static override viewName = 'CheckboxView';
+  static override styleClass = CheckboxStyle;
 
   protected override _defaults() {
     return { ...super._defaults(), value: false, indent: true };
@@ -28,6 +34,7 @@ export class Checkbox extends DOMWidget {
 export class ToggleButton extends DOMWidget {
   static override modelName = 'ToggleButtonModel';
   static override viewName = 'ToggleButtonView';
+  static override styleClass = ToggleButtonStyle;
 
   protected override _defaults() {
     return {
@@ -44,12 +51,6 @@ export class ToggleButton extends DOMWidget {
   }
   set value(v: boolean) {
     this.set('value', v);
-  }
-  get tooltip(): string {
-    return this.get('tooltip') as string;
-  }
-  set tooltip(v: string) {
-    this.set('tooltip', v);
   }
   get icon(): string {
     return this.get('icon') as string;
@@ -68,6 +69,7 @@ export class ToggleButton extends DOMWidget {
 export class Valid extends DOMWidget {
   static override modelName = 'ValidModel';
   static override viewName = 'ValidView';
+  static override styleClass = DescriptionStyle;
 
   protected override _defaults() {
     return { ...super._defaults(), value: false, readout: 'Invalid' };

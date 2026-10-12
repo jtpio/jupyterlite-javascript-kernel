@@ -396,6 +396,218 @@ for (const kernel of KERNELS) {
       await expect.poll(naturalWidth).toBe(5);
     });
 
+    test('Select the options by value, with labelled options', async ({
+      page
+    }) => {
+      const index = await runCode(
+        page,
+        [
+          'const { Dropdown } = Jupyter.widgets;',
+          'const d = new Dropdown({ options: [["One", 1], ["Two", 2]], value: 2, description: "Number" });',
+          'd.observe(change => console.log(`value ${change.new}`), "value");',
+          'd'
+        ].join('\n')
+      );
+      const combobox = (await getOutputs(page, index)).getByRole('combobox');
+      await expect(combobox).toHaveValue('Two');
+      let cell = await runCode(page, 'd.value');
+      expect(await page.notebook.getCellTextOutput(cell)).toEqual(['2']);
+
+      // The value of the option chosen in the frontend
+      await combobox.selectOption('One');
+      await expect(
+        await getOutputs(page, index, 'application/vnd.jupyter.stdout')
+      ).toHaveText('value 1\n');
+      cell = await runCode(page, 'd.value');
+      expect(await page.notebook.getCellTextOutput(cell)).toEqual(['1']);
+
+      // The selected value is kept when the options change
+      cell = await runCode(
+        page,
+        'd.options = { Zero: 0, Uno: 1, Three: 3 };\n`${d.label} ${d.value}`'
+      );
+      expect(await page.notebook.getCellTextOutput(cell)).toEqual(["'Uno 1'"]);
+      await expect(combobox).toHaveValue('Uno');
+      cell = await runCode(page, 'd.value = 5;');
+      await expect(
+        await getOutputs(page, cell, 'application/vnd.jupyter.stderr')
+      ).toContainText('RangeError: Invalid selection: value not found');
+
+      // An option given as undefined is left out
+      cell = await runCode(
+        page,
+        'new Dropdown({ options: ["A", "B"], index: undefined }).value'
+      );
+      expect(await page.notebook.getCellTextOutput(cell)).toEqual(["'A'"]);
+
+      // A range of two options, the lower one first
+      cell = await runCode(
+        page,
+        [
+          'const { SelectionRangeSlider } = Jupyter.widgets;',
+          'const range = new SelectionRangeSlider({ options: ["A", "B", "C"], value: ["A", "C"] });',
+          'range.options = ["C", "B", "A"];',
+          '`${range.index}`'
+        ].join('\n')
+      );
+      expect(await page.notebook.getCellTextOutput(cell)).toEqual(["'0,2'"]);
+      cell = await runCode(page, 'range.value = ["B"];');
+      await expect(
+        await getOutputs(page, cell, 'application/vnd.jupyter.stderr')
+      ).toContainText(
+        'RangeError: Invalid selection: index must have two values'
+      );
+
+      // Values which are not JSON, like a cyclic object or a bigint
+      const radio = await runCode(
+        page,
+        [
+          'const { RadioButtons } = Jupyter.widgets;',
+          'const cyclic = { name: "cyclic" };',
+          'cyclic.self = cyclic;',
+          'const r = new RadioButtons({ options: { Cyclic: cyclic, Big: 10n } });',
+          'r.observe(change => console.log(`picked ${change.new === cyclic ? "cyclic" : change.new}`), "value");',
+          'r'
+        ].join('\n')
+      );
+      const radios = await getOutputs(page, radio);
+      await radios.getByRole('radio', { name: 'Big' }).check();
+      await radios.getByRole('radio', { name: 'Cyclic' }).check();
+      await expect(
+        await getOutputs(page, radio, 'application/vnd.jupyter.stdout')
+      ).toHaveText('picked 10\npicked cyclic\n');
+    });
+
+    test('Style and lay out the widgets with plain objects', async ({
+      page
+    }) => {
+      const index = await runCode(
+        page,
+        [
+          'const { Button } = Jupyter.widgets;',
+          'const b = new Button({ description: "Go", style: { button_color: "rgb(255, 0, 0)" } });',
+          'b.layout.width = "200px";',
+          'b'
+        ].join('\n')
+      );
+      const button = (await getOutputs(page, index)).getByRole('button', {
+        name: 'Go'
+      });
+      await expect(button).toHaveCSS('width', '200px');
+      await expect(button).toHaveCSS('background-color', 'rgb(255, 0, 0)');
+
+      await runCode(
+        page,
+        [
+          'b.tooltip = "hint";',
+          'b.style.button_color = "rgb(0, 128, 0)";',
+          'b.layout = { width: "120px", border: "3px solid rgb(0, 0, 255)" };',
+          'b.addClass("my-button");'
+        ].join('\n')
+      );
+      await expect(button).toHaveAttribute('title', 'hint');
+      await expect(button).toHaveCSS('background-color', 'rgb(0, 128, 0)');
+      await expect(button).toHaveCSS('width', '120px');
+      await expect(button).toHaveCSS('border-left-width', '3px');
+      await expect(button).toHaveClass(/my-button/);
+
+      // A description as wide as its text
+      const slider = await runCode(
+        page,
+        [
+          'const { IntSlider } = Jupyter.widgets;',
+          'const s = new IntSlider({ description: "A long description" });',
+          's.style.description_width = "initial";',
+          's'
+        ].join('\n')
+      );
+      const label = (await getOutputs(page, slider)).getByText(
+        'A long description'
+      );
+      await expect(label).toBeVisible();
+      await expect
+        .poll(() =>
+          label.evaluate(element => element.scrollWidth <= element.clientWidth)
+        )
+        .toBe(true);
+      const cell = await runCode(
+        page,
+        '`${s.layout instanceof Jupyter.widgets.Layout} ${s.style instanceof Jupyter.widgets.SliderStyle}`'
+      );
+      expect(await page.notebook.getCellTextOutput(cell)).toEqual([
+        "'true true'"
+      ]);
+    });
+
+    test('Keep the numeric values in their bounds', async ({ page }) => {
+      const index = await runCode(
+        page,
+        [
+          'const { HBox, IntSlider } = Jupyter.widgets;',
+          'const s = new IntSlider({ value: 150, description: "Clamped" });',
+          'const t = new IntSlider({ value: 150, max: 200, description: "Fits" });',
+          'new HBox({ children: [s, t] })'
+        ].join('\n')
+      );
+      const readouts = (await getOutputs(page, index)).locator(
+        '.widget-readout'
+      );
+      await expect(readouts).toHaveText(['100', '150']);
+      let cell = await runCode(page, 's.value');
+      expect(await page.notebook.getCellTextOutput(cell)).toEqual(['100']);
+
+      // Lowering the max lowers the value
+      cell = await runCode(page, 's.max = 10;\ns.value');
+      expect(await page.notebook.getCellTextOutput(cell)).toEqual(['10']);
+      await expect(readouts).toHaveText(['10', '150']);
+
+      // Integers are rounded, and the bounds checked
+      cell = await runCode(page, 's.value = 3.7;\ns.value');
+      expect(await page.notebook.getCellTextOutput(cell)).toEqual(['4']);
+      await expect(readouts).toHaveText(['4', '150']);
+      cell = await runCode(page, 's.min = 20;');
+      await expect(
+        await getOutputs(page, cell, 'application/vnd.jupyter.stderr')
+      ).toContainText('RangeError: setting min > max');
+      cell = await runCode(
+        page,
+        'new Jupyter.widgets.IntRangeSlider({ value: [8, 3] })'
+      );
+      await expect(
+        await getOutputs(page, cell, 'application/vnd.jupyter.stderr')
+      ).toContainText('RangeError: setting lower > upper');
+
+      // A bound given as undefined keeps its default
+      cell = await runCode(
+        page,
+        'new IntSlider({ value: 5, max: undefined }).max'
+      );
+      expect(await page.notebook.getCellTextOutput(cell)).toEqual(['100']);
+    });
+
+    test('Pass the button to its click handlers, and the custom messages to onMsg', async ({
+      page
+    }) => {
+      const index = await runCode(
+        page,
+        [
+          'const { Button } = Jupyter.widgets;',
+          'const button = new Button({ description: "Click me" });',
+          'button.onClick(b => { b.description = "Clicked"; });',
+          'button.onMsg(content => console.log(`message ${content.event}`));',
+          'button'
+        ].join('\n')
+      );
+      const outputs = await getOutputs(page, index);
+      await outputs.getByRole('button', { name: 'Click me' }).click();
+      await expect(
+        outputs.getByRole('button', { name: 'Clicked' })
+      ).toBeVisible();
+      await expect(
+        await getOutputs(page, index, 'application/vnd.jupyter.stdout')
+      ).toHaveText('message click\n');
+    });
+
     test('Show the widgets again when the notebook is reopened', async ({
       page
     }) => {

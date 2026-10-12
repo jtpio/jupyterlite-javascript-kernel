@@ -1,11 +1,13 @@
 // Copyright (c) Jupyter Development Team.
 // Distributed under the terms of the Modified BSD License.
 
-import { DOMWidget } from './widget';
+import { DOMWidget } from './widget_dom';
+import { ButtonStyle } from './widget_style';
 
 export class Button extends DOMWidget {
   static override modelName = 'ButtonModel';
   static override viewName = 'ButtonView';
+  static override styleClass = ButtonStyle;
 
   protected override _defaults() {
     return {
@@ -17,18 +19,20 @@ export class Button extends DOMWidget {
   }
 
   /**
-   * Register a click handler.
+   * Register a click handler, called with the button, like
+   * `button.onClick(b => { b.description = 'Clicked'; })`.
    */
-  onClick(callback: () => void): this {
+  onClick(callback: (button: this) => void): this {
     return this.on('click', callback);
   }
 
-  get tooltip(): string {
-    return this.get('tooltip') as string;
+  /**
+   * Remove a click handler.
+   */
+  offClick(callback: (button: this) => void): this {
+    return this.off('click', callback);
   }
-  set tooltip(v: string) {
-    this.set('tooltip', v);
-  }
+
   get icon(): string {
     return this.get('icon') as string;
   }
@@ -50,9 +54,8 @@ export class Button extends DOMWidget {
     if (data.method === 'custom') {
       const content = data.content as Record<string, unknown> | undefined;
       if (content?.event === 'click') {
-        this._trigger('click');
+        this._trigger('click', this);
       }
-      this._trigger('custom', content, buffers);
     }
   }
 }

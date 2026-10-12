@@ -3,6 +3,7 @@
 
 export * from './version';
 export * from './widget';
+export * from './widget_dom';
 export * from './widget_layout';
 export * from './widget_style';
 export * from './widget_int';
@@ -21,11 +22,12 @@ export * from './widget_link';
 import type { CommManager } from '../comm';
 
 import {
-  DOMWidget,
   Widget,
   type BufferPath,
+  type WidgetClass,
   type WidgetTraitPair
 } from './widget';
+import { DOMWidget } from './widget_dom';
 import { Layout } from './widget_layout';
 import {
   ButtonStyle,
@@ -154,11 +156,15 @@ export function createWidgetClasses(
   manager: CommManager
 ): Record<string, unknown> {
   const classes: Record<string, unknown> = {};
+  // The widgets create the default layout and style of their bound class
+  const boundClasses = new Map<WidgetClass, WidgetClass>();
 
   for (const [name, cls] of Object.entries(widgetClasses)) {
     const BoundWidgetClass = class extends cls {};
     Object.defineProperty(BoundWidgetClass, 'name', { value: name });
     BoundWidgetClass.setDefaultManager(manager);
+    BoundWidgetClass._boundClasses = boundClasses;
+    boundClasses.set(cls, BoundWidgetClass);
     classes[name] = BoundWidgetClass;
   }
 
