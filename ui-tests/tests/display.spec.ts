@@ -10,8 +10,14 @@ import {
   WORKER_KERNEL,
   createNotebook,
   getOutputs,
-  runCode
+  runCode,
+  waitForKernelIdle
 } from './utils';
+
+/**
+ * The MIME type of the outputs showing a DOM element live.
+ */
+const LIVE_NODE = 'application/vnd.jupyterlite.javascript-node+json';
 
 for (const kernel of KERNELS) {
   test.describe(`Rich display (${kernel.displayName})`, () => {
@@ -345,9 +351,10 @@ test.describe(`Rich display (${IFRAME_KERNEL.displayName})`, () => {
       ].join('\n')
     );
     await expect(
-      (await getOutputs(page, index, 'text/html')).locator('strong')
+      (await getOutputs(page, index, LIVE_NODE)).locator('strong')
     ).toHaveText('Hello from the DOM');
 
+    // A canvas keeps its pixels
     index = await runCode(
       page,
       [
@@ -360,18 +367,207 @@ test.describe(`Rich display (${IFRAME_KERNEL.displayName})`, () => {
         'canvas'
       ].join('\n')
     );
-    let image = (await getOutputs(page, index, 'image/png')).locator('img');
-    await expect(image).toBeVisible();
-    await expect
-      .poll(() => image.evaluate((img: HTMLImageElement) => img.naturalWidth))
-      .toBe(40);
+    const shown = (await getOutputs(page, index, LIVE_NODE)).locator('canvas');
+    await expect(shown).toHaveAttribute('width', '40');
+    expect(
+      await shown.evaluate((element: HTMLCanvasElement) =>
+        Array.from(element.getContext('2d')!.getImageData(5, 5, 1, 1).data)
+      )
+    ).toEqual([0, 128, 128, 255]);
 
     // The pixels of a canvas
     index = await runCode(page, 'context.getImageData(0, 0, 20, 10)');
-    image = (await getOutputs(page, index, 'image/png')).locator('img');
+    const image = (await getOutputs(page, index, 'image/png')).locator('img');
     await expect
       .poll(() => image.evaluate((img: HTMLImageElement) => img.naturalWidth))
       .toBe(20);
+  });
+
+  test('Show the DOM elements live', async ({ page }) => {
+    // The listeners of the element run
+    let index = await runCode(
+      page,
+      [
+        "const b = document.createElement('button');",
+        "b.textContent = 'Clicks: 0';",
+        'let n = 0;',
+        'b.onclick = () => b.textContent = `Clicks: ${++n}`;',
+        'b'
+      ].join('\n')
+    );
+    const button = (await getOutputs(page, index, LIVE_NODE)).getByRole(
+      'button',
+      { name: /Clicks/ }
+    );
+    await button.click();
+    await button.click();
+    await expect(button).toHaveText('Clicks: 2');
+
+    // The listeners of the window of the iframe get its events too
+    index = await runCode(
+      page,
+      "let moves = 0;\nwindow.addEventListener('mousemove', () => moves++);"
+    );
+    await button.hover({ position: { x: 5, y: 5 } });
+    await button.hover({ position: { x: 10, y: 8 } });
+    index = await runCode(page, 'moves > 0');
+    expect(await page.notebook.getCellTextOutput(index)).toEqual(['true']);
+
+    // The later changes of the element are shown
+    index = await runCode(
+      page,
+      [
+        "const clock = document.createElement('div');",
+        'setInterval(() => clock.textContent = new Date().toISOString(), 100);',
+        'clock'
+      ].join('\n')
+    );
+    const clock = await getOutputs(page, index, LIVE_NODE);
+    await expect(clock).toHaveText(/^\d{4}-\d\d-\d\dT/);
+    const time = await clock.textContent();
+    await expect.poll(() => clock.textContent()).not.toBe(time);
+
+    // Also from the next cells
+    await runCode(page, "b.title = 'Counter';");
+    await expect(button).toHaveAttribute('title', 'Counter');
+
+    // A canvas, and a canvas inside an element, like a p5.js sketch
+    index = await runCode(
+      page,
+      [
+        "const canvas = document.createElement('canvas');",
+        'canvas.width = 40;',
+        'canvas.height = 30;',
+        "canvas.getContext('2d').fillRect(0, 0, 40, 30);",
+        'canvas'
+      ].join('\n')
+    );
+    const canvas = await getOutputs(page, index, LIVE_NODE);
+    await expect(canvas.locator('canvas')).toHaveCount(1);
+    index = await runCode(
+      page,
+      [
+        "const sketch = document.createElement('div');",
+        "const inner = sketch.appendChild(document.createElement('canvas'));",
+        'inner.width = 30;',
+        'inner.height = 20;',
+        "inner.getContext('2d').fillRect(0, 0, 30, 20);",
+        'sketch'
+      ].join('\n')
+    );
+    const sketch = await getOutputs(page, index, LIVE_NODE);
+    await expect(sketch.locator('canvas')).toHaveCount(1);
+
+    // After a restart, the outputs show the snapshot of the elements
+    await page.menu.clickMenuItem('Kernel>Restart Kernel…');
+    await page
+      .getByRole('dialog')
+      .getByRole('button', { name: 'Confirm Kernel Restart' })
+      .click();
+    await waitForKernelIdle(page, IFRAME_KERNEL);
+    await expect(button).toHaveText('Clicks: 0');
+    await button.click();
+    await expect(button).toHaveText('Clicks: 0');
+    await expect(button).not.toHaveAttribute('title');
+    await expect(clock).toHaveText('');
+
+    // The canvases show their image
+    for (const [output, width] of [
+      [canvas, 40],
+      [sketch, 30]
+    ] as const) {
+      await expect(output.locator('canvas')).toHaveCount(0);
+      const image = output.locator('img');
+      await expect
+        .poll(() => image.evaluate((img: HTMLImageElement) => img.naturalWidth))
+        .toBe(width);
+    }
+  });
+
+  test('Show the elements again in a reopened notebook, and their snapshot after a reload', async ({
+    page
+  }) => {
+    const index = await runCode(
+      page,
+      [
+        "const b = document.createElement('button');",
+        "b.textContent = 'Clicks: 0';",
+        'let n = 0;',
+        'b.onclick = () => b.textContent = `Clicks: ${++n}`;',
+        'b'
+      ].join('\n')
+    );
+    let button = (await getOutputs(page, index)).getByRole('button', {
+      name: /Clicks/
+    });
+    await button.click();
+    await expect(button).toHaveText('Clicks: 1');
+
+    // Save, close the tab, and open the notebook again: the kernel keeps
+    // running, with the element
+    const notebook = 'Live.ipynb';
+    await page.menu.clickMenuItem('File>Save Notebook');
+    const dialog = page.getByRole('dialog');
+    await dialog.getByRole('textbox').fill(notebook);
+    await dialog.getByRole('button', { name: 'Rename and Save' }).click();
+    const tab = page.activity.getTabLocator(notebook);
+    await expect(tab).not.toHaveClass(/jp-mod-dirty/);
+    await page.menu.clickMenuItem('File>Close Tab');
+    await expect(tab).toHaveCount(0);
+    await page.filebrowser.open(notebook);
+    await waitForKernelIdle(page, IFRAME_KERNEL);
+
+    button = (await getOutputs(page, index)).getByRole('button', {
+      name: /Clicks/
+    });
+    await expect(button).toHaveText('Clicks: 1');
+    await button.click();
+    await expect(button).toHaveText('Clicks: 2');
+
+    // A new page has a new kernel: the saved snapshot is shown
+    await page.reload();
+    await page.filebrowser.open(notebook);
+    await waitForKernelIdle(page, IFRAME_KERNEL);
+    button = (await getOutputs(page, index)).getByRole('button', {
+      name: /Clicks/
+    });
+    await expect(button).toHaveText('Clicks: 0');
+    await expect(
+      page.locator(
+        '.jp-OutputArea-output[data-mime-type="application/vnd.jupyter.stderr"]'
+      )
+    ).toHaveCount(0);
+  });
+
+  test('Show an element in one output at a time, or its snapshot', async ({
+    page
+  }) => {
+    const index = await runCode(
+      page,
+      [
+        "const b = document.createElement('button');",
+        "b.textContent = 'Clicks: 0';",
+        'let n = 0;',
+        'b.onclick = () => b.textContent = `Clicks: ${++n}`;',
+        'display(b, { live: false });',
+        'display(b);',
+        "b.textContent = 'Clicks: 10';",
+        'n = 10;',
+        'display(b);'
+      ].join('\n')
+    );
+    const outputs = await getOutputs(page, index);
+    await expect(outputs).toHaveCount(3);
+    // The snapshot of its HTML
+    await expect(outputs.nth(0)).toHaveAttribute('data-mime-type', 'text/html');
+    // The last output has the element, the others show its snapshot
+    const buttons = outputs.getByRole('button', { name: /Clicks/ });
+    await expect(buttons).toHaveText(['Clicks: 0', 'Clicks: 0', 'Clicks: 10']);
+    await buttons.nth(2).click();
+    await expect(buttons).toHaveText(['Clicks: 0', 'Clicks: 0', 'Clicks: 11']);
+    await buttons.nth(0).click();
+    await buttons.nth(1).click();
+    await expect(buttons).toHaveText(['Clicks: 0', 'Clicks: 0', 'Clicks: 11']);
   });
 });
 

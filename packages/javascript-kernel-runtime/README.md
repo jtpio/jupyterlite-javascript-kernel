@@ -190,7 +190,8 @@ The methods of the evaluator:
   timer, reached `maxStreamOutput`, the error goes to the console of the host
   instead. The error becomes `_error`, unless it belongs to a silent
   execution.
-- `dispose()` removes the globals and the listeners of the evaluator.
+- `dispose()` removes the globals and the listeners of the evaluator, and
+  clears the live elements of its executor, see [Outputs](#outputs).
 
 The `options` of `execute()` (`JavaScriptRuntimeEvaluator.IExecuteOptions`)
 hold the fields of the `execute_request` which change the execution:
@@ -404,7 +405,8 @@ the next cells use it.
 
 `executor.getMimeBundle(value)` returns the MIME bundle of a result, or of
 a value given to `display()`: its custom representations, the HTML of the
-DOM elements and an image of the canvases, and else its text, formatted by
+DOM elements, with an image of the canvases in them, and an image of a
+canvas, and else its text, formatted by
 `inspect()`, with a JSON tree:
 
 - `inspect(value, options?)` formats values like `util.inspect` in Node.js.
@@ -448,6 +450,46 @@ DOM elements and an image of the canvases, and else its text, formatted by
   outputs, checked with `isKnownMimeType(mimeType)`, like `text/html` or
   the vendor types like `text/vnd.mermaid`, is shown as this MIME bundle: `{ data: { 'text/html': '<b>Hi</b>' } }` shows bold text, and
   `{ data: { '2024/01': 5 } }` a JSON tree.
+
+### Live elements
+
+`getMimeBundle(value, { live: true })` shows a DOM element of the realm
+live: the bundle also has `LIVE_NODE_MIME_TYPE`,
+`application/vnd.jupyterlite.javascript-node+json`, with the id of the
+element in `executor.liveNodes`, as `{ id }`, next to its snapshot, the
+`text/html` of its HTML, with the canvases in it as `<img>`, or the
+`image/png` of a canvas, and its `text/plain`.
+A frontend which can not show it renders the snapshot. The evaluator shows
+the elements live in the results of the cells, in `display()` (unless the
+user passes `{ live: false }`, which the display host gets in
+`mimeBundle(value, { live })`) and in the `Output` widgets, but not in the
+`user_expressions`. `live` is false by default for the other callers of
+`getMimeBundle()`.
+
+`executor.liveNodes` is a `LiveNodeRegistry`, created when the global scope
+has a `document`, like an iframe, and null otherwise, like in a Web Worker
+or in an engine without the DOM. It keeps the last 1,000 elements shown
+(`LiveNodeRegistry.MAX_NODES`), by id:
+
+- `canShow(node)` tells if an element can be shown live: an element of the
+  document of the realm, or one already shown, but not its root, its
+  `<head>` and its `<body>`, nor the elements of another document, like the
+  page holding the iframe. The others are shown as their snapshot.
+- `add(node)` returns the id of an element, the same when it is shown
+  again.
+- `get(id)` returns an `ILiveNode`, `{ node, document, released }`, or null:
+  the element, the document of the realm, and a promise which settles when
+  the registry is cleared.
+- `clear()` forgets the elements, when the runtime stops: the outputs showing
+  them show their snapshot instead.
+
+A host which can not move the elements of the realm to its page sets
+`executor.liveNodes = null`, so that its outputs only have the snapshots.
+The JupyterLite IFrame kernel finds the elements with
+`IFrameRuntimeBackend.findLiveNode(id)`, and its extension renders the
+`LIVE_NODE_MIME_TYPE` outputs: it moves the element from the iframe to the
+output, as the iframe has the origin of the page, and forwards its mouse,
+pointer and keyboard events to `document` of the realm.
 
 ## Cells
 

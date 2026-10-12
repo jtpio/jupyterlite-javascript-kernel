@@ -12,6 +12,7 @@ import {
   JavaScriptExecutor,
   normalizeError,
   type IExecutorOptions,
+  type ILiveNode,
   type RuntimeOutputHandler,
   type RuntimeOutputMessage
 } from '@jupyterlite/javascript-kernel-runtime';
@@ -462,7 +463,24 @@ export class IFrameRuntimeBackend extends AbstractRuntimeBackend<IRemoteRuntimeA
     window.addEventListener('focus', this._onFocusChange);
     document.addEventListener('visibilitychange', this._onFocusChange);
     document.addEventListener('focusin', this._onPageFocusIn, true);
+    IFrameRuntimeBackend._backends.add(this);
     void this._start();
+  }
+
+  /**
+   * Find a DOM node shown live by an iframe runtime of the page, from the id
+   * of its output, with the LIVE_NODE_MIME_TYPE MIME type. Returns null when
+   * no running runtime has it: after a restart of the kernel, or when the
+   * output comes from a notebook file.
+   */
+  static findLiveNode(id: string): ILiveNode | null {
+    for (const backend of IFrameRuntimeBackend._backends) {
+      const node = backend._executor?.liveNodes?.get(id);
+      if (node) {
+        return node;
+      }
+    }
+    return null;
   }
 
   /**
@@ -525,6 +543,7 @@ export class IFrameRuntimeBackend extends AbstractRuntimeBackend<IRemoteRuntimeA
     window.removeEventListener('focus', this._onFocusChange);
     document.removeEventListener('visibilitychange', this._onFocusChange);
     document.removeEventListener('focusin', this._onPageFocusIn, true);
+    IFrameRuntimeBackend._backends.delete(this);
     this._focused = null;
 
     this._container?.remove();
@@ -608,6 +627,7 @@ export class IFrameRuntimeBackend extends AbstractRuntimeBackend<IRemoteRuntimeA
         new JavaScriptExecutor(globalScope);
       const remote = createRemoteRuntimeApi(globalScope, executor);
       this._remote = remote;
+      this._executor = executor;
 
       await withTimeout(
         remote.initialize(
@@ -757,6 +777,10 @@ export class IFrameRuntimeBackend extends AbstractRuntimeBackend<IRemoteRuntimeA
       void remote.dispose().catch(() => undefined);
     }
     this._remote = null;
+    // The elements of the cells shown live in the outputs show their
+    // snapshot instead
+    this._executor?.liveNodes?.clear();
+    this._executor = null;
 
     this._iframe?.removeEventListener('load', this._onLoad);
     this._iframe?.remove();
@@ -768,11 +792,17 @@ export class IFrameRuntimeBackend extends AbstractRuntimeBackend<IRemoteRuntimeA
   protected readonly _options: IFrameRuntimeBackend.IOptions;
 
   private _iframe: HTMLIFrameElement | null = null;
+  private _executor: JavaScriptExecutor | null = null;
   private _document: Document | null = null;
   private _container: HTMLDivElement | null = null;
   private _focused: HTMLElement | null = null;
 
   static readonly STARTUP_TIMEOUT_MS = 10000;
+
+  /**
+   * The iframe runtime backends of the page, which are not disposed.
+   */
+  private static _backends = new Set<IFrameRuntimeBackend>();
 
   /**
    * The default time in milliseconds a loop can keep the page busy.

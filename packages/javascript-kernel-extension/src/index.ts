@@ -7,6 +7,7 @@ import {
 } from '@jupyterlab/application';
 
 import { PageConfig } from '@jupyterlab/coreutils';
+import { IRenderMimeRegistry } from '@jupyterlab/rendermime';
 import { ISettingRegistry } from '@jupyterlab/settingregistry';
 
 import { IServiceWorkerManager } from '@jupyterlite/apputils';
@@ -25,6 +26,8 @@ import {
   installKernelInterrupts
 } from '@jupyterlite/javascript-kernel';
 import type { RuntimeMode } from '@jupyterlite/javascript-kernel';
+
+import { createLiveNodeRendererFactory } from './live_node';
 
 import jsLogo32 from '../style/icons/logo-32x32.png';
 
@@ -411,6 +414,21 @@ const kernelInterrupts: JupyterFrontEndPlugin<void> = {
   }
 };
 
+/**
+ * Plugin showing the live DOM elements of the JavaScript (IFrame) kernels in
+ * the outputs, like an element which is the result of a cell.
+ */
+const liveNodes: JupyterFrontEndPlugin<void> = {
+  id: '@jupyterlite/javascript-kernel-extension:live-nodes',
+  description:
+    'Shows the DOM elements of the JavaScript (IFrame) kernels live in the outputs.',
+  autoStart: true,
+  requires: [IRenderMimeRegistry],
+  activate: (app: JupyterFrontEnd, registry: IRenderMimeRegistry) => {
+    registry.addFactory(createLiveNodeRendererFactory(registry));
+  }
+};
+
 const plugins: Array<
   | JupyterFrontEndPlugin<IJavaScriptKernelStartupRegistry>
   | JupyterFrontEndPlugin<IKernelSettings>
@@ -420,7 +438,8 @@ const plugins: Array<
   kernelSettings,
   kernelIFrame,
   kernelWorker,
-  kernelInterrupts
+  kernelInterrupts,
+  liveNodes
 ];
 
 export default plugins;

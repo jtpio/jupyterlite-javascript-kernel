@@ -45,6 +45,13 @@ export interface IDisplayOptions {
    * Whether the value is a MIME bundle to show as is.
    */
   raw?: boolean;
+
+  /**
+   * Whether a DOM element is shown live, when the kernel can: the element
+   * itself, with its event listeners and its later changes, instead of a
+   * snapshot of its HTML. True by default.
+   */
+  live?: boolean;
 }
 
 /**
@@ -91,8 +98,11 @@ export interface IDisplayHost {
 
   /**
    * The MIME bundle of a value.
+   *
+   * @param options.live - Whether a DOM element is shown live, when the
+   * host can. False only when the user turns it off.
    */
-  mimeBundle(value: unknown): IMimeBundle;
+  mimeBundle(value: unknown, options?: { live?: boolean }): IMimeBundle;
 
   /**
    * Read a file, for display.image(path). The helper is only available when
@@ -584,7 +594,7 @@ export class DisplayHandle {
     let data = options.raw ? normalizeBundle(value) : this._format?.(value);
     let ready: Promise<IDisplayData> | undefined;
     if (!data) {
-      data = this._host.mimeBundle(value);
+      data = this._host.mimeBundle(value, { live: options.live });
       ready = encodedOutput(this._host, value, metadata);
     }
     this._host.publish(data, metadata, { display_id: this.id }, update, ready);
@@ -612,7 +622,9 @@ export function createDisplay(host: IDisplayHost): IDisplay {
       id = String(options.id);
     }
     const metadata = options.metadata ?? {};
-    const data = options.raw ? normalizeBundle(value) : host.mimeBundle(value);
+    const data = options.raw
+      ? normalizeBundle(value)
+      : host.mimeBundle(value, { live: options.live });
     const ready = options.raw
       ? options.ready
       : encodedOutput(host, value, metadata);
@@ -842,7 +854,9 @@ export function createDisplay(host: IDisplayHost): IDisplay {
   return setDoc(
     display,
     'Displays a value with its richest representation.\n\n' +
-      'display(value, { id?, metadata? })\n\n' +
+      'display(value, { id?, metadata?, live? })\n\n' +
+      'A DOM element is shown live in JavaScript (IFrame): it keeps its event listeners\n' +
+      'and its later changes. With { live: false }, a snapshot of its HTML is shown.\n\n' +
       'An OffscreenCanvas, an ImageBitmap, an ImageData or a Blob of an image is shown as an\n' +
       'image, and a Vega-Lite spec with a $schema as a chart.\n\n' +
       'Objects can define _toHtml(), _toMarkdown(), _toSvg(), _toPng(), _toJpeg(), _toLatex(),\n' +

@@ -26,6 +26,7 @@ import {
   type LoopKind
 } from './interrupt';
 import { Introspection, type IDeclarationDoc } from './introspection';
+import { LIVE_NODE_MIME_TYPE, LiveNodeRegistry } from './live_nodes';
 import {
   SourceEdits,
   lineStarts,
@@ -504,6 +505,18 @@ export interface IExecutorOptions {
 }
 
 /**
+ * Options of getMimeBundle().
+ */
+export interface IMimeBundleOptions {
+  /**
+   * Whether an element of the realm is shown live, with its id in the
+   * `liveNodes` of the executor, as LIVE_NODE_MIME_TYPE, besides its
+   * snapshot. False by default.
+   */
+  live?: boolean;
+}
+
+/**
  * Result of making code async.
  */
 export interface IAsyncCodeResult {
@@ -666,7 +679,20 @@ export class JavaScriptExecutor {
     const scopeFunction = safe(() => globalScope.Function);
     this._functionConstructor =
       typeof scopeFunction === 'function' ? scopeFunction : Function;
+    const document = safe(() => globalScope.document);
+    this.liveNodes =
+      typeof document === 'object' && document !== null
+        ? new LiveNodeRegistry(document)
+        : null;
   }
+
+  /**
+   * The elements shown live by getMimeBundle(), when the global scope has a
+   * `document`, like an iframe, else null. A host which can not move them to
+   * the page sets it to null, so that the elements are shown as their
+   * snapshot only, and clears it when the runtime stops.
+   */
+  liveNodes: LiveNodeRegistry | null;
 
   /**
    * The configuration of the executor, read when the cells are compiled.
@@ -1218,10 +1244,14 @@ export class JavaScriptExecutor {
    * The images which can only be encoded asynchronously, like an
    * OffscreenCanvas, are shown as text: encodeImage() encodes them.
    *
+   * The DOM elements are shown as their HTML, and the canvases as an image.
+   * With the `live` option, an element of the realm is also added to
+   * `liveNodes`, and shown with its id as LIVE_NODE_MIME_TYPE.
+   *
    * @param value - The value to convert to a MIME bundle.
    * @returns The MIME bundle representation of the value.
    */
-  getMimeBundle(value: any): IMimeBundle {
+  getMimeBundle(value: any, options: IMimeBundleOptions = {}): IMimeBundle {
     const text = () =>
       inspect(value, { colors: true, formatStack: this._formatStack });
 
@@ -1268,7 +1298,15 @@ export class JavaScriptExecutor {
 
     // Handle DOM elements (Canvas, HTMLElement, etc.)
     if (this._isDOMElement(value)) {
-      return this._getDOMElementMimeBundle(value);
+      const bundle = this._getDOMElementMimeBundle(value);
+      const liveNodes = this.liveNodes;
+      if (options.live && liveNodes?.canShow(value)) {
+        return {
+          [LIVE_NODE_MIME_TYPE]: { id: liveNodes.add(value) },
+          ...bundle
+        };
+      }
+      return bundle;
     }
 
     // A Vega-Lite or a Vega spec, like the charts of Altair
@@ -2400,12 +2438,54 @@ export class JavaScriptExecutor {
     // For other elements, return HTML
     const elementHtml =
       typeof element?.outerHTML === 'string'
-        ? element.outerHTML
+        ? this._withCanvasImages(element)
         : String(element);
     return {
       'text/html': elementHtml,
       'text/plain': elementHtml
     };
+  }
+
+  /**
+   * Get the HTML of an element, with its canvases replaced by an image of
+   * their pixels, since the HTML of a canvas has none.
+   */
+  private _withCanvasImages(element: any): string {
+    const canvases: any[] =
+      typeof element.querySelectorAll === 'function'
+        ? Array.from(element.querySelectorAll('canvas'))
+        : [];
+    if (canvases.length === 0 || typeof element.cloneNode !== 'function') {
+      return element.outerHTML;
+    }
+    try {
+      const clone = element.cloneNode(true);
+      const copies = clone.querySelectorAll('canvas');
+      canvases.forEach((canvas, i) => {
+        const copy = copies[i];
+        let src: string;
+        try {
+          src = canvas.toDataURL('image/png');
+        } catch {
+          // A canvas tainted by a cross-origin image stays blank
+          return;
+        }
+        // Keep the attributes of the canvas, like its size and its style
+        const image = copy.ownerDocument.createElement('img');
+        for (const { name, value } of Array.from(
+          copy.attributes as ArrayLike<{ name: string; value: string }>
+        )) {
+          image.setAttribute(name, value);
+        }
+        image.setAttribute('width', String(canvas.width));
+        image.setAttribute('height', String(canvas.height));
+        image.setAttribute('src', src);
+        copy.replaceWith(image);
+      });
+      return clone.outerHTML;
+    } catch {
+      return element.outerHTML;
+    }
   }
 
   /**

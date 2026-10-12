@@ -406,7 +406,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@jupyterlab/rendermime-interfaces@npm:^3.14.4, @jupyterlab/rendermime-interfaces@npm:~3.14.4":
+"@jupyterlab/rendermime-interfaces@npm:^3.14.0, @jupyterlab/rendermime-interfaces@npm:^3.14.4, @jupyterlab/rendermime-interfaces@npm:~3.14.4":
   version: 3.14.4
   resolution: "@jupyterlab/rendermime-interfaces@npm:3.14.4"
   dependencies:
@@ -416,7 +416,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@jupyterlab/rendermime@npm:^4.6.4":
+"@jupyterlab/rendermime@npm:^4.6.0, @jupyterlab/rendermime@npm:^4.6.4":
   version: 4.6.4
   resolution: "@jupyterlab/rendermime@npm:4.6.4"
   dependencies:
@@ -595,6 +595,8 @@ __metadata:
     "@jupyter/builder": ^1.2.0
     "@jupyterlab/application": ^4.6.0
     "@jupyterlab/coreutils": ^6.6.0
+    "@jupyterlab/rendermime": ^4.6.0
+    "@jupyterlab/rendermime-interfaces": ^3.14.0
     "@jupyterlab/settingregistry": ^4.6.0
     "@jupyterlite/apputils": ^0.8.0
     "@jupyterlite/javascript-kernel": ^0.4.0-alpha.5
@@ -602,6 +604,7 @@ __metadata:
     "@lumino/coreutils": ^2.2.2
     "@lumino/disposable": ^2.1.5
     "@lumino/signaling": ^2.1.5
+    "@lumino/widgets": ^2.8.0
     npm-run-all2: ^7.0.1
     rimraf: ~5.0.1
     typescript: ~5.0.2

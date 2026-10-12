@@ -158,7 +158,7 @@ export class JavaScriptRuntimeEvaluator {
       clear: wait => {
         this._onOutput({ type: 'clear_output', bundle: { wait } });
       },
-      mimeBundle: value => this._mimeBundle(value),
+      mimeBundle: (value, mimeOptions) => this._mimeBundle(value, mimeOptions),
       readFile: options.readFile
     });
     this._console = createConsole({
@@ -200,6 +200,8 @@ export class JavaScriptRuntimeEvaluator {
       this._executor.loopGuard = null;
     }
     this._commManager.dispose();
+    // The outputs showing the elements live show their snapshot instead
+    this._executor.liveNodes?.clear();
     // The timers of a removed realm never fire
     for (const end of [...this._openRequests]) {
       end();
@@ -512,7 +514,8 @@ export class JavaScriptRuntimeEvaluator {
         });
         token = parsed.name;
         const value = await this._evaluate(parsed.asyncFunction, parent);
-        const data = this._mimeBundle(value);
+        // The extensions read the data, they do not render the elements
+        const data = this._mimeBundle(value, { live: false });
         // The text is read by the extensions, not shown in a notebook
         const text = data['text/plain'];
         if (typeof text === 'string') {
@@ -870,13 +873,19 @@ export class JavaScriptRuntimeEvaluator {
   }
 
   /**
-   * The MIME bundle of a value, with the view of the widgets.
+   * The MIME bundle of a value, with the view of the widgets. The DOM
+   * elements are shown live, unless `live` is false.
    */
-  private _mimeBundle(value: unknown): IMimeBundle {
+  private _mimeBundle(
+    value: unknown,
+    options: { live?: boolean } = {}
+  ): IMimeBundle {
     if (value instanceof Widget) {
       return this._commManager.widgetMimeBundle(value.commId);
     }
-    return this._executor.getMimeBundle(value);
+    return this._executor.getMimeBundle(value, {
+      live: options.live !== false
+    });
   }
 
   /**

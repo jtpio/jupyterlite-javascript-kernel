@@ -11,6 +11,7 @@ export * from './executor';
 export * from './inspect';
 export * from './interrupt';
 export * from './introspection';
+export * from './live_nodes';
 export * from './output_batcher';
 export * from './output_router';
 export * from './protocol';

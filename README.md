@@ -152,7 +152,7 @@ When the code of a cell does not stop after an interrupt, the kernel restarts th
 
 In `JavaScript (IFrame)`, `document.write()` and `document.open()` replace the content of the runtime iframe, and the kernel keeps running, with the variables of the previous cells. When the code reloads the iframe or navigates it away, like with `location.reload()` or `location.href = '...'`, the kernel starts a new iframe and prints `The code reloaded or left the page of the iframe, so the runtime was restarted: ...`: the variables, functions, imports and widgets of the previous cells are lost. A cell still running at that moment fails with a `RuntimeReloadedError`.
 
-The runtime iframe is rendered but invisible: it is 800 × 600 pixels, fixed at the top left of the page and hidden with `visibility: hidden`, out of reach of the mouse, the keyboard and the screen readers. So the DOM code of the cells works like on a visible page: the elements they append have a layout, like `offsetWidth`, `getBoundingClientRect()` and `IntersectionObserver` entries, `innerWidth` and `innerHeight` are 800 and 600, and `requestAnimationFrame()` runs the animations. To show what a cell draws, display the element, like a canvas, as the result of the cell, or append it to the page with `window.parent.document`. When the code of a cell focuses an element of the iframe, like with `input.focus()`, the page takes the focus back, without scrolling, so the keyboard keeps going to the notebook. When this happens while the page is in the background, like from a timer, the page takes the focus back when it comes to the front again.
+The runtime iframe is rendered but invisible: it is 800 × 600 pixels, fixed at the top left of the page and hidden with `visibility: hidden`, out of reach of the mouse, the keyboard and the screen readers. So the DOM code of the cells works like on a visible page: the elements they append have a layout, like `offsetWidth`, `getBoundingClientRect()` and `IntersectionObserver` entries, `innerWidth` and `innerHeight` are 800 and 600, and `requestAnimationFrame()` runs the animations. To show what a cell draws, make the element, like a canvas, the result of the cell, or display it: it is shown [live](#live-dom-elements), moved to the output. When the code of a cell focuses an element of the iframe, like with `input.focus()`, the page takes the focus back, without scrolling, so the keyboard keeps going to the notebook. When this happens while the page is in the background, like from a timer, the page takes the focus back when it comes to the front again.
 
 The kernel calls the runtime of the iframe directly, from the page: it does not handle the messages posted to the window of the iframe, so other windows, like a page embedding JupyterLite, can not run code in the kernel with `postMessage()`.
 
@@ -160,7 +160,7 @@ The kernel calls the runtime of the iframe directly, from the page: it does not 
 
 In `JavaScript (IFrame)`, user code and imports execute in the runtime iframe scope.
 
-By default, module-level side effects stay in the runtime iframe. To intentionally affect the main page (`window.parent`), access it directly.
+By default, module-level side effects stay in the runtime iframe. To show what a library draws, give it an element and make the element the result of the cell, or display it: the output shows the element [live](#live-dom-elements). To intentionally affect the main page (`window.parent`), access it directly.
 
 Cell declarations like `var`, `let`, `const`, `function`, and `class` remain in the runtime scope. Host-page mutations happen when your code (or imported code) explicitly reaches `window.parent`.
 
@@ -169,20 +169,14 @@ Cell declarations like `var`, `let`, `const`, `function`, and `class` remain in 
 ```javascript
 import confetti from 'canvas-confetti';
 
-const canvas = window.parent.document.createElement('canvas');
-Object.assign(canvas.style, {
-  position: 'fixed',
-  inset: '0',
-  width: '100%',
-  height: '100%',
-  pointerEvents: 'none',
-  zIndex: '2147483647'
-});
-window.parent.document.body.appendChild(canvas);
+const canvas = document.createElement('canvas');
+canvas.width = 600;
+canvas.height = 300;
 
-const fire = confetti.create(canvas, { resize: true, useWorker: true });
+const fire = confetti.create(canvas);
+fire({ particleCount: 100, spread: 70, origin: { y: 0.6 } });
 
-fire({ particleCount: 20, spread: 70 });
+canvas;
 ```
 
 #### Example: p5.js
@@ -190,21 +184,18 @@ fire({ particleCount: 20, spread: 70 });
 ```javascript
 import p5 from 'p5';
 
-const mount = window.parent.document.createElement('div');
-Object.assign(mount.style, {
-  position: 'fixed',
-  right: '16px',
-  bottom: '16px',
-  zIndex: '1000'
-});
-window.parent.document.body.appendChild(mount);
-
+const mount = document.createElement('div');
 const sketch = new p5(p => {
   p.setup = () => {
-    p.createCanvas(120, 80);
-    p.noLoop();
+    p.createCanvas(240, 120);
+  };
+  p.draw = () => {
+    p.background(240);
+    p.circle(p.mouseX, p.mouseY, 20);
   };
 }, mount);
+
+mount;
 ```
 
 #### Can side effects be auto-detected and cleaned up?
@@ -280,7 +271,7 @@ Limitations:
 
 ## Rich output
 
-The last expression of a cell is shown as its result. The values are printed like with `util.inspect` in Node.js. The objects of the web APIs show their state, like `Blob { size: 2, type: 'text/plain' }`, or the `status` and the `headers` of the `Response` of `await fetch(url)`. In the console and inside other values, the DOM nodes show as their opening tag, like `{ el: <div id="main"> }`, while an element that is the result of a cell is still rendered as HTML, and a canvas as an image.
+The last expression of a cell is shown as its result. The values are printed like with `util.inspect` in Node.js. The objects of the web APIs show their state, like `Blob { size: 2, type: 'text/plain' }`, or the `status` and the `headers` of the `Response` of `await fetch(url)`. In the console and inside other values, the DOM nodes show as their opening tag, like `{ el: <div id="main"> }`, while an element that is the result of a cell is shown [live](#live-dom-elements) in `JavaScript (IFrame)`.
 
 The data that JSON can represent as it is, like objects and arrays of strings, numbers, booleans and `null`, is also shown as an interactive tree. The values JSON would change, with `NaN`, `Infinity`, `undefined`, functions, symbols or BigInt, the objects without own properties, like a `Blob`, the objects of the web APIs, like an `Event`, and the large values, with more than 10,000 items or 1 MB of JSON, are shown as text only: the text lists the first 100 items of a large array, which is not saved in full in the notebook.
 
@@ -292,7 +283,7 @@ await new Promise(resolve => setTimeout(resolve, 1000));
 task.update('Done!');
 ```
 
-The `metadata` option sets the metadata of the output. `handle.display(value)` shows a new output, updated together with the other outputs of the handle.
+The `metadata` option sets the metadata of the output, and `live: false` shows a snapshot of a DOM element instead of the [element itself](#live-dom-elements). `handle.display(value)` shows a new output, updated together with the other outputs of the handle.
 
 The helpers of `display` show content for the common MIME types:
 
@@ -342,7 +333,35 @@ const logo = await (await fetch('https://example.com/logo.png')).blob();
 display(logo);
 ```
 
-The images are encoded asynchronously, from the pixels of the drawing when it is displayed: the outputs displayed after an image wait for it, so they keep their order, and the cell finishes once its images are shown. A `prompt()` called while an image is still being encoded shows its input box first: the image, and the text printed after it, show up once the user answered. `display.png()` and `display.jpeg()` encode the drawings in their format, like `display.jpeg(canvas, { width: 120 })`, and the [`Image` widget](#files-dates-and-tags) takes them too. In `JavaScript (IFrame)`, a canvas element is shown as an image as well.
+The images are encoded asynchronously, from the pixels of the drawing when it is displayed: the outputs displayed after an image wait for it, so they keep their order, and the cell finishes once its images are shown. A `prompt()` called while an image is still being encoded shows its input box first: the image, and the text printed after it, show up once the user answered. `display.png()` and `display.jpeg()` encode the drawings in their format, like `display.jpeg(canvas, { width: 120 })`, and the [`Image` widget](#files-dates-and-tags) takes them too. In `JavaScript (IFrame)`, a canvas element is shown [live](#live-dom-elements), and saved as an image.
+
+### Live DOM elements
+
+In `JavaScript (IFrame)`, an element which is the result of a cell, or given to `display()`, is shown live: the output shows the element itself, moved from the runtime iframe to the notebook, instead of a copy of its HTML. It keeps its event listeners and its state, and shows its later changes:
+
+```javascript
+const button = document.createElement('button');
+let clicks = 0;
+button.textContent = 'Clicks: 0';
+button.onclick = () => (button.textContent = `Clicks: ${++clicks}`);
+button;
+```
+
+So a button runs its `onclick` handler, a `<div>` updated by `setInterval()` ticks, the input of a text field stays in it, a canvas keeps animating, also inside a `<div>`, and the charts of libraries like d3 or Observable Plot show their tooltips:
+
+```javascript
+import * as Plot from '@observablehq/plot';
+
+const letters = [...'JUPYTER'].map((letter, i) => ({ letter, count: i + 1 }));
+Plot.barY(letters, { x: 'letter', y: 'count', tip: true }).plot();
+```
+
+- The notebook saves a snapshot of the element, taken when it is shown: its HTML, with the canvases in it as images, like the one of a p5.js sketch in its `<div>`, and the image of a canvas. The output shows this snapshot when the element is gone: after a restart of the kernel, in a notebook opened on a new page or from a file, and in the other Jupyter frontends. A notebook closed and opened again while its kernel runs shows the elements again, in their current state: the kernel keeps the last 1,000 elements shown.
+- An element is in one place at a time: when several outputs show it, like after `display(el)` twice, the last one has it and the others show their snapshot. When that output is cleared, like when its cell runs again, the element goes back to the previous output showing it.
+- The element leaves the document of the iframe: `document.querySelector()` does not find it anymore, so keep a reference to it, and its `ownerDocument` is the document of the notebook. The style sheets of the iframe document, like a `<style>` added to `document.head`, do not apply to it, while the styles of the notebook for the HTML outputs do: use inline styles, or a `<style>` or a `<link rel="stylesheet">` in the element, which applies to the whole page, like in an HTML output.
+- Its mouse, pointer and keyboard events are also sent to the document of the iframe, where they bubble to its window: the listeners added by the code of the cells to `document` or `window`, like the ones of p5.js for `mouseX` and `mouseY`, get them, with the document as their target, as if the element was still in the iframe. The touch events are not. The keys typed while an element of the output has the focus, like a canvas with a `tabindex`, still run the shortcuts of the notebook, like <kbd>A</kbd> to insert a cell, unless it is a text field.
+- The root, the `<head>` and the `<body>` of the iframe document, and the elements of the page, like the ones of `window.parent.document`, are shown as a snapshot, like an element displayed with `display(el, { live: false })`. An untrusted notebook shows the snapshots too.
+- `JavaScript (Web Worker)` has no DOM, so it shows no live elements.
 
 ### Charts and diagrams
 
@@ -985,8 +1004,8 @@ Disabling `@jupyterlite/javascript-kernel-extension:kernel-settings` makes the k
 The repository contains three npm packages:
 
 - `@jupyterlite/javascript-kernel-runtime`: the code running next to the user code, in the iframe or the Web Worker. It executes the cells, formats the outputs, and implements comms and widgets. It does not depend on JupyterLite, so that other JavaScript kernels can reuse it. It is engine-neutral: it only needs the ECMAScript built-ins, and compiles without the DOM types, which the build checks. It also ships single-file builds, with `acorn`, `acorn-walk` and `astring` included, for kernels that do not use npm, and exports the engine-neutral helpers of the tracebacks, like `parseStack` and `formatError`, for other kernels. The evaluator batches the stream outputs: a host can pass its `scheduler` (or `null` when the engine has no host timers, and then calls `evaluator.flushOutputs()` itself), a `flushInterval` (0 turns the batching off) and a `maxStreamOutput` per cell. It interrupts the cells with `evaluator.interrupt()`, and stops the loops with a `loopTimeout` or, from another thread, an `interruptBuffer`. Its output messages carry the `parentHeader` of the message of the frontend they belong to (the cell which created a timer or registered a widget callback, or the comm message whose outputs an `Output` widget captures), given to `execute()` and to the comm handlers, and `JavaScriptKernel` publishes them with it. The `executorOptions` of the evaluator (an `IExecutorOptions`, as plain data) configure the magic imports, also of an existing executor, like `ExecutorConfig.update()`. See its [README](packages/javascript-kernel-runtime/README.md).
-- `@jupyterlite/javascript-kernel`: the JupyterLite kernel, with the iframe and Web Worker runtimes. It also exports everything from `@jupyterlite/javascript-kernel-runtime`. The iframe backend calls the runtime API directly in the page, and the Web Worker backend over Comlink. `IFrameRuntimeBackend` keeps its iframe rendered but invisible, in a container fixed on the page, of `IFrameRuntimeBackend.FRAME_WIDTH` × `FRAME_HEIGHT` pixels, with `visibility: hidden`, `inert` and `aria-hidden`, which `onReady` gets as `container`, and it gives the focus back to the page when the iframe takes it. When the code of a cell reloads the iframe, `IFrameRuntimeBackend` calls its `onRestart` option and starts a new iframe, for which it calls `executorFactory` and `onReady` again: the `onRuntimeReady` method of the kernels building on `JavaScriptKernel`, like the p5.js kernel, runs again with the new global scope and executor. `JavaScriptKernel` handles the silent `execute_request` messages itself, without `execute_input`, but still calls `executeRequest()`, which these kernels override: for a silent request, `content.silent` is true and `parentHeader` is still the header of the cell which ran before it, so an override checks `content.silent` before publishing outputs. JupyterLite only cancels the queued cells on interrupt: `installKernelInterrupts(client)` makes its kernel client also call the `interrupt()` method of the kernels, like `JavaScriptKernel.interrupt()`. The extension calls it, and the extensions of kernels building on `JavaScriptKernel`, like the p5.js kernel, can call it too, since installing it twice does nothing. The `executorOptions`, `loopTimeout` and `maxStreamOutput` options of `JavaScriptKernel` configure the runtime when it starts: the extension sets them from the [settings](#settings), and the kernels building on `JavaScriptKernel` keep the defaults unless they pass them.
-- `@jupyterlite/javascript-kernel-extension`: the JupyterLite extension registering the kernels, with their settings.
+- `@jupyterlite/javascript-kernel`: the JupyterLite kernel, with the iframe and Web Worker runtimes. It also exports everything from `@jupyterlite/javascript-kernel-runtime`. The iframe backend calls the runtime API directly in the page, and the Web Worker backend over Comlink. `IFrameRuntimeBackend` keeps its iframe rendered but invisible, in a container fixed on the page, of `IFrameRuntimeBackend.FRAME_WIDTH` × `FRAME_HEIGHT` pixels, with `visibility: hidden`, `inert` and `aria-hidden`, which `onReady` gets as `container`, and it gives the focus back to the page when the iframe takes it. When the code of a cell reloads the iframe, `IFrameRuntimeBackend` calls its `onRestart` option and starts a new iframe, for which it calls `executorFactory` and `onReady` again: the `onRuntimeReady` method of the kernels building on `JavaScriptKernel`, like the p5.js kernel, runs again with the new global scope and executor. `JavaScriptKernel` handles the silent `execute_request` messages itself, without `execute_input`, but still calls `executeRequest()`, which these kernels override: for a silent request, `content.silent` is true and `parentHeader` is still the header of the cell which ran before it, so an override checks `content.silent` before publishing outputs. JupyterLite only cancels the queued cells on interrupt: `installKernelInterrupts(client)` makes its kernel client also call the `interrupt()` method of the kernels, like `JavaScriptKernel.interrupt()`. The extension calls it, and the extensions of kernels building on `JavaScriptKernel`, like the p5.js kernel, can call it too, since installing it twice does nothing. The `executorOptions`, `loopTimeout` and `maxStreamOutput` options of `JavaScriptKernel` configure the runtime when it starts: the extension sets them from the [settings](#settings), and the kernels building on `JavaScriptKernel` keep the defaults unless they pass them. `IFrameRuntimeBackend.findLiveNode(id)` finds the [live DOM elements](#live-dom-elements) of the iframe runtimes of the page, from the id of their `application/vnd.jupyterlite.javascript-node+json` outputs, so the kernels building on `JavaScriptKernel` with the iframe runtime show their elements live too.
+- `@jupyterlite/javascript-kernel-extension`: the JupyterLite extension registering the kernels, with their settings, and the renderer of the live DOM elements.
 
 ### Development install
 

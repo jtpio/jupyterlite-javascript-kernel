@@ -99,10 +99,15 @@ test.describe('Examples', () => {
   test('rich-output.ipynb', async ({ page }) => {
     const outputs = await runExample(page, 'rich-output.ipynb', IFRAME_KERNEL);
 
-    // The canvases are shown as images
+    // The canvases and the elements are shown live
+    const live = outputs.locator(
+      '.jp-OutputArea-output[data-mime-type="application/vnd.jupyterlite.javascript-node+json"]'
+    );
+    await expect(live.locator('canvas')).toHaveCount(2);
+    await live.getByRole('button', { name: 'Clicked 0 times' }).click();
     await expect(
-      outputs.locator('.jp-OutputArea-output[data-mime-type="image/png"] img')
-    ).toHaveCount(2);
+      live.getByRole('button', { name: 'Clicked 1 times' })
+    ).toBeVisible();
     await expect(
       outputs.locator('.jp-OutputArea-output[data-mime-type="image/svg+xml"]')
     ).not.toHaveCount(0);
