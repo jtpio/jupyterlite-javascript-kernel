@@ -9,6 +9,7 @@ import {
   uuid
 } from '@jupyterlite/javascript-kernel-runtime';
 
+import { kernelErrorHints } from './hints';
 import type { IRemoteRuntimeApi } from './runtime_protocol';
 
 /**
@@ -178,6 +179,7 @@ export function createRemoteRuntimeApi(
         globalScope,
         executor,
         executorOptions: options.executorOptions,
+        errorHints: kernelErrorHints(options.cdnSetting),
         onOutput: message => {
           emitOutput(onOutput, message);
         },

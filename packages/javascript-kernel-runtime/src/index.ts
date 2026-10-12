@@ -8,6 +8,13 @@ export { uuid, decodeUtf8 } from './env';
 export * from './errors';
 export { encodeImage, IMAGE_BLOB_TYPES, type IEncodedImage } from './images';
 export * from './executor';
+export {
+  closestNames,
+  undefinedName,
+  type ErrorHint,
+  type IErrorHintContext,
+  type IFailedImport
+} from './hints';
 export * from './inspect';
 export * from './interrupt';
 export * from './introspection';

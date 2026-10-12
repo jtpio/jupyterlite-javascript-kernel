@@ -3,7 +3,15 @@
 
 import { expect, test, type IJupyterLabPageFixture } from '@jupyterlab/galata';
 
-import { KERNELS, createNotebook, getOutputs, runCode } from './utils';
+import {
+  IFRAME_KERNEL,
+  KERNELS,
+  WORKER_KERNEL,
+  createNotebook,
+  getOutputs,
+  runCode,
+  waitForKernelIdle
+} from './utils';
 
 const STDERR = 'application/vnd.jupyter.stderr';
 
@@ -224,3 +232,88 @@ for (const kernel of KERNELS) {
     });
   });
 }
+
+for (const kernel of KERNELS) {
+  test.describe(`Error hints (${kernel.displayName})`, () => {
+    test.beforeEach(async ({ page }) => {
+      await createNotebook(page, kernel);
+    });
+
+    test('Suggest the names close to a misspelled name', async ({ page }) => {
+      let index = await runCode(page, 'consle.log(1)');
+      let lines = await getErrorLines(page, index);
+      // The error is kept, the hint comes last
+      expect(lines).toContain('ReferenceError: consle is not defined');
+      expect(lines[lines.length - 1]).toBe('Did you mean: console?');
+
+      index = await runCode(page, 'Math.flor(2.5)');
+      lines = await getErrorLines(page, index);
+      expect(lines).toContain('TypeError: Math.flor is not a function');
+      expect(lines).toContain('Did you mean: Math.floor?');
+
+      // A member read on undefined, which the message does not name
+      index = await runCode(
+        page,
+        'const size = { width: 1 };\nsize.widht.toFixed()'
+      );
+      lines = await getErrorLines(page, index);
+      expect(lines).toContain('Did you mean: size.width?');
+
+      // A variable which is undefined gets no suggestion, even with a name
+      // close to a global, like Node
+      index = await runCode(
+        page,
+        'function area(node) {\nreturn node.width * 2;\n}\narea()'
+      );
+      lines = await getErrorLines(page, index);
+      expect(lines.join('\n')).not.toContain('Did you mean');
+
+      // The names declared by the cells are suggested too
+      index = await runCode(page, 'const message = "hi";\nmesage');
+      lines = await getErrorLines(page, index);
+      expect(lines).toContain('Did you mean: message?');
+
+      // No suggestion for a name far from the others
+      index = await runCode(page, 'qwertyuiop');
+      lines = await getErrorLines(page, index);
+      expect(lines.join('\n')).not.toContain('Did you mean');
+    });
+
+    test('Explain the requests of fetch() which got no response', async ({
+      page
+    }) => {
+      // Nothing listens on this port: no network is needed
+      const index = await runCode(page, "await fetch('http://127.0.0.1:1/')");
+      const lines = await getErrorLines(page, index);
+      expect(lines).toContain('TypeError: Failed to fetch');
+      const text = lines.join('\n');
+      expect(text).toContain('check the URL and the network connection');
+      expect(text).toContain('CORS');
+    });
+  });
+}
+
+test.describe(`Error hints (${WORKER_KERNEL.displayName})`, () => {
+  test('Suggest the IFrame kernel for the DOM', async ({ page }) => {
+    await createNotebook(page, WORKER_KERNEL);
+    const index = await runCode(
+      page,
+      'document.title = "hints";\ndocument.title'
+    );
+    const lines = await getErrorLines(page, index);
+    expect(lines).toContain('ReferenceError: document is not defined');
+    expect(lines[lines.length - 1]).toBe(
+      'document is not available in the JavaScript (Web Worker) kernel, which has no DOM: use Kernel > Change Kernel… > JavaScript (IFrame), or an OffscreenCanvas to draw.'
+    );
+
+    // Follow the hint, and run the cell again
+    await page.menu.clickMenuItem('Kernel>Change Kernel…');
+    const dialog = page.getByRole('dialog');
+    await dialog.getByRole('combobox').selectOption(IFRAME_KERNEL.displayName);
+    await dialog.getByRole('button', { name: 'Select' }).click();
+    await waitForKernelIdle(page, IFRAME_KERNEL);
+
+    await page.notebook.runCell(index);
+    expect(await page.notebook.getCellTextOutput(index)).toEqual(["'hints'"]);
+  });
+});

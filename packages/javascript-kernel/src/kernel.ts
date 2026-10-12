@@ -46,6 +46,7 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
     this._maxStreamOutput = options.maxStreamOutput;
     this._loopTimeout = options.loopTimeout;
     this._executorOptions = options.executorOptions;
+    this._cdnSetting = options.cdnSetting;
     this._startupExtensions = [...(options.startupExtensions ?? [])];
     this._backend = this.createBackend(this._runtimeMode);
   }
@@ -538,7 +539,8 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
       },
       maxStreamOutput: this._maxStreamOutput,
       loopTimeout: this._loopTimeout,
-      executorOptions: this._executorOptions
+      executorOptions: this._executorOptions,
+      cdnSetting: this._cdnSetting
     };
 
     if (runtimeMode === 'worker') {
@@ -894,6 +896,7 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
   private _browsingContextId?: string;
   private _maxStreamOutput?: number;
   private _loopTimeout?: number;
+  private _cdnSetting?: string;
   private _executorOptions?: IExecutorOptions;
   private _startupExtensions: JavaScriptKernel.IStartupExtension[];
   private _appliedStartupExtensions = new Set<string>();
@@ -1016,5 +1019,13 @@ export namespace JavaScriptKernel {
      * of executorFactory.
      */
     executorOptions?: IExecutorOptions;
+
+    /**
+     * Where the users set the CDN of the magic imports, like
+     * `Settings > Settings Editor > JavaScript Kernel`: the errors of the
+     * imports which fail name it. Without it, they do not point to a
+     * setting.
+     */
+    cdnSetting?: string;
   }
 }

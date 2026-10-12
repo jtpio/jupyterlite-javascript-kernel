@@ -180,6 +180,113 @@ for (const kernel of KERNELS) {
       expect(await page.notebook.getCellTextOutput(index)).toEqual(['1']);
     });
 
+    test('Explain the imports of packages the CDN does not have', async ({
+      page
+    }) => {
+      await page.goto('lab/index.html');
+      const form = await openKernelSettings(page);
+      await setKernelSetting(page, form, 'CDN base URL', 'fake-cdn/');
+      await createNotebook(page, kernel, { open: false });
+
+      // A typo in the package name: the error is kept, with the location of
+      // the source and the hints after it
+      let index = await runCode(
+        page,
+        "import x from 'this-package-does-not-exist-xyz';"
+      );
+      let lines = await getErrorLines(page, index);
+      const source = lines[1];
+      expect(lines[0]).toBe('In[1]:1');
+      expect(lines[2].indexOf('^')).toBe(source.indexOf("'"));
+      expect(lines).toContainEqual(
+        expect.stringMatching(
+          /^TypeError: .*fake-cdn\/npm\/this-package-does-not-exist-xyz\/\+esm/
+        )
+      );
+      expect(lines).toContainEqual(
+        expect.stringMatching(
+          /^The package 'this-package-does-not-exist-xyz' was not found on http.*\/fake-cdn\/ \(404\): check its name on npmjs\.com\.$/
+        )
+      );
+      expect(lines[lines.length - 1]).toBe(
+        'The packages are loaded from the CDN base URL of Settings > Settings Editor > JavaScript Kernel.'
+      );
+
+      // A version which does not exist
+      index = await runCode(
+        page,
+        "import { greet } from 'imports-fixture@99/index.js';"
+      );
+      lines = await getErrorLines(page, index);
+      expect(lines).toContainEqual(
+        expect.stringMatching(
+          /^The package 'imports-fixture' has no version 99 on http.*\/fake-cdn\/ \(404\)/
+        )
+      );
+
+      // A dynamic import in a function
+      index = await runCode(
+        page,
+        "async function load() {\nreturn import('imports-fixtur/index.js');\n}\nawait load()"
+      );
+      lines = await getErrorLines(page, index);
+      expect(lines[0]).toBe('In[3]:2');
+      expect(lines).toContainEqual(
+        expect.stringMatching(/^The package 'imports-fixtur' was not found on/)
+      );
+
+      // The code handling the failure gets the error, and falls back
+      index = await runCode(
+        page,
+        "let fixture;\ntry {\nfixture = await import('imports-fixtur/index.js');\n} catch {\nfixture = await import('imports-fixture/index.js');\n}\nfixture.greet('fallback')"
+      );
+      expect(await page.notebook.getCellTextOutput(index)).toEqual([
+        "'Hello, fallback!'"
+      ]);
+
+      // A failed import which nothing waits for is explained too
+      index = await runCode(page, "import('imports-fixtur/index.js');\n'sent'");
+      lines = await getErrorLines(page, index);
+      expect(lines).toContainEqual(
+        expect.stringMatching(/^Uncaught \(in promise\) TypeError: /)
+      );
+      expect(lines).toContainEqual(
+        expect.stringMatching(/^The package 'imports-fixtur' was not found on/)
+      );
+
+      // The fixed import works
+      index = await runCode(
+        page,
+        "import { greet } from 'imports-fixture/index.js';\ngreet('hints')"
+      );
+      expect(await page.notebook.getCellTextOutput(index)).toEqual([
+        "'Hello, hints!'"
+      ]);
+    });
+
+    test('Explain the imports from a CDN which can not be reached', async ({
+      page
+    }) => {
+      await page.goto('lab/index.html');
+      const form = await openKernelSettings(page);
+      // Nothing listens on this port: no network is needed
+      await setKernelSetting(page, form, 'CDN base URL', 'http://127.0.0.1:1/');
+      await createNotebook(page, kernel, { open: false });
+
+      const index = await runCode(
+        page,
+        "import confetti from 'canvas-confetti';"
+      );
+      const lines = await getErrorLines(page, index);
+      expect(lines[0]).toBe('In[1]:1');
+      expect(lines).toContain(
+        'The CDN http://127.0.0.1:1/ could not be reached: the magic imports need a network connection to it.'
+      );
+      expect(lines).toContain(
+        'The packages are loaded from the CDN base URL of Settings > Settings Editor > JavaScript Kernel.'
+      );
+    });
+
     test('Suggest import instead of require()', async ({ page }) => {
       await createNotebook(page, kernel);
       const index = await runCode(page, "const _ = require('lodash');");

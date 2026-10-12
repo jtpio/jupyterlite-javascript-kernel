@@ -51,6 +51,12 @@ export interface IRuntimeBackendOptions {
    * when the runtime starts.
    */
   executorOptions?: IExecutorOptions;
+
+  /**
+   * Where the users set the CDN of the magic imports, named by the errors of
+   * the imports which fail.
+   */
+  cdnSetting?: string;
 }
 
 /**
@@ -635,6 +641,7 @@ export class IFrameRuntimeBackend extends AbstractRuntimeBackend<IRemoteRuntimeA
             baseUrl: resolveBaseUrl(this._options.baseUrl),
             maxStreamOutput: this._options.maxStreamOutput,
             executorOptions: this._options.executorOptions,
+            cdnSetting: this._options.cdnSetting,
             loopTimeout:
               this._options.loopTimeout ??
               IFrameRuntimeBackend.DEFAULT_LOOP_TIMEOUT_MS
@@ -1065,6 +1072,7 @@ export class WorkerRuntimeBackend extends AbstractRuntimeBackend<
             browsingContextId: this._options.browsingContextId,
             maxStreamOutput: this._options.maxStreamOutput,
             executorOptions: this._options.executorOptions,
+            cdnSetting: this._options.cdnSetting,
             loopTimeout: this._options.loopTimeout ?? 0,
             interruptBuffer: this._interruptBuffer ?? undefined
           },

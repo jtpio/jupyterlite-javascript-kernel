@@ -16,6 +16,7 @@ import type { CommTargetHandler } from './comm';
 import { createConsole, type KernelConsole } from './console';
 import { createDisplay, imageBundle, type IDisplay } from './display';
 import { hostConsole } from './env';
+import type { ErrorHint } from './hints';
 import { setPromiseStateResolver, type PromiseStateResolver } from './inspect';
 import { LoopGuard, TimerRegistry, defaultClock } from './interrupt';
 import { getDoc, setDoc } from './introspection';
@@ -109,6 +110,13 @@ export class JavaScriptRuntimeEvaluator {
       );
     if (options.executor && options.executorOptions) {
       options.executor.config.update(options.executorOptions);
+    }
+    // The executor of a kernel restarted keeps them
+    const hints = this._executor.errorHints;
+    for (const hint of options.errorHints ?? []) {
+      if (!hints.includes(hint)) {
+        hints.push(hint);
+      }
     }
     this._guard = new LoopGuard({
       globalScope: this._globalScope,
@@ -436,7 +444,9 @@ export class JavaScriptRuntimeEvaluator {
         )
       };
     } catch (error) {
-      // The thrown value as is, which may not be an error
+      // The thrown value as is, which may not be an error, explained first,
+      // like a failed import
+      await this._executor.explainError(error);
       return this._emitError(executionCount, error, token, silent);
     } finally {
       // The declarations made before an error keep their documentation
@@ -527,6 +537,7 @@ export class JavaScriptRuntimeEvaluator {
           metadata: {}
         };
       } catch (error) {
+        await this._executor.explainError(error);
         const { ename, evalue, traceback } = this._executor.formatError(error, {
           currentToken: token
         });
@@ -572,12 +583,23 @@ export class JavaScriptRuntimeEvaluator {
       const { parentHeader } = routed;
       if (!this._outputs.isTruncated(parentHeader)) {
         try {
-          const { traceback } = this._executor.formatError(error, { prefix });
-          this._outputs.push({
-            type: 'stream',
-            parentHeader,
-            bundle: { name: 'stderr', text: `${traceback.join('\n')}\n` }
-          });
+          const stderr = (): RuntimeOutputMessage => {
+            const { traceback } = this._executor.formatError(error, { prefix });
+            return {
+              type: 'stream',
+              parentHeader,
+              bundle: { name: 'stderr', text: `${traceback.join('\n')}\n` }
+            };
+          };
+          const message = stderr();
+          // The error of a failed import keeps its place while it is
+          // explained
+          const explained = this._executor.explainError(error);
+          if (explained) {
+            this._outputs.pushLater(message, explained.then(stderr));
+          } else {
+            this._outputs.push(message);
+          }
           return;
         } catch {
           // The error can not be shown in the notebook, keep it in the console
@@ -1371,6 +1393,14 @@ export namespace JavaScriptRuntimeEvaluator {
      * plain data. They also change the configuration of `executor`.
      */
     executorOptions?: IExecutorOptions;
+
+    /**
+     * The hints of the host for the errors, shown after their traceback,
+     * after the hints of the kernel, like `Did you mean: console?`: each one
+     * returns a short text for an error, or null. They are added to the
+     * `errorHints` of the executor, unless it has them already.
+     */
+    errorHints?: ErrorHint[];
 
     /**
      * Ask the user for some input, for prompt(). It blocks until the user

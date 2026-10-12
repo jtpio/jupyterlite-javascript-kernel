@@ -14,6 +14,7 @@ import {
   isModuleNamespace,
   isSet
 } from './inspect';
+import { closestNames } from './hints';
 import { color, hasOwn, safe } from './utils';
 
 /**
@@ -72,6 +73,11 @@ export function getDoc(value: unknown): string | undefined {
 
 const IDENTIFIER = String.raw`[\p{ID_Start}$_][\p{ID_Continue}$‌‍]*`;
 const IDENTIFIER_RE = new RegExp(`^${IDENTIFIER}$`, 'u');
+
+/**
+ * The start of the names of the helpers of the kernel.
+ */
+const KERNEL_NAME_PREFIX = '__jsKernel';
 
 const KEYWORDS = [
   'async',
@@ -770,6 +776,24 @@ export class Introspection {
     }
     this._pages = pages;
     return pages;
+  }
+
+  /**
+   * The names of the properties of an object, the global scope by default,
+   * close to a name, like a typo of it: the closest first, at most three,
+   * for the `Did you mean` hints of the errors. The documented globals of
+   * the kernel, like `_`, and its helpers are not suggested.
+   */
+  closeNames(name: string, object: unknown = this._globalScope): string[] {
+    let names: Iterable<string> = propertyTypes(object).keys();
+    if (object === this._globalScope) {
+      names = Array.from(names).filter(
+        candidate =>
+          !this._globalDocs.has(candidate) &&
+          !candidate.startsWith(KERNEL_NAME_PREFIX)
+      );
+    }
+    return closestNames(name, names);
   }
 
   private _similarNames(expression: string): string[] {

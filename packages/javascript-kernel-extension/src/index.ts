@@ -242,6 +242,7 @@ namespace Private {
           appendEsmSuffix: flag('magicImportsEsmSuffix')
         }
       },
+      cdnSetting: 'Settings > Settings Editor > JavaScript Kernel',
       maxStreamOutput: count('maxStreamOutput'),
       // The Web Worker runs off the page thread: its loops are interrupted,
       // or it is restarted

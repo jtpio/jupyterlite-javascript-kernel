@@ -51,6 +51,12 @@ export interface IRuntimeInitializeOptions extends IWorkerKernel.IOptions {
   executorOptions?: IExecutorOptions;
 
   /**
+   * Where the users set the CDN of the magic imports, named by the errors of
+   * the imports which fail.
+   */
+  cdnSetting?: string;
+
+  /**
    * A flag shared with the page to interrupt the loops of a Web Worker,
    * when the page is cross-origin isolated.
    */

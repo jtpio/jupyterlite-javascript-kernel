@@ -16,6 +16,13 @@ import {
   toJsonTree
 } from './display';
 import { resolveUrl } from './env';
+import {
+  builtinHints,
+  errorName,
+  type ErrorHint,
+  type IErrorHintContext,
+  type IFailedImport
+} from './hints';
 import { encodeImage, type IEncodedImage } from './images';
 import { inspect, isError } from './inspect';
 import {
@@ -40,6 +47,7 @@ import {
   formatError,
   formatStackLines,
   type ICalibration,
+  type ICellLocation,
   type ICellSource,
   type IErrorParts,
   type ITracebackContext
@@ -70,15 +78,80 @@ const DEFINE_GLOBAL_NAME = '__jsKernelDefine__';
 const IMPORT_SOURCE_NAME = '__jsKernelImportSource__';
 
 /**
+ * The name of the helper called with the error of a magic import which
+ * failed, to explain it.
+ */
+const IMPORT_FAILED_NAME = '__jsKernelImportFailed__';
+
+/**
  * The names of the parameters of the compiled cells, for the helpers the
- * kernel passes to them: the loop guard, the definition of the globals and
- * the resolution of the dynamic imports.
+ * kernel passes to them: the loop guard, the definition of the globals, the
+ * resolution of the dynamic imports and the errors of the magic imports.
  */
 const HELPER_PARAMETERS = [
   LOOP_GUARD_NAME,
   DEFINE_GLOBAL_NAME,
-  IMPORT_SOURCE_NAME
+  IMPORT_SOURCE_NAME,
+  IMPORT_FAILED_NAME
 ];
+
+/**
+ * The time in milliseconds the requests checking the URL of a failed import
+ * can take, all together.
+ */
+const IMPORT_PROBE_TIMEOUT = 5000;
+
+/**
+ * A package name, with its optional scope, version and path, like
+ * `@scope/name@1.2/file.js`, in the source of a magic import.
+ */
+const PACKAGE_SOURCE_RE =
+  /^(?:npm\/)?((?:@[^/@]+\/)?[^/@]+)(?:@([^/]+))?(\/.*)?$/;
+
+/**
+ * A magic import of the code of a cell.
+ */
+interface IImportSite {
+  /**
+   * The source of the import, as written.
+   */
+  source: string;
+
+  /**
+   * The URL the source is rewritten to.
+   */
+  url: string;
+
+  /**
+   * The import attributes, like { type: 'json' }.
+   */
+  attributes?: Record<string, string>;
+
+  /**
+   * The location of the source in its cell, if any.
+   */
+  location: ICellLocation | null;
+}
+
+/**
+ * What the kernel found out about an import which failed.
+ */
+interface IImportFailure {
+  failure: IFailedImport;
+  location: ICellLocation | null;
+  hint: string | null;
+
+  /**
+   * The check of the URL of a module which could not be loaded, run by
+   * explainError(), or null for the errors thrown by the code of the module.
+   */
+  check: (() => Promise<void>) | null;
+
+  /**
+   * The check, once started.
+   */
+  checked: Promise<void> | null;
+}
 
 /**
  * A dynamic import in the source of a function.
@@ -381,6 +454,16 @@ const CODE_GENERATOR = {
     state.write(')');
   }
 } as typeof GENERATOR;
+
+/**
+ * Whether a value is an object or a function, which can be a key of a
+ * WeakMap.
+ */
+function isObjectLike(value: unknown): value is object {
+  return (
+    (typeof value === 'object' && value !== null) || typeof value === 'function'
+  );
+}
 
 /**
  * The value of a node which is a string written in the code: a string
@@ -716,6 +799,13 @@ export class JavaScriptExecutor {
   }
 
   /**
+   * The hints of the host for the errors, shown after their traceback, after
+   * the hints of the kernel. They are called when an error is formatted:
+   * the ones which throw are ignored.
+   */
+  errorHints: ErrorHint[] = [];
+
+  /**
    * Register the setter of an accessor of the global scope which replaces
    * the accessor with a plain property holding the value, like the one of
    * `_` installed by the evaluator. The declarations of its name in the cells
@@ -794,7 +884,7 @@ export class JavaScriptExecutor {
     }
 
     const { edited, map, hoisted, withReturn, hasDynamicImports } =
-      this._rewriteCell(code, ast, options.name, options.expression);
+      this._rewriteCell(code, ast, name, options.name, options.expression);
 
     // The hoisted code goes on a line of its own, before the code of the
     // cell, whose lines are kept. The ";" stops a "use strict" directive,
@@ -824,9 +914,16 @@ export class JavaScriptExecutor {
     const guard = this._loopGuard?.fn;
     const defineGlobal = this._defineGlobal;
     const resolveImportSource = this._resolveImportSource;
+    const importFailed = this._importFailed;
     return {
       asyncFunction: function (this: unknown) {
-        return compiled.call(this, guard, defineGlobal, resolveImportSource);
+        return compiled.call(
+          this,
+          guard,
+          defineGlobal,
+          resolveImportSource,
+          importFailed
+        );
       },
       withReturn,
       docs: this._declarationDocs(code, ast, comments),
@@ -1018,12 +1115,40 @@ export class JavaScriptExecutor {
    * Import a module using the executor's import source resolution.
    */
   async importModule(source: string): Promise<Record<string, unknown>> {
-    const importSource = this._transformImportSource(source);
+    const url = this._transformImportSource(source);
     const importFunction = this._createScopedFunction(
       'source',
       'return import(source);'
     ) as (source: string) => Promise<Record<string, unknown>>;
-    return importFunction.call(this._globalScope, importSource);
+    try {
+      return await importFunction.call(this._globalScope, url);
+    } catch (error) {
+      if (url !== source) {
+        this._registerImportFailure(error, { source, url, location: null });
+        await this.explainError(error);
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Find out why an error happened, before its traceback is formatted: for a
+   * magic import whose module could not be loaded, the HTTP status of its
+   * URL, checked with HEAD requests when the global scope has fetch(), in
+   * at most 5 s. The check only runs when an error is about to be shown, so
+   * the code handling the failure of an import gets it at once.
+   *
+   * @param error - The thrown value.
+   * @returns A promise resolved once the error is explained, or null when
+   * there is nothing to find out.
+   */
+  explainError(error: unknown): Promise<void> | null {
+    const failure = this._importFailure(error);
+    if (!failure?.check) {
+      return null;
+    }
+    failure.checked ??= failure.check().catch(() => undefined);
+    return failure.checked;
   }
 
   /**
@@ -1823,6 +1948,7 @@ export class JavaScriptExecutor {
   private _rewriteCell(
     code: string,
     ast: any,
+    token: string,
     cellName?: string,
     expression = false
   ): {
@@ -1833,10 +1959,12 @@ export class JavaScriptExecutor {
     hasDynamicImports: boolean;
   } {
     const edits = new SourceEdits(code);
-    // First, so that the end of a loop goes before the texts inserted after
-    // the statement
+    // First, so that the error handler of an import goes right after it,
+    // before the end of a loop whose body it is
+    const hasDynamicImports = this._rewriteDynamicImports(edits, ast, token);
+    // Then the loops, so that the end of a loop goes before the texts
+    // inserted after the statement
     this._instrumentLoops(edits, ast, cellName);
-    const hasDynamicImports = this._rewriteDynamicImports(edits, ast);
     // The accessors of the global scope are defined first, then the var
     // declarations are hoisted, then the functions
     const defined: string[] = [];
@@ -1844,7 +1972,7 @@ export class JavaScriptExecutor {
     const hoisted: string[] = [];
 
     ast.body.forEach((statement: any, i: number) => {
-      const node = this._rewriteExport(edits, statement, i);
+      const node = this._rewriteExport(edits, statement, i, token);
       if (!node) {
         return;
       }
@@ -1863,7 +1991,7 @@ export class JavaScriptExecutor {
         }
       }
       if (node.type === 'ImportDeclaration') {
-        this._rewriteImport(edits, node, i);
+        this._rewriteImport(edits, node, i, token);
       } else if (
         node.type === 'VariableDeclaration' &&
         node.kind.endsWith('using')
@@ -1944,7 +2072,12 @@ export class JavaScriptExecutor {
    * evaluated. Returns null when the statement is rewritten. The other
    * statements are returned as they are.
    */
-  private _rewriteExport(edits: SourceEdits, node: any, index: number): any {
+  private _rewriteExport(
+    edits: SourceEdits,
+    node: any,
+    index: number,
+    token: string
+  ): any {
     const code = edits.source;
     if (
       node.type !== 'ExportNamedDeclaration' &&
@@ -1954,7 +2087,7 @@ export class JavaScriptExecutor {
       return node;
     }
     if (node.source) {
-      this._rewriteImport(edits, { ...node, specifiers: [] }, index);
+      this._rewriteImport(edits, { ...node, specifiers: [] }, index, token);
       return null;
     }
     // Replace the export keywords, or the export list, with a semicolon and
@@ -2039,15 +2172,29 @@ export class JavaScriptExecutor {
    * replaced with one line followed by its line breaks: the import of the
    * module, then the check of each imported name, which throws a SyntaxError
    * at the name when the module does not export it, like an ES module, and
-   * finally the bindings.
+   * finally the bindings. The failures of the magic imports are explained.
    */
-  private _rewriteImport(edits: SourceEdits, node: any, index: number): void {
+  private _rewriteImport(
+    edits: SourceEdits,
+    node: any,
+    index: number,
+    token: string
+  ): void {
     const code = edits.source;
     const source = String(node.source.value);
     const attributes = importAttributes(node.attributes);
-    const importCall = `import(${JSON.stringify(
-      this._transformImportSource(source, attributes)
-    )}${importOptionsCode(attributes)})`;
+    const url = this._transformImportSource(source, attributes);
+    let importCall = `import(${JSON.stringify(url)}${importOptionsCode(
+      attributes
+    )})`;
+    if (url !== source) {
+      const site = this._registerImportSite(code, node.source.start, token, {
+        source,
+        url,
+        attributes
+      });
+      importCall += `.catch(e => ${IMPORT_FAILED_NAME}(e, ${site}))`;
+    }
     const replace = (start: number, end: number, text: string) => {
       const lineBreaks = lineStarts(code.slice(start, end)).length - 1;
       edits.replace(start, end, text + '\n'.repeat(lineBreaks));
@@ -2113,10 +2260,15 @@ export class JavaScriptExecutor {
    * package names from the CDN, like the import statements. A string source
    * is rewritten when the cell is compiled, the other sources when the
    * import runs, with the attributes of the options written in the code.
+   * The failures of the magic imports of the string sources are explained.
    *
    * @returns Whether the cell has dynamic imports.
    */
-  private _rewriteDynamicImports(edits: SourceEdits, ast: any): boolean {
+  private _rewriteDynamicImports(
+    edits: SourceEdits,
+    ast: any,
+    token: string
+  ): boolean {
     let found = false;
     walkSimple(ast, {
       ImportExpression: (node: any) => {
@@ -2125,11 +2277,22 @@ export class JavaScriptExecutor {
         const value = staticString(source);
         const attributes = staticImportAttributes(node.options);
         if (value !== null) {
-          edits.replace(
-            source.start,
-            source.end,
-            JSON.stringify(this._transformImportSource(value, attributes))
-          );
+          const url = this._transformImportSource(value, attributes);
+          edits.replace(source.start, source.end, JSON.stringify(url));
+          if (url !== value) {
+            const site = this._registerImportSite(
+              edits.source,
+              source.start,
+              token,
+              { source: value, url, attributes }
+            );
+            // Like the loop guard, the code of a function moved elsewhere
+            // still runs without the helper
+            edits.insert(
+              node.end,
+              `.catch(e => { if (typeof ${IMPORT_FAILED_NAME} == 'function') return ${IMPORT_FAILED_NAME}(e, ${site}); throw e; })`
+            );
+          }
           return;
         }
         // Like the loop guard, the code of a function moved elsewhere, like
@@ -2244,6 +2407,11 @@ export class JavaScriptExecutor {
       }
       this._cells.delete(oldest);
       this._editedCode.delete(oldest);
+      for (const [id, site] of this._importSites) {
+        if (site.location?.token === oldest) {
+          this._importSites.delete(id);
+        }
+      }
     }
   }
 
@@ -2317,8 +2485,190 @@ export class JavaScriptExecutor {
     return {
       cells: this._cells,
       calibration: this._calibrate(),
-      currentToken
+      currentToken,
+      locationOf: error => this._importFailure(error)?.location ?? null,
+      hints: (error, at) => this._errorHints(error, at)
     };
+  }
+
+  /**
+   * The hints shown after the traceback of an error: the explanation of a
+   * failed import, the hints of the kernel, like `Did you mean: console?`,
+   * then the ones of the host.
+   */
+  private _errorHints(
+    error: unknown,
+    at: { text: string; column: number } | null
+  ): string[] {
+    const globalScope = this._globalScope;
+    const failure = this._importFailure(error);
+    const hints: string[] = [];
+    if (failure?.hint) {
+      hints.push(failure.hint);
+    }
+    hints.push(
+      ...builtinHints(error, {
+        globalScope,
+        closeNames: (name, object) =>
+          this.introspection.closeNames(name, object),
+        at
+      })
+    );
+    const context: IErrorHintContext = { globalScope };
+    if (failure) {
+      context.failedImport = { ...failure.failure };
+    }
+    for (const hint of this.errorHints) {
+      const text = safe(() => hint(error, context));
+      if (typeof text === 'string' && text) {
+        hints.push(text);
+      }
+    }
+    return hints;
+  }
+
+  /**
+   * What the kernel found out about an import which failed with an error.
+   */
+  private _importFailure(error: unknown): IImportFailure | undefined {
+    return isObjectLike(error) ? this._failedImports.get(error) : undefined;
+  }
+
+  /**
+   * Register a magic import of a cell, at an offset of its code, and return
+   * its id.
+   */
+  private _registerImportSite(
+    code: string,
+    offset: number,
+    token: string,
+    site: Omit<IImportSite, 'location'>
+  ): number {
+    const { line, column } = offsetToLineColumn(lineStarts(code), offset);
+    const id = this._nextImportSite++;
+    this._importSites.set(id, {
+      ...site,
+      location: { token, line, column }
+    });
+    return id;
+  }
+
+  /**
+   * Called by the cells with the error of a magic import: register the
+   * failure, then throw the error again at once.
+   */
+  private _importFailed = (error: unknown, id: number): never => {
+    const site = this._importSites.get(id);
+    if (site) {
+      this._registerImportFailure(error, site);
+    }
+    throw error;
+  };
+
+  /**
+   * Register the failure of a magic import, for the traceback of its error:
+   * its location, and for a module which could not be loaded (a TypeError),
+   * the check of its URL, run by explainError(). The other errors are thrown
+   * by the code of the module.
+   */
+  private _registerImportFailure(error: unknown, site: IImportSite): void {
+    if (!isObjectLike(error) || this._failedImports.has(error)) {
+      return;
+    }
+    const failure: IImportFailure = {
+      failure: { source: site.source, url: site.url, status: null },
+      location: site.location,
+      hint: null,
+      check: null,
+      checked: null
+    };
+    this._failedImports.set(error, failure);
+    if (errorName(error) !== 'TypeError') {
+      return;
+    }
+    // The hint until the URL is checked, or without fetch()
+    failure.hint = `Could not load '${site.source}' from ${site.url}.`;
+    failure.check = async () => {
+      const signal = safe(() =>
+        this._globalScope.AbortSignal.timeout(IMPORT_PROBE_TIMEOUT)
+      );
+      const status = await this._probe(site.url, signal);
+      const hint = await this._importHint(site, status, signal);
+      failure.failure.status = status;
+      failure.hint = hint;
+    };
+  }
+
+  /**
+   * The explanation of a magic import which could not be loaded, from the
+   * HTTP status of its URL. A 404 is checked further, to tell a version or a
+   * file which does not exist from a package which does not exist.
+   */
+  private async _importHint(
+    site: IImportSite,
+    status: number | null,
+    signal: unknown
+  ): Promise<string | null> {
+    const { source, url } = site;
+    const cdn = this._config.magicImports.baseUrl;
+    if (status === 0) {
+      return `The CDN ${cdn} could not be reached: the magic imports need a network connection to it.`;
+    }
+    if (status === null || status === 405 || status === 501) {
+      return `Could not load '${source}' from ${url}.`;
+    }
+    if (status >= 200 && status < 300) {
+      return null;
+    }
+    if (status !== 404) {
+      return `The CDN ${cdn} replied with HTTP ${status} for '${source}' (${url}).`;
+    }
+    const match = PACKAGE_SOURCE_RE.exec(source.split(/[?#]/)[0]);
+    if (!match || source.startsWith('gh/')) {
+      return `'${source}' was not found on ${cdn} (404).`;
+    }
+    const [, name, version, path] = match;
+    const found = async (
+      other: string,
+      attributes?: Record<string, string>
+    ) => {
+      const status = await this._probe(
+        this._transformImportSource(other, attributes),
+        signal
+      );
+      return status !== null && status >= 200 && status < 300;
+    };
+    if (version && (await found(name + (path ?? ''), site.attributes))) {
+      return `The package '${name}' has no version ${version} on ${cdn} (404): check its versions on npmjs.com.`;
+    }
+    if (path && (await found(name))) {
+      return `The package '${name}' has no file ${path.slice(1)} on ${cdn} (404).`;
+    }
+    return `The package '${name}' was not found on ${cdn} (404): check its name on npmjs.com.`;
+  }
+
+  /**
+   * The HTTP status of a URL, with a HEAD request: 0 when the request
+   * fails, null when the global scope has no fetch().
+   *
+   * @param signal - The AbortSignal of the requests of a check, if any.
+   */
+  private async _probe(url: string, signal: unknown): Promise<number | null> {
+    const scope = this._globalScope;
+    const fetch = safe(() => scope.fetch);
+    if (typeof fetch !== 'function') {
+      return null;
+    }
+    try {
+      const response = await fetch.call(scope, url, {
+        method: 'HEAD',
+        cache: 'no-store',
+        signal
+      });
+      return Number(response.status) || 0;
+    } catch {
+      return 0;
+    }
   }
 
   /**
@@ -2607,6 +2957,11 @@ export class JavaScriptExecutor {
    */
   private _editedCode = new Map<string, string>();
   private _loopGuard: LoopGuard | null = null;
+  // The magic imports of the cells, by id, and what the kernel found out
+  // about the ones which failed, by error
+  private _importSites = new Map<number, IImportSite>();
+  private _nextImportSite = 0;
+  private _failedImports = new WeakMap<object, IImportFailure>();
   private _replacingSetters = new WeakSet<object>();
   private _functionConstructor: FunctionConstructor;
   private _silentCount = 0;

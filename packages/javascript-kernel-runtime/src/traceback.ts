@@ -204,6 +204,45 @@ export interface ITracebackContext {
    * the frames below its last frame are the ones of the kernel.
    */
   currentToken?: string;
+
+  /**
+   * The location in a cell given to an error by the kernel, like the source
+   * of an import which failed, shown instead of the one of its frames.
+   */
+  locationOf?: (error: unknown) => ICellLocation | null;
+
+  /**
+   * The hints shown after the traceback of an error, like
+   * `Did you mean: console?`.
+   *
+   * @param error - The thrown value.
+   * @param at - The line of code of the error and the column (0-based) of
+   * the error in it, when they are known.
+   */
+  hints?: (
+    error: unknown,
+    at: { text: string; column: number } | null
+  ) => string[];
+}
+
+/**
+ * A location in a cell.
+ */
+export interface ICellLocation {
+  /**
+   * The source URL of the cell.
+   */
+  token: string;
+
+  /**
+   * The line, 1-based.
+   */
+  line: number;
+
+  /**
+   * The column, 0-based.
+   */
+  column: number;
 }
 
 /**
@@ -593,7 +632,8 @@ export function formatFrames(frames: IMappedFrame[], colors = true): string[] {
 /**
  * Format a thrown value for an error reply, like Node.js: the location of
  * the error in its cell with a caret under the column, `Name: message` and
- * the frames, then the cause and the aggregated errors.
+ * the frames, then the cause and the aggregated errors, and the hints of
+ * the context, dim, after an empty line.
  *
  * @param value - The thrown value, an error or any other value.
  * @param ctx - The cells and the calibration of the engine.
@@ -612,11 +652,13 @@ export function formatError(
   const { ename, evalue, frames } = describe(value, ctx);
 
   const traceback: string[] = [];
-  const syntaxLocation =
-    value instanceof CellSyntaxError ? value.location : null;
+  const kernelLocation =
+    value instanceof CellSyntaxError
+      ? value.location
+      : (safe(() => ctx.locationOf?.(value)) ?? null);
   const top = frames.find(frame => frame.token !== null);
-  const location = syntaxLocation
-    ? syntaxLocation
+  const location = kernelLocation
+    ? kernelLocation
     : top
       ? { token: top.token!, line: top.line, column: top.column - 1 }
       : null;
@@ -637,6 +679,14 @@ export function formatError(
   traceback.push(header);
   traceback.push(...formatFrames(frames, colors));
   traceback.push(...nestedErrors(value, ctx, colors, 1, [value]));
+  // The hints come last, dim, after an empty line, and never fail the error
+  const text = location && cell ? cell.codeLines[location.line - 1] : undefined;
+  const at =
+    location && text !== undefined ? { text, column: location.column } : null;
+  const hints = safe(() => ctx.hints?.(value, at), undefined) ?? [];
+  if (hints.length > 0) {
+    traceback.push('', ...hints.map(hint => paint('dim', hint)));
+  }
   return { ename, evalue, traceback };
 }
 

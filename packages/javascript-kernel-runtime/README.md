@@ -97,6 +97,7 @@ const reply = await evaluator.execute('1 + 1', 1);
 | `maxStreamOutput`        | The number of characters a cell can print on stdout and stderr, counted from the start of the cell or its last `clear_output`: the rest is dropped, with a notice on stderr. Each parent message (`parentHeader` object) has its own count, so the cells, the comm messages and the `Output` widgets do not silence each other. 5,000,000 by default, 0 for no limit. |
 | `executor`               | A `JavaScriptExecutor`, to configure it, for example to customize the compilation of the cells.                                                                                                                                                                                                                                                                       |
 | `executorOptions`        | `IExecutorOptions`, plain data: the configuration of the magic imports, see below. Also applied to `executor`.                                                                                                                                                                                                                                                        |
+| `errorHints`             | `ErrorHint[]`: the hints of the host for the errors, shown after their traceback, see [Hints](#hints). Added to the `errorHints` of the executor, unless it has them already.                                                                                                                                                                                         |
 | `loopTimeout`            | The time in milliseconds a loop of the cells can keep the page busy before it is stopped with a `LoopTimeoutError`, 0 (the default) for no limit. See [Interrupts and loop timeout](#interrupts-and-loop-timeout).                                                                                                                                                    |
 | `interruptBuffer`        | An `Int32Array` view of a `SharedArrayBuffer`, to interrupt the loops from another thread: the host sets its first element to 1 with `Atomics.store()`.                                                                                                                                                                                                               |
 
@@ -769,6 +770,69 @@ const { ename, evalue, traceback } = runtime.formatError(error, context);
   code back to the source, for the kernels which rewrite the cells.
 - `CellSyntaxError` is a syntax error with its location in a cell, shown with
   a caret.
+- The context can also have `locationOf(error)`, the location
+  (`{ token, line, column }`, the column 0-based) the kernel gives to an
+  error, shown instead of the one of its frames, and
+  `hints(error, at)`, the lines shown after the traceback, where `at` is the
+  line of code of the error and its column, when they are known.
+
+### Hints
+
+The tracebacks end with some hints for the common errors, dim, after an
+empty line, like `Did you mean: console?`. They are lines of the `traceback` only:
+the `ename` and the `evalue` of the error are kept as is. The executor adds:
+
+- for a `ReferenceError` of a name which is not defined, in the formats of
+  V8, SpiderMonkey, JavaScriptCore and QuickJS, the globals with a close
+  name: `Did you mean: console?`, with
+  `executor.introspection.closeNames(name, object?)`, which returns at most
+  three names of the properties of an object (the global scope by default)
+  close to a name, the closest first;
+- for a `TypeError` of a member which is not a function, or read on
+  `undefined`, like `Math.flor(2.5)`, the close members of the object, read
+  from the global scope: `Did you mean: Math.floor?`. A single name, like
+  `node` in `node.width`, is a value which is `undefined`, and gets none;
+- for a `TypeError` of `fetch()` without a response, what to check, with a
+  link to CORS;
+- for a magic import which fails, the location of its source in the cell,
+  and, when the module could not be loaded (a `TypeError`) and the global
+  scope has `fetch()`, the reason found with `HEAD` requests to its URL: the
+  package, the version or the file does not exist (404), another HTTP
+  status, or the CDN can not be reached. Without `fetch()`, the hint names
+  the URL. The import statements and the `import()` of the string sources of
+  the cells, and `executor.importModule()`, are checked. The failure is
+  rethrown at once, and its URL is only checked by
+  `executor.explainError(error)`, which returns a promise resolved once the
+  error is explained (in at most 5 s), or null when there is nothing to find
+  out. The evaluator calls it before formatting the errors of the cells and
+  the uncaught errors, so the code handling the failure of an import keeps
+  its timing; a host formatting the errors itself calls it first.
+
+A host adds its own hints with the `errorHints` option of the evaluator, or
+the `errorHints` array of the executor, shown after the ones of the kernel.
+An `ErrorHint` is a function `(error, context) => string | null`, called
+when the error is formatted: the hints which throw are ignored. The
+`context` has the `globalScope`, and `failedImport`, when the error is the
+failure of a magic import: its `source` as written, its `url`, and the
+`status` of the URL (0 when the request failed, null when it was not
+checked, like without `fetch()`).
+
+```javascript
+const evaluator = new runtime.JavaScriptRuntimeEvaluator({
+  globalScope: globalThis,
+  onOutput: message => publish(message),
+  errorHints: [
+    (error, { globalScope }) =>
+      runtime.undefinedName(error) === 'window'
+        ? 'This kernel has no window: use globalThis.'
+        : null
+  ]
+});
+```
+
+`undefinedName(error)` returns the name of a `ReferenceError` for a name
+which is not defined, or null, and `closestNames(name, candidates)` the
+close names among some candidates.
 
 ## Widgets
 
