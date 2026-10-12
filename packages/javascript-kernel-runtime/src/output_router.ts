@@ -27,6 +27,13 @@ export interface IParentMessage {
    * execute_request: only its comm messages are sent.
    */
   readonly silent?: boolean;
+
+  /**
+   * The id of the cell of the execute_request, from the `cellId` of its
+   * metadata, when the frontend sends it: the timers created by the code of
+   * the cell, and by their callbacks, belong to it.
+   */
+  readonly cellId?: string;
 }
 
 /**

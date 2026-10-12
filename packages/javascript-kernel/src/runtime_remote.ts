@@ -193,6 +193,7 @@ export function createRemoteRuntimeApi(
           : undefined,
         maxStreamOutput: options.maxStreamOutput,
         loopTimeout: options.loopTimeout,
+        keepTimers: options.keepTimers,
         interruptBuffer: options.interruptBuffer
           ? new Int32Array(options.interruptBuffer)
           : undefined

@@ -532,11 +532,13 @@ export namespace LoopGuard {
 
 /**
  * The timers created by the code of the cells, to clear them when the
- * kernel is interrupted: setTimeout and setInterval of the global scope are
- * wrapped to keep their ids. The callbacks of the timers, and of
+ * kernel is interrupted, or the ones of a cell when it runs again:
+ * setTimeout and setInterval of the global scope are wrapped to keep their
+ * ids, with the cell which created them. The callbacks of the timers, and of
  * requestAnimationFrame, run in the context of the code which created them,
- * like the cell whose outputs they go to. requestAnimationFrame is not
- * cleared, it drives the drawing loops of libraries like p5.js.
+ * like the cell whose outputs they go to, so the timers created by a
+ * callback belong to the same cell. requestAnimationFrame is not cleared, it
+ * drives the drawing loops of libraries like p5.js.
  */
 export class TimerRegistry {
   /**
@@ -564,13 +566,19 @@ export class TimerRegistry {
       this._saved.set(name, Object.getOwnPropertyDescriptor(scope, name));
     }
     const live = this._live;
-    const track = (id: unknown, kind: 'timeout' | 'interval') => {
+    const track = (
+      id: unknown,
+      kind: 'timeout' | 'interval',
+      captured: unknown
+    ) => {
       if (this._enabled) {
-        live.set(id, kind);
+        const cell = safe(() => context?.cell?.(captured)) ?? null;
+        live.set(id, { kind, cell });
       }
     };
     this._clear = id => {
-      const clear = live.get(id) === 'interval' ? clearInterval : clearTimeout;
+      const clear =
+        live.get(id)?.kind === 'interval' ? clearInterval : clearTimeout;
       clear.call(scope, id);
     };
     // The callbacks are wrapped in the realm of the cells: the errors they
@@ -592,11 +600,14 @@ export class TimerRegistry {
       context?.leave(previous, threw);
     };
     // Wrap a callback in the context of the code creating it
-    const wrap = (callback: unknown, fired?: () => void): unknown => {
+    const wrap = (
+      callback: unknown,
+      captured: unknown,
+      fired?: () => void
+    ): unknown => {
       if (typeof callback !== 'function') {
         return callback;
       }
-      const captured = context?.capture();
       return wrapCallback(
         callback,
         () => {
@@ -612,13 +623,14 @@ export class TimerRegistry {
       callback: unknown,
       ...rest: unknown[]
     ) {
+      const captured = context?.capture();
       // The timer is not live anymore once it fired
       const id: unknown = setTimeout.call(
         scope,
-        wrap(callback, () => live.delete(id)),
+        wrap(callback, captured, () => live.delete(id)),
         ...rest
       );
-      track(id, 'timeout');
+      track(id, 'timeout', captured);
       return id;
     };
     if (typeof setInterval === 'function') {
@@ -627,8 +639,9 @@ export class TimerRegistry {
         callback: unknown,
         ...rest: unknown[]
       ) {
-        const id = setInterval.call(scope, wrap(callback), ...rest);
-        track(id, 'interval');
+        const captured = context?.capture();
+        const id = setInterval.call(scope, wrap(callback, captured), ...rest);
+        track(id, 'interval', captured);
         return id;
       };
     }
@@ -637,7 +650,10 @@ export class TimerRegistry {
         this: unknown,
         callback: unknown
       ) {
-        return requestAnimationFrame.call(scope, wrap(callback));
+        return requestAnimationFrame.call(
+          scope,
+          wrap(callback, context.capture())
+        );
       };
     }
     scope.clearTimeout = function (this: unknown, id: unknown) {
@@ -678,6 +694,30 @@ export class TimerRegistry {
   }
 
   /**
+   * Clear the timers of a cell waiting to fire, like before the cell runs
+   * again, so that its intervals do not run twice. The timers of the other
+   * cells keep running.
+   *
+   * @param cell - The cell, as returned by the `cell()` of the context.
+   *
+   * @returns The number of timers cleared.
+   */
+  clearCell(cell: unknown): number {
+    if (cell === null || cell === undefined) {
+      return 0;
+    }
+    let cleared = 0;
+    for (const [id, timer] of [...this._live]) {
+      if (timer.cell === cell) {
+        safe(() => this._clear?.(id));
+        this._live.delete(id);
+        cleared += 1;
+      }
+    }
+    return cleared;
+  }
+
+  /**
    * Put back the timers of the global scope.
    */
   restore(): void {
@@ -699,7 +739,10 @@ export class TimerRegistry {
 
   private _scope: Record<string, any> | null = null;
   private _saved = new Map<string, PropertyDescriptor | undefined>();
-  private _live = new Map<unknown, 'timeout' | 'interval'>();
+  private _live = new Map<
+    unknown,
+    { kind: 'timeout' | 'interval'; cell: unknown }
+  >();
   private _clear: ((id: unknown) => void) | null = null;
   private _enabled = false;
 }
@@ -732,6 +775,13 @@ export namespace TimerRegistry {
      * after, with the `error` event of the realm.
      */
     leave(previous: unknown, threw: boolean): void;
+
+    /**
+     * The cell of a captured context, like the id of the cell whose code
+     * created the timer, for clearCell(). null or undefined when the code
+     * belongs to no cell.
+     */
+    cell?(context: unknown): unknown;
   }
 }
 

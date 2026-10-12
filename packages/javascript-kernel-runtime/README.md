@@ -99,6 +99,7 @@ const reply = await evaluator.execute('1 + 1', 1);
 | `executorOptions`        | `IExecutorOptions`, plain data: the configuration of the magic imports, see below. Also applied to `executor`.                                                                                                                                                                                                                                                        |
 | `errorHints`             | `ErrorHint[]`: the hints of the host for the errors, shown after their traceback, see [Hints](#hints). Added to the `errorHints` of the executor, unless it has them already.                                                                                                                                                                                         |
 | `loopTimeout`            | The time in milliseconds a loop of the cells can keep the page busy before it is stopped with a `LoopTimeoutError`, 0 (the default) for no limit. See [Interrupts and loop timeout](#interrupts-and-loop-timeout).                                                                                                                                                    |
+| `keepTimers`             | Whether the timers of a cell keep running when the cell runs again, false by default: see `cellId` below.                                                                                                                                                                                                                                                             |
 | `interruptBuffer`        | An `Int32Array` view of a `SharedArrayBuffer`, to interrupt the loops from another thread: the host sets its first element to 1 with `Atomics.store()`.                                                                                                                                                                                                               |
 
 The `require()` installed by the evaluator is a global function of the
@@ -183,7 +184,8 @@ The methods of the evaluator:
   the widgets, like `slider.changed()`, with `commManager.cancelWaits()`,
   and sends the outputs waiting for an image being encoded, with the text of
   the image. `loopTimeout` gets and sets the loop
-  timeout. See [Interrupts and loop timeout](#interrupts-and-loop-timeout).
+  timeout, and `keepTimers` whether the timers of a cell keep running when
+  it runs again. See [Interrupts and loop timeout](#interrupts-and-loop-timeout).
 - `reportUncaught(error, inPromise?)` prints an error thrown outside of an
   execution on stderr, as `Uncaught Error: ...`, or
   `Uncaught (in promise) Error: ...` for the reason of a rejected promise.
@@ -220,7 +222,25 @@ hold the fields of the `execute_request` which change the execution:
   `{ status: 'ok', data, metadata }` with the MIME bundle of the value, whose
   `text/plain` has no ANSI colors, or
   `{ status: 'error', ename, evalue, traceback }`. An expression which is not
-  a single expression fails with `SyntaxError: Expected an expression`.
+  a single expression fails with `SyntaxError: Expected an expression`,
+- `cellId`: the id of the cell of the request, the `cellId` of the metadata of
+  the `execute_request`, which JupyterLab sends for the cells of the notebooks
+  and of the consoles: each input of a console is a new cell with a new id,
+  so a later input does not clear its timers. The `setTimeout()` and
+  `setInterval()` timers created by the code, and the ones their callbacks
+  create, belong to the cell: before the cell runs again, `execute()` clears
+  them, so that its intervals do not run twice, unless `keepTimers` is true
+  (the option, or `Jupyter.keepTimers` in the cells). The timers of the other
+  cells, of the code run without a `cellId` and of the startup code run
+  before the first cell keep running, and `requestAnimationFrame()` and the
+  widget callbacks are kept. A timer created by a widget callback belongs to
+  the cell which registered the callback. The other code running outside of
+  the cells, like an event listener, the code after an `await` in a callback
+  or a promise callback, and the startup code run after the first cell,
+  belongs to the cell which ran last, like its outputs: running that cell
+  again clears its timers. A host whose frontend sends no cell id can pass another key of the
+  code, like the code itself, so that running the same code again replaces
+  its timers.
 
 The evaluator registers the `jupyter.widget.control` comm target, so
 `onCommTargetRegistered` is called with it: like ipywidgets, it answers the
@@ -631,7 +651,7 @@ themselves: `LoopGuard` (`fn`, the guard passed to the compiled code,
 `clearInterrupt()`, `endExecution()`, `tripped`, `clearTimedOut()`,
 `timeout`, `resetClock()`, and the `onCheck` option, called when it checks
 the clock),
-`TimerRegistry` (`install(scope, context?)`, `enable()`, `clearAll()`, `restore()`), the error
+`TimerRegistry` (`install(scope, context?)`, `enable()`, `clearAll()`, `clearCell(cell)`, `restore()`), the error
 names `KEYBOARD_INTERRUPT` and `LOOP_TIMEOUT`, and `createRuntimeError(scope,
 name, message)`. The executor instruments the loops when its `loopGuard` is
 set.
@@ -641,13 +661,17 @@ The optional `context` of `TimerRegistry.install()`, a
 the code which created them: `capture()` returns the current context when
 `setTimeout` or `setInterval` is called, `enter(context)` makes it current
 before the callback runs and returns the previous one, and
-`leave(previous, threw)` restores it after the callback. With a context, the
+`leave(previous, threw)` restores it after the callback. The optional
+`cell(context)` returns the cell of a captured context, like the `cellId` of
+its parent message: `clearCell(cell)` clears the timers created in the
+contexts of that cell, and returns their number. With a context, the
 registry also wraps `requestAnimationFrame`, whose callbacks are not cleared
-by `clearAll()`.
+by `clearAll()` and `clearCell()`.
 
 The `OutputRouter` attaches the outputs to their parent message, an
 `IParentMessage` with the `id` and the `header` of a message of the frontend,
-and `silent` for a silent `execute_request`, whose outputs are dropped:
+`silent` for a silent `execute_request`, whose outputs are dropped, and the
+`cellId` of an `execute_request`, which owns the timers created in it:
 
 - `cell` is the parent of the outputs sent outside of the callbacks, the
   `execute_request` which ran last, and `current` the parent of the outputs

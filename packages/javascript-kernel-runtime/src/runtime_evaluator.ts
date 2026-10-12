@@ -128,6 +128,7 @@ export class JavaScriptRuntimeEvaluator {
       onCheck: () => this._outputs.flushIfDue()
     });
     this._executor.loopGuard = this._guard;
+    this._keepTimers = options.keepTimers === true;
 
     this._requestInput = options.requestInput;
     if (options.promiseState) {
@@ -270,6 +271,19 @@ export class JavaScriptRuntimeEvaluator {
   }
 
   /**
+   * Whether the timers of a cell keep running when the cell runs again,
+   * false by default: an execution with a `cellId` first clears the
+   * setTimeout and setInterval timers created by the previous run of the
+   * cell. The code of the cells changes it with `Jupyter.keepTimers`.
+   */
+  get keepTimers(): boolean {
+    return this._keepTimers;
+  }
+  set keepTimers(value: boolean) {
+    this._keepTimers = value;
+  }
+
+  /**
    * Interrupt the running cell, if any, and clear the timers created by the
    * code of the cells, which also stops the intervals when no cell runs.
    *
@@ -310,6 +324,14 @@ export class JavaScriptRuntimeEvaluator {
    * it did not wait for, or its unhandled rejections: like the ones of the
    * cell before it, they go to that cell.
    *
+   * With the `cellId` option, the setTimeout and setInterval timers created
+   * by the previous runs of the cell, and by their callbacks, are cleared
+   * first, unless keepTimers is true: an interval does not run twice when
+   * its cell runs again. The timers of the other cells keep running. The
+   * timers created outside of the cells and of the timer and widget
+   * callbacks, like by an event listener, a promise callback or the startup
+   * code run after the first cell, belong to the cell which ran last.
+   *
    * The startup code, run without parent message and without execution
    * count, can run while a cell awaits, like the code of a startup extension
    * registered late: it keeps the output limit, the captures of the Output
@@ -324,11 +346,20 @@ export class JavaScriptRuntimeEvaluator {
     options: JavaScriptRuntimeEvaluator.IExecuteOptions = {}
   ): Promise<KernelMessage.IExecuteReplyMsg['content']> {
     const silent = options.silent === true;
+    const cellId = options.cellId;
+    if (cellId !== undefined && !this._keepTimers) {
+      this._timers.clearCell(cellId);
+    }
     const previous = this._router.cell;
     const hasParent =
       parentMessageId !== undefined || parentHeader !== undefined;
     if (hasParent) {
-      this._router.cell = toParent(parentMessageId, parentHeader, silent);
+      this._router.cell = toParent(
+        parentMessageId,
+        parentHeader,
+        silent,
+        cellId
+      );
     } else if (silent) {
       this._router.cell = { ...previous, silent };
     }
@@ -988,6 +1019,14 @@ export class JavaScriptRuntimeEvaluator {
       enumerable: true,
       configurable: true
     });
+    Object.defineProperty(jupyter, 'keepTimers', {
+      get: () => this._keepTimers,
+      set: (value: unknown) => {
+        this._keepTimers = Boolean(value);
+      },
+      enumerable: true,
+      configurable: true
+    });
     scope.Jupyter = jupyter;
     this._installRequireStub();
 
@@ -1003,7 +1042,9 @@ export class JavaScriptRuntimeEvaluator {
         const { parent, sinks } = context as IOutputScope;
         return router.enter(parent ?? router.cell, sinks);
       },
-      leave: (previous, threw) => router.leave(previous as IOutputScope, threw)
+      leave: (previous, threw) => router.leave(previous as IOutputScope, threw),
+      // The timers of a cell are cleared when it runs again
+      cell: context => (context as IOutputScope).parent?.cellId
     });
     this._wrapBlockingFunctions();
   }
@@ -1274,6 +1315,7 @@ export class JavaScriptRuntimeEvaluator {
   private _globalScope: Record<string, any>;
   private _guard: LoopGuard;
   private _timers = new TimerRegistry();
+  private _keepTimers = false;
   private _router = new OutputRouter();
   // Ends the comm requests waiting for the jobs of their handler
   private _openRequests = new Set<() => void>();
@@ -1308,12 +1350,14 @@ type UserExpressionResults = KernelMessage.IExecuteReply['user_expressions'];
 function toParent(
   id: string | undefined,
   header: Record<string, unknown> | undefined,
-  silent = false
+  silent = false,
+  cellId?: string
 ): IParentMessage {
   return {
     id: id ?? (typeof header?.msg_id === 'string' ? header.msg_id : null),
     header: header as KernelMessage.IHeader | undefined,
-    ...(silent ? { silent } : {})
+    ...(silent ? { silent } : {}),
+    ...(cellId !== undefined ? { cellId } : {})
   };
 }
 
@@ -1481,6 +1525,14 @@ export namespace JavaScriptRuntimeEvaluator {
     loopTimeout?: number;
 
     /**
+     * Whether the timers of a cell keep running when the cell runs again.
+     * False by default: an execution with a `cellId` first clears the
+     * setTimeout and setInterval timers of the previous runs of the cell.
+     * The code of the cells changes it with `Jupyter.keepTimers`.
+     */
+    keepTimers?: boolean;
+
+    /**
      * A flag shared with the host, to interrupt the loops of a cell from
      * another thread: the host sets its first element to a non-zero value
      * (with Atomics.store), and the loops throw a KeyboardInterrupt. The
@@ -1523,6 +1575,17 @@ export namespace JavaScriptRuntimeEvaluator {
      * the code, when it succeeds, by name. The reply holds their results.
      */
     userExpressions?: Record<string, string>;
+
+    /**
+     * The id of the cell of the request, from the `cellId` of the metadata
+     * of the execute_request, which JupyterLab sends for the cells of the
+     * notebooks and of the consoles, where each input is a new cell. The
+     * timers created by the code, and by their callbacks, belong to the
+     * cell: before the cell runs again, they are cleared, unless
+     * `keepTimers` is true. A host without cell ids can pass another key
+     * identifying the code, like the code itself.
+     */
+    cellId?: string;
   }
 }
 

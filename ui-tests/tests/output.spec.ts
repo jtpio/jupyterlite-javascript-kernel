@@ -1,7 +1,7 @@
 // Copyright (c) Jupyter Development Team.
 // Distributed under the terms of the Modified BSD License.
 
-import { expect, test } from '@jupyterlab/galata';
+import { expect, test, type IJupyterLabPageFixture } from '@jupyterlab/galata';
 
 import {
   KERNELS,
@@ -10,11 +10,35 @@ import {
   getOutputs,
   openKernelSettings,
   runCode,
-  setKernelSetting
+  setKernelSetting,
+  waitForKernelIdle
 } from './utils';
 
 const STDOUT = 'application/vnd.jupyter.stdout';
 const STDERR = 'application/vnd.jupyter.stderr';
+
+/**
+ * The code of a cell counting the ticks of the intervals for one second,
+ * with the variables to count.
+ */
+function countTicks(...names: string[]): string {
+  return [
+    `const start = [${names.join(', ')}];`,
+    'await new Promise(resolve => setTimeout(resolve, 1000));',
+    `[${names.join(', ')}].map((count, i) => count - start[i]).join(' ')`
+  ].join('\n');
+}
+
+/**
+ * The numbers in the text output of a cell.
+ */
+async function getNumbers(
+  page: IJupyterLabPageFixture,
+  index: number
+): Promise<number[]> {
+  const [text] = await page.notebook.getCellTextOutput(index);
+  return (text.match(/\d+/g) ?? []).map(Number);
+}
 
 for (const kernel of KERNELS) {
   test.describe(`Output (${kernel.displayName})`, () => {
@@ -287,6 +311,85 @@ for (const kernel of KERNELS) {
       await expect(widget).toContainText('Output limit reached');
       await expect(widget).not.toContainText('click 1');
       await expect(widget).not.toContainText('hidden');
+    });
+  });
+}
+
+for (const kernel of KERNELS) {
+  test.describe(`Timers of a cell run again (${kernel.displayName})`, () => {
+    test('Stop the timers of a cell when it runs again', async ({ page }) => {
+      const name = await createNotebook(page, kernel);
+      const counter = await runCode(page, 'let ticks = 0;');
+      const interval = await runCode(page, 'setInterval(() => ticks++, 100);');
+      // Run the cell twice more, with Shift+Enter
+      await page.notebook.runCell(interval);
+      await page.notebook.runCell(interval);
+      await page.waitForTimeout(1000);
+
+      // One interval of 10 ticks per second, not three
+      const count = await runCode(page, countTicks('ticks'));
+      let [ticks] = await getNumbers(page, count);
+      expect(ticks).toBeGreaterThanOrEqual(7);
+      expect(ticks).toBeLessThanOrEqual(13);
+
+      // Turn the setting off, and restart the kernel
+      const form = await openKernelSettings(page);
+      await setKernelSetting(
+        page,
+        form,
+        'Stop the timers of a cell when it runs again',
+        false
+      );
+      await page.activity.activateTab(name);
+      await page.menu.clickMenuItem('Kernel>Restart Kernel…');
+      await page
+        .getByRole('dialog')
+        .getByRole('button', { name: 'Confirm Kernel Restart' })
+        .click();
+      await waitForKernelIdle(page, kernel);
+
+      // The three intervals keep running
+      await page.notebook.runCell(counter);
+      await page.notebook.runCell(interval);
+      await page.notebook.runCell(interval);
+      await page.notebook.runCell(interval);
+      await page.waitForTimeout(1000);
+      await page.notebook.runCell(count);
+      [ticks] = await getNumbers(page, count);
+      expect(ticks).toBeGreaterThanOrEqual(21);
+      expect(ticks).toBeLessThanOrEqual(39);
+    });
+
+    test('Keep the timers of the other cells', async ({ page }) => {
+      await createNotebook(page, kernel);
+      await runCode(page, 'let a = 0;\nlet b = 0;');
+      await runCode(page, 'setInterval(() => a++, 100);');
+      // The timeouts created by the callbacks of the cell belong to it
+      const chain = await runCode(
+        page,
+        '(function tick() {\nb++;\nsetTimeout(tick, 100);\n})();'
+      );
+      await page.notebook.runCell(chain);
+      await page.notebook.runCell(chain);
+
+      const count = await runCode(page, countTicks('a', 'b'));
+      const [a, b] = await getNumbers(page, count);
+      expect(a).toBeGreaterThanOrEqual(7);
+      expect(a).toBeLessThanOrEqual(13);
+      expect(b).toBeGreaterThanOrEqual(7);
+      expect(b).toBeLessThanOrEqual(13);
+    });
+
+    test('Keep the timers with Jupyter.keepTimers', async ({ page }) => {
+      await createNotebook(page, kernel);
+      await runCode(page, 'Jupyter.keepTimers = true;\nlet ticks = 0;');
+      const interval = await runCode(page, 'setInterval(() => ticks++, 100);');
+      await page.notebook.runCell(interval);
+
+      const count = await runCode(page, countTicks('ticks'));
+      const [ticks] = await getNumbers(page, count);
+      expect(ticks).toBeGreaterThanOrEqual(14);
+      expect(ticks).toBeLessThanOrEqual(26);
     });
   });
 }

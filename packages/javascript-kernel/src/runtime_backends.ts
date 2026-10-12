@@ -47,6 +47,13 @@ export interface IRuntimeBackendOptions {
   loopTimeout?: number;
 
   /**
+   * Whether the timers of a cell keep running when the cell runs again.
+   * False by default: the timers created by the previous run of a cell are
+   * cleared before it runs again.
+   */
+  keepTimers?: boolean;
+
+  /**
    * The options of the executor, like the CDN of the magic imports, applied
    * when the runtime starts.
    */
@@ -644,7 +651,8 @@ export class IFrameRuntimeBackend extends AbstractRuntimeBackend<IRemoteRuntimeA
             cdnSetting: this._options.cdnSetting,
             loopTimeout:
               this._options.loopTimeout ??
-              IFrameRuntimeBackend.DEFAULT_LOOP_TIMEOUT_MS
+              IFrameRuntimeBackend.DEFAULT_LOOP_TIMEOUT_MS,
+            keepTimers: this._options.keepTimers
           },
           message => {
             if (this._remote === remote) {
@@ -1074,6 +1082,7 @@ export class WorkerRuntimeBackend extends AbstractRuntimeBackend<
             executorOptions: this._options.executorOptions,
             cdnSetting: this._options.cdnSetting,
             loopTimeout: this._options.loopTimeout ?? 0,
+            keepTimers: this._options.keepTimers,
             interruptBuffer: this._interruptBuffer ?? undefined
           },
           outputProxy

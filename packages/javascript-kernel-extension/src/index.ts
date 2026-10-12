@@ -233,6 +233,7 @@ namespace Private {
         ? value
         : undefined;
     };
+    const stopTimers = flag('stopTimersOnRerun');
     return {
       executorOptions: {
         magicImports: {
@@ -246,7 +247,8 @@ namespace Private {
       maxStreamOutput: count('maxStreamOutput'),
       // The Web Worker runs off the page thread: its loops are interrupted,
       // or it is restarted
-      loopTimeout: runtime === 'iframe' ? count('loopTimeout') : undefined
+      loopTimeout: runtime === 'iframe' ? count('loopTimeout') : undefined,
+      keepTimers: stopTimers === undefined ? undefined : !stopTimers
     };
   }
 

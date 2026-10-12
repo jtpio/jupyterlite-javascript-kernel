@@ -45,6 +45,7 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
     this._browsingContextId = options.browsingContextId;
     this._maxStreamOutput = options.maxStreamOutput;
     this._loopTimeout = options.loopTimeout;
+    this._keepTimers = options.keepTimers;
     this._executorOptions = options.executorOptions;
     this._cdnSetting = options.cdnSetting;
     this._startupExtensions = [...(options.startupExtensions ?? [])];
@@ -228,15 +229,22 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
    * It is also called for a silent request, whose `content.silent` is true:
    * `parentHeader` is then still the header of the request which ran before
    * it, and the outputs published by an override with it go to that cell.
+   *
+   * The `cellId` of the metadata of the request, which JupyterLab sends for
+   * the cells of the notebooks and of the consoles, names the cell: the
+   * timers created by the previous run of the cell are cleared before it
+   * runs again. Each input of a console is a new cell, with a new id.
    */
   async executeRequest(
     content: KernelMessage.IExecuteRequestMsg['content']
   ): Promise<KernelMessage.IExecuteReplyMsg['content']> {
+    const request =
+      content.silent && this._silentRequest ? this._silentRequest : this.parent;
     const header =
-      content.silent && this._silentHeader
-        ? this._silentHeader
+      content.silent && this._silentRequest
+        ? this._silentRequest.header
         : this.parentHeader;
-    return this._executeCode(content, header);
+    return this._executeCode(content, header, cellIdOf(request));
   }
 
   /**
@@ -249,7 +257,8 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
    */
   private async _executeCode(
     content: KernelMessage.IExecuteRequestMsg['content'],
-    header: KernelMessage.IHeader | undefined
+    header: KernelMessage.IHeader | undefined,
+    cellId: string | undefined
   ): Promise<KernelMessage.IExecuteReplyMsg['content']> {
     const silent = content.silent === true;
     try {
@@ -272,7 +281,8 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
           storeHistory: !silent && content.store_history === true,
           userExpressions: content.user_expressions as
             | Record<string, string>
-            | undefined
+            | undefined,
+          cellId
         }
       );
     } catch (error) {
@@ -539,6 +549,7 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
       },
       maxStreamOutput: this._maxStreamOutput,
       loopTimeout: this._loopTimeout,
+      keepTimers: this._keepTimers,
       executorOptions: this._executorOptions,
       cdnSetting: this._cdnSetting
     };
@@ -728,12 +739,12 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
   ): Promise<void> {
     this._publishStatus('busy', request);
     // JupyterLite handles one message at a time
-    this._silentHeader = request.header;
+    this._silentRequest = request;
     let content: KernelMessage.IExecuteReplyMsg['content'];
     try {
       content = await this.executeRequest(request.content);
     } finally {
-      this._silentHeader = undefined;
+      this._silentRequest = undefined;
     }
     this._sendKernelMessage(
       KernelMessage.createMessage({
@@ -896,6 +907,7 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
   private _browsingContextId?: string;
   private _maxStreamOutput?: number;
   private _loopTimeout?: number;
+  private _keepTimers?: boolean;
   private _cdnSetting?: string;
   private _executorOptions?: IExecutorOptions;
   private _startupExtensions: JavaScriptKernel.IStartupExtension[];
@@ -905,8 +917,9 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
   private _backendReady: Promise<void> | null = null;
   private _ready: Promise<void> = Promise.resolve();
   private _startupError: RuntimeStartupError | null = null;
-  // The header of the silent execute_request being handled, if any
-  private _silentHeader: KernelMessage.IHeader | undefined = undefined;
+  // The silent execute_request being handled, if any
+  private _silentRequest: KernelMessage.IExecuteRequestMsg | undefined =
+    undefined;
   private _runtimeReadyContext: JavaScriptKernel.IRuntimeReadyContext | null =
     null;
   private _runtimeMode: RuntimeMode;
@@ -916,6 +929,22 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
    * the kernel runs without it.
    */
   static readonly STARTUP_EXTENSION_TIMEOUT_MS: number = 30000;
+}
+
+/**
+ * The id of the cell of an execute_request, from the `cellId` of its
+ * metadata, when the frontend sends it, like JupyterLab for the cells of
+ * the notebooks and of the consoles.
+ */
+function cellIdOf(
+  message: KernelMessage.IMessage | undefined
+): string | undefined {
+  if (message?.header.msg_type !== 'execute_request') {
+    return undefined;
+  }
+  const cellId = (message.metadata as Record<string, unknown> | undefined)
+    ?.cellId;
+  return typeof cellId === 'string' && cellId !== '' ? cellId : undefined;
 }
 
 /**
@@ -1012,6 +1041,15 @@ export namespace JavaScriptKernel {
      * changes it with `Jupyter.loopTimeout`.
      */
     loopTimeout?: number;
+
+    /**
+     * Whether the timers of a cell keep running when the cell runs again.
+     * False by default: before a cell of a notebook runs again, the
+     * setTimeout and setInterval timers created by its previous run are
+     * cleared, so that its intervals do not run twice. The code of the cells
+     * changes it with `Jupyter.keepTimers`.
+     */
+    keepTimers?: boolean;
 
     /**
      * The configuration of the executor, like the CDN of the magic imports,

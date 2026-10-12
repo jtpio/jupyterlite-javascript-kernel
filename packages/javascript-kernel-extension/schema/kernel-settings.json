@@ -36,6 +36,12 @@
       "minimum": 0,
       "default": 10000
     },
+    "stopTimersOnRerun": {
+      "title": "Stop the timers of a cell when it runs again",
+      "description": "Before a cell of a notebook runs again, clear the setTimeout() and setInterval() timers created by its previous run, so that its intervals do not run twice. The timers of the other cells keep running, and so do the requestAnimationFrame() callbacks. Jupyter.keepTimers = true in a cell turns it off for its kernel.",
+      "type": "boolean",
+      "default": true
+    },
     "maxStreamOutput": {
       "title": "Output limit (characters)",
       "description": "The number of characters a cell can print with console.log() and the other console methods. The rest is not shown, with a notice. 0 for no limit.",

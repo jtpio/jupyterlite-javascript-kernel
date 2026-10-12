@@ -44,6 +44,9 @@ test.describe('Kernel settings', () => {
     await expect(
       getSettingField(form, 'Output limit (characters)')
     ).toHaveValue('5000000');
+    await expect(
+      getSettingField(form, 'Stop the timers of a cell when it runs again')
+    ).toBeChecked();
   });
 
   test('Change the loop timeout of the IFrame kernel', async ({ page }) => {

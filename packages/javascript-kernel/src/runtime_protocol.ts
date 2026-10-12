@@ -46,6 +46,12 @@ export interface IRuntimeInitializeOptions extends IWorkerKernel.IOptions {
   loopTimeout?: number;
 
   /**
+   * Whether the timers of a cell keep running when the cell runs again,
+   * false by default.
+   */
+  keepTimers?: boolean;
+
+  /**
    * The options of the executor, like the CDN of the magic imports.
    */
   executorOptions?: IExecutorOptions;
