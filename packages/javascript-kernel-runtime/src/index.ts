@@ -9,6 +9,7 @@ export * from './errors';
 export * from './executor';
 export * from './inspect';
 export * from './introspection';
+export * from './output_batcher';
 export * from './protocol';
 export * from './runtime_evaluator';
 export * from './source_edits';

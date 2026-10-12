@@ -222,6 +222,8 @@ The `console` methods print to the outputs of the cell, with the values formatte
 - `console.group`, `console.groupCollapsed` and `console.groupEnd` indent the messages
 - `console.count`, `console.countReset`, `console.time`, `console.timeLog`, `console.timeEnd` and `console.assert` work like in the browser
 - `console.clear` clears the outputs of the cell
+- consecutive writes to the standard output or the standard error are sent together, at most every 50 ms, so printing thousands of lines in a loop is fast. The outputs keep their order: the pending text is sent before any rich output, error, widget message or prompt, and when the cell finishes. In the Web Worker kernel, a long loop shows its output while it runs
+- a cell prints at most 5,000,000 characters on the standard output and the standard error, about 50,000 lines of 100 characters: the rest is not shown, and a notice is printed instead. This stops a runaway loop of `console.log` before it freezes the page. The count starts again with the next cell, or when the cell calls `console.clear()` or `clearOutput()`. The errors thrown later by a cell that reached the limit, in a timer or an event listener, are printed in the console of the browser
 
 ## Errors
 
@@ -386,7 +388,7 @@ Disable iframe mode:
 
 The repository contains three npm packages:
 
-- `@jupyterlite/javascript-kernel-runtime`: the code running next to the user code, in the iframe or the Web Worker. It executes the cells, formats the outputs, and implements comms and widgets. It does not depend on JupyterLite, so that other JavaScript kernels can reuse it. It is engine-neutral: it only needs the ECMAScript built-ins, and compiles without the DOM types, which the build checks. It also ships single-file builds, with `acorn` and `astring` included, for kernels that do not use npm, and exports the engine-neutral helpers of the tracebacks, like `parseStack` and `formatError`, for other kernels. See its [README](packages/javascript-kernel-runtime/README.md).
+- `@jupyterlite/javascript-kernel-runtime`: the code running next to the user code, in the iframe or the Web Worker. It executes the cells, formats the outputs, and implements comms and widgets. It does not depend on JupyterLite, so that other JavaScript kernels can reuse it. It is engine-neutral: it only needs the ECMAScript built-ins, and compiles without the DOM types, which the build checks. It also ships single-file builds, with `acorn` and `astring` included, for kernels that do not use npm, and exports the engine-neutral helpers of the tracebacks, like `parseStack` and `formatError`, for other kernels. The evaluator batches the stream outputs: a host can pass its `scheduler` (or `null` when the engine has no host timers, and then calls `evaluator.flushOutputs()` itself), a `flushInterval` (0 turns the batching off) and a `maxStreamOutput` per cell. See its [README](packages/javascript-kernel-runtime/README.md).
 - `@jupyterlite/javascript-kernel`: the JupyterLite kernel, with the iframe and Web Worker runtimes. It also exports everything from `@jupyterlite/javascript-kernel-runtime`.
 - `@jupyterlite/javascript-kernel-extension`: the JupyterLite extension registering the kernels.
 

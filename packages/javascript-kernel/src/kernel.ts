@@ -35,6 +35,7 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
     this._runtimeMode = options.runtime ?? 'iframe';
     this._executorFactory = options.executorFactory;
     this._browsingContextId = options.browsingContextId;
+    this._maxStreamOutput = options.maxStreamOutput;
     this._startupExtensions = [...(options.startupExtensions ?? [])];
     this._backend = this.createBackend(this._runtimeMode);
   }
@@ -345,7 +346,8 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
     const options = {
       onOutput: (message: RuntimeOutputMessage) => {
         this.processRuntimeMessage(message);
-      }
+      },
+      maxStreamOutput: this._maxStreamOutput
     };
 
     if (runtimeMode === 'worker') {
@@ -567,6 +569,7 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
   private _backend: IRuntimeBackend;
   private _executorFactory?: JavaScriptKernel.IExecutorFactory;
   private _browsingContextId?: string;
+  private _maxStreamOutput?: number;
   private _startupExtensions: JavaScriptKernel.IStartupExtension[];
   private _appliedStartupExtensions = new Set<string>();
   private _runtimeReadyContext: JavaScriptKernel.IRuntimeReadyContext | null =
@@ -651,5 +654,12 @@ export namespace JavaScriptKernel {
      * Web Worker runtime.
      */
     browsingContextId?: string;
+
+    /**
+     * The number of characters a cell can print on stdout and stderr: the
+     * rest is not shown, with a notice. 5,000,000 by default, 0 for no
+     * limit.
+     */
+    maxStreamOutput?: number;
   }
 }

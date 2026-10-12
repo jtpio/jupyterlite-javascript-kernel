@@ -21,6 +21,12 @@ export interface IRuntimeInitializeOptions extends IWorkerKernel.IOptions {
    * user replies.
    */
   browsingContextId?: string;
+
+  /**
+   * The number of characters a cell can print on stdout and stderr, 0 for
+   * no limit. Defaults to the limit of the runtime package.
+   */
+  maxStreamOutput?: number;
 }
 
 /**

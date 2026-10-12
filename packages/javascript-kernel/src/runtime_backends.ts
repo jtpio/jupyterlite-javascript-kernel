@@ -27,6 +27,12 @@ import type {
 export interface IRuntimeBackendOptions {
   onOutput: RuntimeOutputHandler;
   baseUrl?: string;
+
+  /**
+   * The number of characters a cell can print on stdout and stderr, 0 for
+   * no limit. Defaults to the limit of the runtime package.
+   */
+  maxStreamOutput?: number;
 }
 
 /**
@@ -368,7 +374,8 @@ export class IFrameRuntimeBackend extends AbstractRuntimeBackend {
       await withTimeout(
         remote.initialize(
           {
-            baseUrl: resolveBaseUrl(this._options.baseUrl)
+            baseUrl: resolveBaseUrl(this._options.baseUrl),
+            maxStreamOutput: this._options.maxStreamOutput
           },
           activeOutputProxy
         ),
@@ -550,7 +557,8 @@ export class WorkerRuntimeBackend extends AbstractRuntimeBackend {
         remote.initialize(
           {
             baseUrl: resolveBaseUrl(this._options.baseUrl),
-            browsingContextId: this._options.browsingContextId
+            browsingContextId: this._options.browsingContextId,
+            maxStreamOutput: this._options.maxStreamOutput
           },
           outputProxy
         ),

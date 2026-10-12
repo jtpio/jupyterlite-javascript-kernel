@@ -13,6 +13,7 @@ import { createDisplay, type IDisplay } from './display';
 import { hostConsole } from './env';
 import { setPromiseStateResolver, type PromiseStateResolver } from './inspect';
 import { setDoc } from './introspection';
+import { OutputBatcher } from './output_batcher';
 import type { RuntimeOutputHandler } from './protocol';
 import { Widget, createWidgetClasses } from './widgets';
 
@@ -30,18 +31,35 @@ export class JavaScriptRuntimeEvaluator {
    */
   constructor(options: JavaScriptRuntimeEvaluator.IOptions) {
     this._globalScope = options.globalScope;
-    this._onOutput = options.onOutput;
+    // The timers and the clock are read before any code of the cells runs,
+    // which could replace or wrap them
+    this._scheduler =
+      options.scheduler === null
+        ? undefined
+        : (options.scheduler ?? defaultScheduler(this._globalScope));
+    const now = options.now ?? defaultClock(this._globalScope);
+    this._outputs = new OutputBatcher({
+      onOutput: options.onOutput,
+      scheduler: this._scheduler,
+      now,
+      parent: () => this._commManager.getCurrentMessageId(),
+      flushInterval: options.flushInterval,
+      maxBufferSize: options.maxStreamBufferSize,
+      maxStreamOutput: options.maxStreamOutput
+    });
+    // Every output goes through the batcher, the comm messages too: the
+    // Output widget captures the outputs between two of them
+    this._onOutput = this._outputs.handler;
     this._executor =
       options.executor ?? new JavaScriptExecutor(options.globalScope);
 
     this._requestInput = options.requestInput;
-    this._scheduler = options.scheduler ?? defaultScheduler(this._globalScope);
     if (options.promiseState) {
       setPromiseStateResolver(options.promiseState);
       this._resetPromiseState = true;
     }
 
-    this._commManager = new CommManager(options.onOutput, {
+    this._commManager = new CommManager(this._onOutput, {
       onTargetRegistered: options.onCommTargetRegistered,
       reportError: (error, inPromise) => this.reportUncaught(error, inPromise)
     });
@@ -72,14 +90,7 @@ export class JavaScriptRuntimeEvaluator {
       },
       formatStack: (error, colors) =>
         this._executor.formatStackFrames(error, colors),
-      now:
-        options.now ??
-        (() => {
-          const performance = this._globalScope.performance;
-          return typeof performance?.now === 'function'
-            ? performance.now()
-            : Date.now();
-        })
+      now
     });
     this._setupGlobals();
     this._setupConsole();
@@ -92,6 +103,11 @@ export class JavaScriptRuntimeEvaluator {
   dispose(): void {
     this._isDisposed = true;
     this._stopListeningForUncaughtErrors();
+    try {
+      this._outputs.dispose();
+    } catch {
+      // The handler of the host failed: still restore the realm below
+    }
     this._restoreConsole();
     this._restoreGlobals();
     this._commManager.dispose();
@@ -116,6 +132,19 @@ export class JavaScriptRuntimeEvaluator {
   }
 
   /**
+   * Send the text written to stdout and stderr and not sent yet.
+   *
+   * The consecutive writes to a stream are sent together, at most
+   * flushInterval after the first one, or before any other output. The
+   * evaluator flushes them at the end of execute() and of the comm handlers,
+   * and before prompt() blocks. A host without timers calls it when the
+   * cell, its timers and its jobs are done.
+   */
+  flushOutputs(): void {
+    this._outputs.flush();
+  }
+
+  /**
    * The executor used by the evaluator.
    */
   get executor(): JavaScriptExecutor {
@@ -132,6 +161,7 @@ export class JavaScriptRuntimeEvaluator {
     parentHeader?: Record<string, unknown>
   ): Promise<KernelMessage.IExecuteReplyMsg['content']> {
     this._parentHeader = parentHeader;
+    this._outputs.resetStreamOutput();
     return this._withParentMessageId(parentMessageId, async () => {
       // The name of the cell in the tracebacks
       const name = executionCount > 0 ? `In[${executionCount}]` : undefined;
@@ -146,7 +176,8 @@ export class JavaScriptRuntimeEvaluator {
         docs = parsed.docs;
         token = parsed.name;
       } catch (error) {
-        // A syntax error, with its location in the cell
+        // A syntax error, with its location in the cell. The error sends the
+        // pending outputs before it.
         return this._emitError(executionCount, error);
       }
 
@@ -188,6 +219,8 @@ export class JavaScriptRuntimeEvaluator {
         this._executor.introspection.registerDocs(docs);
         // document.open() removes the listeners of the window, add them back
         this._listenForUncaughtErrors();
+        // The outputs of the cell are sent before its reply
+        this._outputs.flush();
       }
     });
   }
@@ -196,7 +229,9 @@ export class JavaScriptRuntimeEvaluator {
    * Print an error thrown outside of an execution, like in a timer, an event
    * listener or a widget callback, on stderr: `Uncaught Error: ...` with its
    * location in the cells. The outputs go to the current parent message of
-   * the host, usually the last cell that ran.
+   * the host, usually the last cell that ran. Once that cell reached its
+   * output limit, the error goes to the console of the host instead, as
+   * the notebook does not show the rest of the cell outputs.
    *
    * The evaluator calls it for the `error` and `unhandledrejection` events
    * of globalScope, when it has addEventListener. Hosts without these events
@@ -207,21 +242,20 @@ export class JavaScriptRuntimeEvaluator {
    * that has no handler: `Uncaught (in promise) ...`.
    */
   reportUncaught(error: unknown, inPromise = false): void {
-    try {
-      const { traceback } = this._executor.formatError(error, {
-        prefix: inPromise ? 'Uncaught (in promise)' : 'Uncaught'
-      });
-      this._onOutput({
-        type: 'stream',
-        bundle: { name: 'stderr', text: `${traceback.join('\n')}\n` }
-      });
-    } catch {
-      // The error can not be shown in the notebook, keep it in the console
-      hostConsole()?.error?.(
-        inPromise ? 'Uncaught (in promise)' : 'Uncaught',
-        error
-      );
+    const prefix = inPromise ? 'Uncaught (in promise)' : 'Uncaught';
+    if (!this._outputs.isTruncated) {
+      try {
+        const { traceback } = this._executor.formatError(error, { prefix });
+        this._onOutput({
+          type: 'stream',
+          bundle: { name: 'stderr', text: `${traceback.join('\n')}\n` }
+        });
+        return;
+      } catch {
+        // The error can not be shown in the notebook, keep it in the console
+      }
     }
+    this._logError(prefix, error);
   }
 
   /**
@@ -381,9 +415,15 @@ export class JavaScriptRuntimeEvaluator {
     parentMessageId: string | undefined,
     callback: () => void
   ): void {
-    this._withParentMessageId(parentMessageId, callback).catch(error =>
-      this.reportUncaught(error)
-    );
+    this._withParentMessageId(parentMessageId, () => {
+      try {
+        callback();
+      } finally {
+        // The outputs of the handler are sent before it returns, like the
+        // prints of a button click
+        this._outputs.flush();
+      }
+    }).catch(error => this.reportUncaught(error));
   }
 
   /**
@@ -500,8 +540,12 @@ export class JavaScriptRuntimeEvaluator {
     // the dialog of the browser in an iframe
     const requestInput = this._requestInput;
     if (requestInput) {
-      const ask = (message: unknown, password: boolean) =>
-        requestInput(String(message), password, this._parentHeader);
+      const ask = (message: unknown, password: boolean) => {
+        // Show the outputs printed before the input box, since the request
+        // blocks the runtime
+        this._outputs.flush();
+        return requestInput(String(message), password, this._parentHeader);
+      };
       const prompt = setDoc((message: unknown = '', defaultValue?: unknown) => {
         const value = ask(message, false);
         if ((value === '' || value === null) && defaultValue !== undefined) {
@@ -568,6 +612,23 @@ export class JavaScriptRuntimeEvaluator {
   }
 
   /**
+   * Print an error in the console of the host, with the original method
+   * when the evaluator patched the console, which would print it in the
+   * notebook.
+   */
+  private _logError(...args: unknown[]): void {
+    const original = this._originalConsole.get('error');
+    if (typeof original === 'function') {
+      original.apply(this._globalScope.console, args);
+      return;
+    }
+    const console = hostConsole();
+    if (console && console !== this._globalScope.console) {
+      console.error?.(...args);
+    }
+  }
+
+  /**
    * Restore the methods of the console of the runtime.
    */
   private _restoreConsole(): void {
@@ -584,6 +645,7 @@ export class JavaScriptRuntimeEvaluator {
 
   private _globalScope: Record<string, any>;
   private _onOutput: RuntimeOutputHandler;
+  private _outputs: OutputBatcher;
   private _executor: JavaScriptExecutor;
   private _commManager: CommManager;
   private _display: IDisplay;
@@ -654,9 +716,11 @@ export namespace JavaScriptRuntimeEvaluator {
     globalScope: Record<string, any>;
 
     /**
-     * Called with the outputs of the runtime, synchronously and in order:
-     * during execute(), and later for the outputs of callbacks, timers and
-     * widget handlers.
+     * Called with the outputs of the runtime, in order: during execute(),
+     * and later for the outputs of callbacks, timers and widget handlers.
+     * The consecutive writes to stdout or stderr are merged into one stream
+     * message, sent at most flushInterval after the first write, before any
+     * other output, and at the end of execute() and of the comm handlers.
      */
     onOutput: RuntimeOutputHandler;
 
@@ -678,8 +742,9 @@ export namespace JavaScriptRuntimeEvaluator {
     ) => string | null;
 
     /**
-     * The current time in milliseconds, for console.time. Defaults to
-     * performance.now of globalScope, or else Date.now.
+     * The current time in milliseconds, for console.time and the batching
+     * of the outputs. Defaults to performance.now of globalScope, or else
+     * Date.now.
      */
     now?: () => number;
 
@@ -702,26 +767,52 @@ export namespace JavaScriptRuntimeEvaluator {
     onCommTargetRegistered?: (targetName: string) => void;
 
     /**
-     * The timers of the host, for the work the runtime defers. Defaults to
-     * setTimeout and clearTimeout of globalScope, when they exist.
+     * The timers of the host, for the work the runtime defers, like sending
+     * the pending text of the streams. Defaults to setTimeout and
+     * clearTimeout of globalScope, when they exist, read when the evaluator
+     * is created. null for an engine whose timers would keep the cell
+     * running: the host then calls flushOutputs() at the end of the cell.
      */
-    scheduler?: IScheduler;
+    scheduler?: IScheduler | null;
+
+    /**
+     * The longest time in milliseconds the text written to stdout or stderr
+     * is kept, to send the consecutive writes together. 50 by default, 0
+     * sends one message per write.
+     */
+    flushInterval?: number;
+
+    /**
+     * The size of the pending text of a stream, in UTF-16 code units, from
+     * which it is sent. 1,000,000 by default.
+     */
+    maxStreamBufferSize?: number;
+
+    /**
+     * The number of characters (UTF-16 code units) a cell can print on
+     * stdout and stderr, counted from the start of the cell or from its last
+     * clear_output: the rest is not shown, and a notice is printed on
+     * stderr. 5,000,000 by default, 0 for no limit.
+     */
+    maxStreamOutput?: number;
   }
 
   /**
    * The timers of a host.
    */
-  export interface IScheduler {
-    /**
-     * Call a function after a delay in milliseconds, and return a handle.
-     */
-    setTimeout(callback: () => void, ms: number): unknown;
+  export type IScheduler = OutputBatcher.IScheduler;
+}
 
-    /**
-     * Cancel a call scheduled with setTimeout.
-     */
-    clearTimeout(handle: unknown): void;
+/**
+ * The clock of a global scope: its performance.now, or else Date.now.
+ */
+function defaultClock(scope: Record<string, any>): () => number {
+  const performance = scope.performance;
+  if (typeof performance?.now === 'function') {
+    const now = performance.now;
+    return () => now.call(performance);
   }
+  return Date.now;
 }
 
 /**

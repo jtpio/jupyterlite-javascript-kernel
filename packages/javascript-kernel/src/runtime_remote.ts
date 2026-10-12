@@ -117,7 +117,8 @@ export function createRemoteRuntimeApi(
         },
         requestInput: options.browsingContextId
           ? createInputRequester(options.baseUrl, options.browsingContextId)
-          : undefined
+          : undefined,
+        maxStreamOutput: options.maxStreamOutput
       });
     },
 
@@ -187,6 +188,8 @@ export function createRemoteRuntimeApi(
         buffers,
         parentMessageId
       );
+      // The kernel is idle after the outputs of the handler
+      await flushOutputs();
     },
 
     async handleCommMsg(
@@ -196,6 +199,7 @@ export function createRemoteRuntimeApi(
       parentMessageId?: string
     ): Promise<void> {
       ensureEvaluator().handleCommMsg(commId, data, buffers, parentMessageId);
+      await flushOutputs();
     },
 
     async handleCommClose(
@@ -205,6 +209,7 @@ export function createRemoteRuntimeApi(
       parentMessageId?: string
     ): Promise<void> {
       ensureEvaluator().handleCommClose(commId, data, buffers, parentMessageId);
+      await flushOutputs();
     },
 
     async dispose(): Promise<void> {

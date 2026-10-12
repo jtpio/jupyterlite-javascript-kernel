@@ -35,6 +35,28 @@ test.describe(`Input (${WORKER_KERNEL.displayName})`, () => {
     ]);
   });
 
+  test('Show the output printed before a prompt', async ({ page }) => {
+    const index = await runCode(
+      page,
+      'console.log("Welcome");\nconst name = prompt("Name?");\nconsole.log("Hi " + name);',
+      { wait: false }
+    );
+
+    const input = page.locator('.jp-Stdin-input');
+    await expect(page.locator('.jp-Stdin-prompt')).toHaveText('Name?');
+    const stdout = await getOutputs(
+      page,
+      index,
+      'application/vnd.jupyter.stdout'
+    );
+    await expect(stdout.first()).toHaveText('Welcome\n');
+    await input.fill('Ada');
+    await input.press('Enter');
+
+    await page.notebook.waitForRun(index);
+    await expect(stdout.last()).toContainText('Hi Ada');
+  });
+
   test('Hide the answers to the password prompts', async ({ page }) => {
     const index = await runCode(
       page,

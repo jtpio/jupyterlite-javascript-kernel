@@ -128,6 +128,30 @@ for (const kernel of KERNELS) {
       );
     });
 
+    test('Capture the console in an Output widget', async ({ page }) => {
+      const index = await runCode(
+        page,
+        [
+          'const { Output } = Jupyter.widgets;',
+          'const out = new Output();',
+          'display(out);',
+          'console.log("outside");',
+          'out.capture(() => console.log("inside"))();',
+          'console.log("after");'
+        ].join('\n')
+      );
+
+      const outputs = await getOutputs(page, index);
+      const widget = outputs.locator('.widget-output');
+      await expect(widget).toContainText('inside');
+      await expect(widget).not.toContainText('outside');
+      await expect(widget).not.toContainText('after');
+      // The output of the widget, then the ones of the cell
+      await expect(
+        await getOutputs(page, index, 'application/vnd.jupyter.stdout')
+      ).toHaveText(['inside\n', 'outside\nafter\n']);
+    });
+
     test('Observe the changes made in the frontend', async ({ page }) => {
       const index = await runCode(
         page,
