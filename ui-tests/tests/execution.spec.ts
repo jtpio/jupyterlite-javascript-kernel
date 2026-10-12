@@ -296,6 +296,53 @@ test.describe(`IFrame runtime (${IFRAME_KERNEL.displayName})`, () => {
     await restartKernel(page, 'kept');
   });
 
+  test('Lay out the DOM and run the animation frames', async ({ page }) => {
+    const index = await runCode(
+      page,
+      [
+        "const box = document.createElement('div');",
+        "box.style.width = '120px';",
+        "box.textContent = 'Laid out';",
+        'document.body.appendChild(box);',
+        'const frame = await Promise.race([',
+        '  new Promise(resolve => requestAnimationFrame(time => resolve(typeof time))),',
+        "  new Promise(resolve => setTimeout(() => resolve('no frame'), 2000))",
+        ']);',
+        'const visible = await new Promise(resolve => {',
+        '  new IntersectionObserver(([entry]) => resolve(entry.isIntersecting)).observe(box);',
+        '});',
+        'const { width, height } = box.getBoundingClientRect();',
+        "[box.offsetWidth, width, height > 0, innerWidth, innerHeight, frame, visible].join(', ')"
+      ].join('\n')
+    );
+    expect(await page.notebook.getCellTextOutput(index)).toEqual([
+      "'120, 120, true, 800, 600, number, true'"
+    ]);
+
+    // The iframe is not shown, and the cells can not take the keyboard away
+    // from the notebook
+    await expect(
+      page.locator('iframe[srcdoc*="<title>JavaScript Kernel</title>"]')
+    ).toBeHidden();
+    const focused = await runCode(
+      page,
+      [
+        "const field = document.createElement('input');",
+        'document.body.appendChild(field);',
+        'field.focus();',
+        'await new Promise(resolve => setTimeout(resolve, 100));'
+      ].join('\n')
+    );
+    // Shift+Enter moved to a new cell, where the typed text goes
+    await page.keyboard.type('typed');
+    expect(await page.notebook.getCellTextInput(focused + 1)).toEqual('typed');
+    await page.keyboard.press('Escape');
+    await page.keyboard.press('b');
+    await expect(page.locator('.jp-Notebook .jp-Cell')).toHaveCount(
+      focused + 3
+    );
+  });
+
   test('Restart the iframe reloaded by a cell', async ({ page }) => {
     await runCode(page, 'let before = 1;');
     let index = await runCode(page, 'location.reload()');

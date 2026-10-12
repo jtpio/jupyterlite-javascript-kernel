@@ -415,6 +415,35 @@ function createLostDelegate(): PromiseDelegate<never> {
 }
 
 /**
+ * Create the container of the runtime iframe: rendered, so that the DOM of
+ * the cells has a layout and the animation frames run, but invisible.
+ *
+ * With `display: none`, the elements of the iframe have no size, like
+ * `offsetWidth` and `getBoundingClientRect()`, and some browsers stop the
+ * animation frames. The container is instead fixed on the page, with the size
+ * of the iframe, hidden with `visibility: hidden`, and `inert` and
+ * `aria-hidden`, so that the users and the assistive technologies do not
+ * reach the elements of the cells. The code of the cells can still focus
+ * them: the backend then gives the focus back to the page.
+ */
+function createHiddenContainer(): HTMLDivElement {
+  const container = document.createElement('div');
+  Object.assign(container.style, {
+    position: 'fixed',
+    top: '0',
+    left: '0',
+    width: `${IFrameRuntimeBackend.FRAME_WIDTH}px`,
+    height: `${IFrameRuntimeBackend.FRAME_HEIGHT}px`,
+    overflow: 'hidden',
+    visibility: 'hidden',
+    pointerEvents: 'none'
+  });
+  container.inert = true;
+  container.setAttribute('aria-hidden', 'true');
+  return container;
+}
+
+/**
  * Runtime backend that executes code in a hidden iframe.
  *
  * The runtime API lives in the page, next to the kernel, and runs the code of
@@ -429,6 +458,10 @@ export class IFrameRuntimeBackend extends AbstractRuntimeBackend<IRemoteRuntimeA
   constructor(options: IFrameRuntimeBackend.IOptions) {
     super();
     this._options = options;
+    window.addEventListener('blur', this._onFocusChange);
+    window.addEventListener('focus', this._onFocusChange);
+    document.addEventListener('visibilitychange', this._onFocusChange);
+    document.addEventListener('focusin', this._onPageFocusIn, true);
     void this._start();
   }
 
@@ -453,6 +486,31 @@ export class IFrameRuntimeBackend extends AbstractRuntimeBackend<IRemoteRuntimeA
   }
 
   /**
+   * Execute the code of a cell, then give the focus back to the page if the
+   * cell focused an element of the iframe while the page did not have it.
+   */
+  async execute(
+    code: string,
+    executionCount: number,
+    parentMessageId?: string,
+    parentHeader?: KernelMessage.IHeader,
+    options?: IRuntimeExecuteOptions
+  ): Promise<KernelMessage.IExecuteReplyMsg['content']> {
+    try {
+      return await super.execute(
+        code,
+        executionCount,
+        parentMessageId,
+        parentHeader,
+        options
+      );
+    } finally {
+      this._watchFrameFocus();
+      this._restoreFocus();
+    }
+  }
+
+  /**
    * Dispose iframe resources.
    */
   dispose(): void {
@@ -463,6 +521,11 @@ export class IFrameRuntimeBackend extends AbstractRuntimeBackend<IRemoteRuntimeA
     this._ready.reject(new Error('IFrame runtime disposed'));
     this._rejectPending(new Error('IFrame runtime disposed'));
     this._teardown();
+    window.removeEventListener('blur', this._onFocusChange);
+    window.removeEventListener('focus', this._onFocusChange);
+    document.removeEventListener('visibilitychange', this._onFocusChange);
+    document.removeEventListener('focusin', this._onPageFocusIn, true);
+    this._focused = null;
 
     this._container?.remove();
     this._container = null;
@@ -475,13 +538,14 @@ export class IFrameRuntimeBackend extends AbstractRuntimeBackend<IRemoteRuntimeA
     const iframe = document.createElement('iframe');
     try {
       if (!this._container) {
-        this._container = document.createElement('div');
-        this._container.style.display = 'none';
+        this._container = createHiddenContainer();
         document.body.appendChild(this._container);
       }
       const container = this._container;
 
       iframe.style.border = 'none';
+      iframe.style.width = '100%';
+      iframe.style.height = '100%';
       iframe.srcdoc = `<!DOCTYPE html>
 <html>
 <head>
@@ -536,6 +600,7 @@ export class IFrameRuntimeBackend extends AbstractRuntimeBackend<IRemoteRuntimeA
       // The later loads of the iframe come from the code of the cells
       this._document = iframe.contentDocument;
       iframe.addEventListener('load', this._onLoad);
+      this._watchFrameFocus();
 
       const globalScope = iframe.contentWindow as Record<string, any>;
       const executor =
@@ -614,6 +679,56 @@ export class IFrameRuntimeBackend extends AbstractRuntimeBackend<IRemoteRuntimeA
   };
 
   /**
+   * Keep the element of the page which has the focus, to give it back when
+   * the iframe takes the focus.
+   */
+  private _onPageFocusIn = (event: FocusEvent): void => {
+    if (event.target instanceof HTMLElement) {
+      this._focused = event.target;
+    }
+  };
+
+  /**
+   * Check where the focus went when the page or the iframe gains or loses
+   * it, or when the page is shown again, once the focus has moved.
+   */
+  private _onFocusChange = (): void => {
+    setTimeout(() => this._restoreFocus());
+  };
+
+  /**
+   * Listen to the focus of the window of the iframe: when the user comes
+   * back to a page whose iframe took the focus while the page did not have
+   * it, the window of the iframe gets the focus, and the page none. The
+   * listeners in the iframe go away when a cell opens its document again,
+   * so this runs after each cell, and adding the same listener twice does
+   * nothing.
+   */
+  private _watchFrameFocus(): void {
+    this._iframe?.contentWindow?.addEventListener('focus', this._onFocusChange);
+  }
+
+  /**
+   * Give the focus back to the page when the code of a cell focused an
+   * element of the hidden iframe, like with `input.focus()`: the keyboard
+   * keeps going to the notebook. The page loses the focus to the iframe
+   * without a focus event on the iframe, so the page checks where the focus
+   * is when it loses or gains it, when it is shown again and after each
+   * cell. The page does not scroll back to the element which gets the focus.
+   */
+  private _restoreFocus(): void {
+    const iframe = this._iframe;
+    if (!iframe || document.activeElement !== iframe) {
+      return;
+    }
+    this._focused?.focus({ preventScroll: true });
+    if (document.activeElement === iframe) {
+      // The element is gone, or can not take the focus anymore
+      iframe.blur();
+    }
+  }
+
+  /**
    * Start a new iframe after the code of a cell reloaded the current one:
    * the requests sent to the previous one fail with a RuntimeReloadedError.
    */
@@ -653,6 +768,7 @@ export class IFrameRuntimeBackend extends AbstractRuntimeBackend<IRemoteRuntimeA
   private _iframe: HTMLIFrameElement | null = null;
   private _document: Document | null = null;
   private _container: HTMLDivElement | null = null;
+  private _focused: HTMLElement | null = null;
 
   static readonly STARTUP_TIMEOUT_MS = 10000;
 
@@ -660,6 +776,16 @@ export class IFrameRuntimeBackend extends AbstractRuntimeBackend<IRemoteRuntimeA
    * The default time in milliseconds a loop can keep the page busy.
    */
   static readonly DEFAULT_LOOP_TIMEOUT_MS = 10000;
+
+  /**
+   * The width in pixels of the hidden iframe, its `innerWidth`.
+   */
+  static readonly FRAME_WIDTH = 800;
+
+  /**
+   * The height in pixels of the hidden iframe, its `innerHeight`.
+   */
+  static readonly FRAME_HEIGHT = 600;
 }
 
 /**

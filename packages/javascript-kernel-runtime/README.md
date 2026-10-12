@@ -228,7 +228,12 @@ messages any window can post, like the `message` events of a window, without
 checking their source: they would run code in the realm. The evaluator reads
 the globals of `globalScope` when it is created, so when the realm is
 replaced, like an iframe reloaded with `location.reload()`, dispose it and
-create a new one for the new realm.
+create a new one for the new realm. A host running the cells in a hidden
+iframe should keep it rendered, like the JupyterLite kernel does with
+`visibility: hidden` and a fixed size: in a `display: none` container, the
+elements of the cells have no layout, their `offsetWidth` and
+`getBoundingClientRect()` are 0, and some browsers do not run the
+`requestAnimationFrame()` callbacks.
 
 `onOutput` is called in order, during `execute()` and also later, for the
 outputs of callbacks, timers and widget handlers. Each message has the
