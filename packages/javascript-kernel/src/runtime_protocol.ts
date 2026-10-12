@@ -19,9 +19,16 @@ export type RuntimeMode = 'iframe' | 'worker';
  */
 export interface IRuntimeInitializeOptions extends IWorkerKernel.IOptions {
   /**
+   * Whether prompt() asks for user input in the frontend, with input_request
+   * messages relayed by the service worker of JupyterLite. Only a runtime in
+   * a Web Worker can block until the user replies. Without
+   * `browsingContextId`, prompt() fails with a StdinNotImplementedError.
+   */
+  stdin?: boolean;
+
+  /**
    * The id of the browsing context of the page, to ask for user input through
-   * the service worker. Only a runtime in a Web Worker can block until the
-   * user replies.
+   * the service worker, when it controls the page.
    */
   browsingContextId?: string;
 
@@ -73,11 +80,18 @@ export interface IRemoteRuntimeApi {
     options: IRuntimeInitializeOptions,
     onOutput: RuntimeOutputCallback
   ): Promise<void>;
+  /**
+   * Execute the code of a cell. With `allowStdin` false, the frontend does
+   * not support input requests: prompt() fails with a
+   * StdinNotImplementedError. Without it, as for the startup code, the
+   * setting of the running cell is kept (false when no cell runs).
+   */
   execute(
     code: string,
     executionCount: number,
     parentMessageId?: string,
-    parentHeader?: KernelMessage.IHeader
+    parentHeader?: KernelMessage.IHeader,
+    allowStdin?: boolean
   ): Promise<KernelMessage.IExecuteReplyMsg['content']>;
   preloadModule(moduleName: string): Promise<void>;
   registerCommTarget(

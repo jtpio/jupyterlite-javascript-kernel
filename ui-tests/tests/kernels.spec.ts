@@ -247,6 +247,65 @@ test.describe(`Closed runtime (${WORKER_KERNEL.displayName})`, () => {
   });
 });
 
+test.describe(`Runtime startup failure (${WORKER_KERNEL.displayName})`, () => {
+  // The requests of the Web Worker go to the network, where the test can
+  // block them, instead of through the service worker
+  test.use({ serviceWorkers: 'block' });
+
+  /**
+   * Make the Web Worker fail to start, like offline or with a content
+   * security policy: the modules that its script imports do not load. The
+   * scripts of the page load as usual.
+   */
+  async function blockWorkerModules(
+    page: IJupyterLabPageFixture
+  ): Promise<() => Promise<void>> {
+    const url = /\/javascript-kernel-extension\/static\/.*\.js/;
+    await page.route(url, route =>
+      // The browser loads the modules of a Web Worker as other resources
+      route.request().resourceType() === 'other'
+        ? route.abort()
+        : route.fallback()
+    );
+    return () => page.unroute(url);
+  }
+
+  test('Fail the cells with the startup error instead of hanging', async ({
+    page
+  }) => {
+    const unblock = await blockWorkerModules(page);
+    await createNotebook(page, WORKER_KERNEL);
+
+    // The error of the browser names the script which failed to load
+    const failed =
+      /^RuntimeStartupError: JavaScript runtime failed to start: NetworkError: .*The script at '.*' failed to load\..* Restart the kernel to try again\.$/;
+    let index = await runCode(page, '1 + 1');
+    await expect(
+      await getOutputs(page, index, 'application/vnd.jupyter.stderr')
+    ).toHaveText(failed);
+
+    // The kernel banner tells it too
+    const menu = await page.menu.openLocator('Help');
+    await menu!.getByRole('menuitem', { name: WORKER_KERNEL.about }).click();
+    const dialog = page.locator('.jp-Dialog');
+    await expect(dialog).toContainText(
+      'JavaScript runtime failed to start: NetworkError'
+    );
+    await dialog.getByRole('button', { name: 'Close' }).click();
+
+    // Once the network is back, a restart starts the runtime
+    await unblock();
+    await page.menu.clickMenuItem('Kernel>Restart Kernel…');
+    await page
+      .getByRole('dialog')
+      .getByRole('button', { name: 'Confirm Kernel Restart' })
+      .click();
+    await waitForKernelIdle(page, WORKER_KERNEL);
+    index = await runCode(page, '1 + 1');
+    expect(await page.notebook.getCellTextOutput(index)).toEqual(['2']);
+  });
+});
+
 test.describe(`Kernel info (${IFRAME_KERNEL.displayName})`, () => {
   test('Store the language info in the notebook metadata', async ({ page }) => {
     await createNotebook(page, IFRAME_KERNEL);

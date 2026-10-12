@@ -53,3 +53,18 @@ function safeToString(value: unknown): string {
     return 'Unknown error';
   }
 }
+
+/**
+ * The error of prompt() when the user can not be asked for input, like the
+ * StdinNotImplementedError of IPython: the frontend does not support input
+ * requests, or the host can not send them. A `requestInput` of the host
+ * throws it, and the cell fails with it.
+ */
+export class StdinNotImplementedError extends Error {
+  constructor(
+    message = 'prompt() was called, but this frontend does not support input requests.'
+  ) {
+    super(message);
+    this.name = 'StdinNotImplementedError';
+  }
+}

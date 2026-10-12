@@ -3,6 +3,7 @@
 
 import {
   JavaScriptRuntimeEvaluator,
+  StdinNotImplementedError,
   type JavaScriptExecutor,
   type RuntimeOutputMessage,
   uuid
@@ -11,21 +12,46 @@ import {
 import type { IRemoteRuntimeApi } from './runtime_protocol';
 
 /**
+ * How to make prompt() work, in the errors of the Web Worker runtime.
+ */
+const STDIN_HINT =
+  'Open JupyterLite over HTTPS or on localhost, in a browser allowing service workers, or use the JavaScript (IFrame) kernel, where prompt() shows a dialog of the browser.';
+
+/**
  * Ask the user for some input with an input_request message, sent to the
  * page through the service worker of JupyterLite. The synchronous request
  * blocks until the user replies, so it can only be used in a Web Worker: in
  * an iframe, it would block the page showing the input box.
+ *
+ * It throws a StdinNotImplementedError when the input can not be requested:
+ * the frontend does not allow it, or no service worker relays the request.
+ *
+ * @param browsingContextId - The id of the page for the service worker, when
+ * it controls the page.
+ * @param isAllowed - Whether the request of the running cell allows input.
  */
 function createInputRequester(
+  globalScope: Record<string, any>,
   baseUrl: string,
-  browsingContextId: string
+  browsingContextId: string | undefined,
+  isAllowed: () => boolean
 ): (
   prompt: string,
   password: boolean,
   parentHeader?: Record<string, unknown>
 ) => string | null {
   const url = `${baseUrl.replace(/\/$/, '')}/api/stdin/kernel`;
+  // Read before the code of the cells runs, which can replace it
+  const Request = globalScope.XMLHttpRequest as typeof XMLHttpRequest;
   return (prompt, password, parentHeader) => {
+    if (!isAllowed()) {
+      throw new StdinNotImplementedError();
+    }
+    if (!browsingContextId || typeof Request !== 'function') {
+      throw new StdinNotImplementedError(
+        `prompt() needs the service worker of JupyterLite, which is not active on this page. ${STDIN_HINT}`
+      );
+    }
     const inputRequest = {
       header: {
         msg_id: uuid(),
@@ -41,19 +67,28 @@ function createInputRequester(
       channel: 'stdin',
       buffers: []
     };
+    const xhr = new Request();
+    let reply: unknown;
     try {
-      const xhr = new XMLHttpRequest();
       xhr.open('POST', url, false);
       xhr.send(JSON.stringify({ browsingContextId, data: inputRequest }));
-      const reply = JSON.parse(xhr.responseText);
-      if (!reply || 'error' in reply) {
-        return null;
+      if (xhr.status === 200) {
+        reply = JSON.parse(xhr.responseText);
       }
-      return reply.content?.value ?? null;
-    } catch (error) {
-      console.warn(`Failed to request user input: ${error}`);
+    } catch {
+      // Without a service worker, the server of the site gets the request
+    }
+    if (typeof reply !== 'object' || reply === null) {
+      const status = xhr.status ? ` (HTTP ${xhr.status})` : '';
+      throw new StdinNotImplementedError(
+        `The input request was not answered by the service worker of JupyterLite${status}. ${STDIN_HINT}`
+      );
+    }
+    if ('error' in reply) {
       return null;
     }
+    const value = (reply as { content?: { value?: unknown } }).content?.value;
+    return typeof value === 'string' ? value : null;
   };
 }
 
@@ -66,6 +101,9 @@ export function createRemoteRuntimeApi(
   executor?: JavaScriptExecutor
 ): IRemoteRuntimeApi {
   let evaluator: JavaScriptRuntimeEvaluator | null = null;
+  // Whether the request of the running cell allows input: not the timers
+  // of the cells, which run after their request
+  let stdinAllowed = false;
 
   const ensureEvaluator = (): JavaScriptRuntimeEvaluator => {
     if (!evaluator) {
@@ -118,8 +156,13 @@ export function createRemoteRuntimeApi(
         onOutput: message => {
           emitOutput(onOutput, message);
         },
-        requestInput: options.browsingContextId
-          ? createInputRequester(options.baseUrl, options.browsingContextId)
+        requestInput: options.stdin
+          ? createInputRequester(
+              globalScope,
+              options.baseUrl,
+              options.browsingContextId,
+              () => stdinAllowed
+            )
           : undefined,
         maxStreamOutput: options.maxStreamOutput,
         loopTimeout: options.loopTimeout,
@@ -137,16 +180,30 @@ export function createRemoteRuntimeApi(
       code: string,
       executionCount: number,
       parentMessageId?: string,
-      parentHeader?: Parameters<IRemoteRuntimeApi['execute']>[3]
+      parentHeader?: Parameters<IRemoteRuntimeApi['execute']>[3],
+      allowStdin?: boolean
     ) {
-      const reply = await ensureEvaluator().execute(
-        code,
-        executionCount,
-        parentMessageId,
-        parentHeader as Record<string, unknown> | undefined
-      );
-      await flushOutputs();
-      return reply;
+      const run = async () => {
+        const reply = await ensureEvaluator().execute(
+          code,
+          executionCount,
+          parentMessageId,
+          parentHeader as Record<string, unknown> | undefined
+        );
+        await flushOutputs();
+        return reply;
+      };
+      // The startup code passes no allowStdin: it can run while a cell
+      // awaits, and must not change the input setting of that cell
+      if (allowStdin === undefined) {
+        return run();
+      }
+      stdinAllowed = allowStdin;
+      try {
+        return await run();
+      } finally {
+        stdinAllowed = false;
+      }
     },
 
     async preloadModule(moduleName: string): Promise<void> {

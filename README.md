@@ -103,6 +103,19 @@ handler)`. The default export is used when `exportName` is omitted. Disposing
 a startup registration calls its optional `deactivate` callback for active
 kernels.
 
+A startup extension which throws does not stop the kernel: the next cell
+prints `The startup extension "my-extension:lsp" failed, so the kernel runs
+without it: Error: ...` on stderr, then runs as usual.
+
+### Runtime startup failures
+
+When the runtime can not start, for example when the script of the Web Worker
+does not load (offline, or blocked by a content security policy), or when the
+iframe does not load within 10 s, the kernel still answers: the cells fail
+with `RuntimeStartupError: JavaScript runtime failed to start: <reason>.
+Restart the kernel to try again.` instead of staying at `[*]`, and the kernel
+banner, in consoles and in the **Help** menu, shows the reason too.
+
 ### Worker mode limitations
 
 Web Workers do not expose DOM APIs. In `JavaScript (Web Worker)`, APIs such as `document`, direct element access, and other main-thread-only browser APIs are unavailable.
@@ -303,8 +316,8 @@ The columns can differ slightly between browsers, which point at different parts
 const name = prompt('What is your name?');
 ```
 
-- In `JavaScript (Web Worker)`, the question is shown in the output area, like `input()` in Python kernels. `prompt.password(message)` hides the answer. This uses the JupyterLite service worker, so it needs a browser supporting it.
-- In `JavaScript (IFrame)`, the code runs on the main thread of the page, so `prompt()` is the dialog of the browser.
+- In `JavaScript (Web Worker)`, the question is shown in the output area, like `input()` in Python kernels. `prompt.password(message)` hides the answer. The JupyterLite service worker relays the question to the page, so it needs a secure context (JupyterLite served over `https`, or on `localhost`) and a browser allowing service workers (not, for example, the private windows of Firefox). Without it, `prompt()` fails with a `StdinNotImplementedError` naming the fix, instead of returning `null`. It also fails when the frontend does not support input requests (an `execute_request` with `allow_stdin: false`), and in the code that runs after its cell, like a timer.
+- In `JavaScript (IFrame)`, the code runs on the main thread of the page, so `prompt()` is the dialog of the browser. It works everywhere.
 
 ## Completion and documentation
 

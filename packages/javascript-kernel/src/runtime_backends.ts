@@ -89,6 +89,20 @@ export class RuntimeStoppedError extends Error {
 }
 
 /**
+ * The error of the requests to a runtime which failed to start, like a Web
+ * Worker whose script could not be loaded, or an iframe which did not load
+ * in time.
+ */
+export class RuntimeStartupError extends Error {
+  constructor(reason: string) {
+    super(
+      `JavaScript runtime failed to start: ${reason.replace(/\.$/, '')}. Restart the kernel to try again.`
+    );
+    this.name = 'RuntimeStartupError';
+  }
+}
+
+/**
  * Interface implemented by all execution runtime backends.
  */
 export interface IRuntimeBackend {
@@ -99,11 +113,19 @@ export interface IRuntimeBackend {
    * Interrupt the running cell, if any, and clear the timers of the cells.
    */
   interrupt(): Promise<void>;
+
+  /**
+   * Execute the code of a cell. With `allowStdin` false, prompt() fails
+   * with a StdinNotImplementedError in the Web Worker. Without it, as for
+   * the startup code, the setting of the running cell is kept (false when
+   * no cell runs).
+   */
   execute(
     code: string,
     executionCount: number,
     parentMessageId?: string,
-    parentHeader?: KernelMessage.IHeader
+    parentHeader?: KernelMessage.IHeader,
+    allowStdin?: boolean
   ): Promise<KernelMessage.IExecuteReplyMsg['content']>;
   complete(
     code: string,
@@ -166,12 +188,19 @@ abstract class AbstractRuntimeBackend<
     code: string,
     executionCount: number,
     parentMessageId?: string,
-    parentHeader?: KernelMessage.IHeader
+    parentHeader?: KernelMessage.IHeader,
+    allowStdin?: boolean
   ): Promise<KernelMessage.IExecuteReplyMsg['content']> {
     await this.ready;
     const reply = this._call<KernelMessage.IExecuteReplyMsg['content']>(
       remote =>
-        remote.execute(code, executionCount, parentMessageId, parentHeader)
+        remote.execute(
+          code,
+          executionCount,
+          parentMessageId,
+          parentHeader,
+          allowStdin
+        )
     );
     this._running = reply;
     try {
@@ -787,7 +816,12 @@ export class WorkerRuntimeBackend extends AbstractRuntimeBackend<
         });
         return;
       }
-      const details = [event.message || 'Worker runtime failed to initialize'];
+      // A plain event, without a message, when the script of the worker or
+      // one of its modules failed to load
+      const details = [
+        event.message?.replace(/^Uncaught /, '') ||
+          'the script of the Web Worker, or one of its modules, could not be loaded'
+      ];
       if (event.filename) {
         details.push(`at ${event.filename}:${event.lineno}:${event.colno}`);
       }
@@ -846,6 +880,7 @@ export class WorkerRuntimeBackend extends AbstractRuntimeBackend<
         remote.initialize(
           {
             baseUrl: resolveBaseUrl(this._options.baseUrl),
+            stdin: true,
             browsingContextId: this._options.browsingContextId,
             maxStreamOutput: this._options.maxStreamOutput,
             executorOptions: this._options.executorOptions,
@@ -982,7 +1017,10 @@ export namespace WorkerRuntimeBackend {
     onRestart?: (info: IRestartInfo) => void;
 
     /**
-     * The id of the browsing context of the page, to ask for user input.
+     * The id of the browsing context of the page, to ask for user input
+     * through the service worker of JupyterLite. Only set it when the
+     * service worker controls the page: without it, prompt() fails with a
+     * StdinNotImplementedError.
      */
     browsingContextId?: string;
   }

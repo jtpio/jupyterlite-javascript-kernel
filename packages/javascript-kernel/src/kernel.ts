@@ -20,6 +20,7 @@ import {
   IRuntimeBackend,
   RuntimeReloadedError,
   RuntimeRestartedError,
+  RuntimeStartupError,
   RuntimeStoppedError,
   WorkerRuntimeBackend
 } from './runtime_backends';
@@ -59,14 +60,44 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
     this._backend.dispose();
     this._runtimeReadyContext = null;
     this._appliedStartupExtensions.clear();
+    this._failedStartupExtensions.clear();
     super.dispose();
   }
 
   /**
-   * A promise that is fulfilled when the kernel runtime is ready.
+   * A promise that is fulfilled when the kernel runtime is ready, or failed
+   * to start: the requests then get a reply with the error, in
+   * `startupError`, instead of waiting forever.
    */
   get ready(): Promise<void> {
-    return this._backend.ready;
+    // The backend has a new promise when its runtime restarts
+    const backendReady = this._backend.ready;
+    if (backendReady !== this._backendReady) {
+      this._backendReady = backendReady;
+      this._ready = backendReady.then(
+        () => {
+          if (this._backendReady === backendReady) {
+            this._startupError = null;
+          }
+        },
+        error => {
+          if (this._backendReady === backendReady) {
+            this._startupError = new RuntimeStartupError(
+              this.normalizeError(error).message
+            );
+          }
+        }
+      );
+    }
+    return this._ready;
+  }
+
+  /**
+   * The error of the runtime, when it failed to start: the cells fail with
+   * it.
+   */
+  get startupError(): RuntimeStartupError | null {
+    return this._startupError;
   }
 
   /**
@@ -108,7 +139,10 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
         // the code cells to a file with the extension above
         nbconvert_exporter: 'script'
       },
-      banner: this.banner,
+      // The console shows the banner
+      banner: this._startupError
+        ? `${this.banner}\n\n${this._startupError.message}`
+        : this.banner,
       help_links: [
         {
           text: 'JavaScript Reference',
@@ -155,17 +189,23 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
   ): Promise<KernelMessage.IExecuteReplyMsg['content']> {
     try {
       await this.ready;
+      if (this._startupError) {
+        throw this._startupError;
+      }
+      this._reportStartupExtensionErrors();
       return await this._backend.execute(
         content.code,
         this.executionCount,
         this.parentHeader?.msg_id,
-        this.parentHeader
+        this.parentHeader,
+        content.allow_stdin
       );
     } catch (error) {
       if (
         error instanceof RuntimeRestartedError ||
         error instanceof RuntimeReloadedError ||
-        error instanceof RuntimeStoppedError
+        error instanceof RuntimeStoppedError ||
+        error instanceof RuntimeStartupError
       ) {
         // Errors of the kernel, without frames
         const ename =
@@ -293,6 +333,10 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
    * Send an `comm_open` message.
    */
   async commOpen(msg: KernelMessage.ICommOpenMsg): Promise<void> {
+    if (this._startupError) {
+      // No runtime handles the comms
+      return;
+    }
     const { comm_id, target_name, data } = msg.content;
     this._comms.set(comm_id, { target_name });
     const buffers = this._toArrayBuffers(msg.buffers);
@@ -309,6 +353,9 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
    * Send an `comm_msg` message.
    */
   async commMsg(msg: KernelMessage.ICommMsgMsg): Promise<void> {
+    if (this._startupError) {
+      return;
+    }
     const { comm_id, data } = msg.content;
     const buffers = this._toArrayBuffers(msg.buffers);
     await this._backend.handleCommMsg(
@@ -323,6 +370,9 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
    * Send an `comm_close` message.
    */
   async commClose(msg: KernelMessage.ICommCloseMsg): Promise<void> {
+    if (this._startupError) {
+      return;
+    }
     const { comm_id, data } = msg.content;
     this._comms.delete(comm_id);
     const buffers = this._toArrayBuffers(msg.buffers);
@@ -336,6 +386,11 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
 
   /**
    * Called once a runtime backend is initialized, before `ready` resolves.
+   *
+   * An error thrown here makes the runtime fail to start: the cells then
+   * fail with a RuntimeStartupError. The errors of the startup extensions
+   * are printed in the outputs of the next cell, and the kernel keeps
+   * running without them.
    */
   protected async onRuntimeReady(
     context: JavaScriptKernel.IRuntimeReadyContext
@@ -368,6 +423,7 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
   ): Promise<void> {
     await this.ready;
     const context = this._runtimeReadyContext;
+    this._failedStartupExtensions.delete(extension.id);
     if (!context || !this._appliedStartupExtensions.has(extension.id)) {
       return;
     }
@@ -479,9 +535,6 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
       case 'stream':
         this.stream(message.bundle, parentHeader);
         break;
-      case 'input_request':
-        this.inputRequest(message.content, parentHeader);
-        break;
       case 'display_data':
         this.displayData(message.bundle, parentHeader);
         break;
@@ -561,6 +614,7 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
     }
     this._comms.clear();
     this._appliedStartupExtensions.clear();
+    this._failedStartupExtensions.clear();
     this._runtimeReadyContext = null;
     if (notice) {
       this.stream({ name: 'stderr', text: `${notice}\n` }, this.parentHeader);
@@ -637,16 +691,48 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
 
   /**
    * Apply a startup extension once to the given runtime context.
+   *
+   * An extension which fails does not stop the runtime: its error is printed
+   * in the outputs of the next cell, and it is not applied again to this
+   * runtime.
    */
   private async _applyStartupExtension(
     extension: JavaScriptKernel.IStartupExtension,
     context: JavaScriptKernel.IRuntimeReadyContext
   ): Promise<void> {
-    if (this._appliedStartupExtensions.has(extension.id)) {
+    if (
+      this._appliedStartupExtensions.has(extension.id) ||
+      this._failedStartupExtensions.has(extension.id)
+    ) {
       return;
     }
-    await extension.activate(context);
+    try {
+      await extension.activate(context);
+    } catch (error) {
+      this._failedStartupExtensions.add(extension.id);
+      const normalized = this.normalizeError(error);
+      const message = normalized.message
+        ? `${normalized.name}: ${normalized.message}`
+        : normalized.name;
+      this._startupExtensionErrors.push(
+        `The startup extension "${extension.id}" failed, so the kernel runs without it: ${message}`
+      );
+      return;
+    }
     this._appliedStartupExtensions.add(extension.id);
+  }
+
+  /**
+   * Print the errors of the startup extensions on stderr, in the outputs of
+   * the cell about to run.
+   */
+  private _reportStartupExtensionErrors(): void {
+    if (this._startupExtensionErrors.length === 0) {
+      return;
+    }
+    const text = this._startupExtensionErrors.join('\n');
+    this._startupExtensionErrors = [];
+    this.stream({ name: 'stderr', text: `${text}\n` }, this.parentHeader);
   }
 
   private _unsupportedControlMessages = new Set<'input_reply'>();
@@ -659,6 +745,11 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
   private _executorOptions?: IExecutorOptions;
   private _startupExtensions: JavaScriptKernel.IStartupExtension[];
   private _appliedStartupExtensions = new Set<string>();
+  private _failedStartupExtensions = new Set<string>();
+  private _startupExtensionErrors: string[] = [];
+  private _backendReady: Promise<void> | null = null;
+  private _ready: Promise<void> = Promise.resolve();
+  private _startupError: RuntimeStartupError | null = null;
   private _runtimeReadyContext: JavaScriptKernel.IRuntimeReadyContext | null =
     null;
   private _runtimeMode: RuntimeMode;
@@ -737,8 +828,9 @@ export namespace JavaScriptKernel {
 
     /**
      * The id of the browsing context of the page, from the service worker
-     * manager of JupyterLite. With it, prompt() asks for user input in the
-     * Web Worker runtime.
+     * manager of JupyterLite, only when the service worker is active. With
+     * it, prompt() asks for user input in the Web Worker runtime. Without
+     * it, prompt() fails there with a StdinNotImplementedError.
      */
     browsingContextId?: string;
 

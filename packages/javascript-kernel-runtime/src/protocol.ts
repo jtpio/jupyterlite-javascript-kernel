@@ -12,10 +12,6 @@ export type RuntimeOutputMessage =
       bundle: KernelMessage.IStreamMsg['content'];
     }
   | {
-      type: 'input_request';
-      content: KernelMessage.IInputRequestMsg['content'];
-    }
-  | {
       type: 'display_data';
       bundle: KernelMessage.IDisplayDataMsg['content'];
     }

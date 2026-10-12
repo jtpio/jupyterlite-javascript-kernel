@@ -76,6 +76,35 @@ test.describe(`Input (${WORKER_KERNEL.displayName})`, () => {
   });
 });
 
+test.describe(`Input without the service worker (${WORKER_KERNEL.displayName})`, () => {
+  // The service worker does not relay the requests, like before it controls
+  // the page
+  test.use({ serviceWorkers: 'block' });
+
+  test('Fail prompt() with an error naming the fix', async ({ page }) => {
+    await createNotebook(page, WORKER_KERNEL);
+    const index = await runCode(page, QUESTION);
+
+    const error = await getOutputs(
+      page,
+      index,
+      'application/vnd.jupyter.stderr'
+    );
+    await expect(error).toContainText(
+      'StdinNotImplementedError: The input request was not answered by the service worker of JupyterLite'
+    );
+    await expect(error).toContainText('over HTTPS or on localhost');
+    await expect(error).toContainText('JavaScript (IFrame) kernel');
+    // The error points at the call in the cell
+    await expect(error).toContainText('In[1]');
+    await expect(page.locator('.jp-Stdin-input')).toHaveCount(0);
+
+    // The kernel keeps running
+    const next = await runCode(page, '1 + 1');
+    expect(await page.notebook.getCellTextOutput(next)).toEqual(['2']);
+  });
+});
+
 test.describe(`Input (${IFRAME_KERNEL.displayName})`, () => {
   test('Answer a prompt in a browser dialog', async ({ page }) => {
     await createNotebook(page, IFRAME_KERNEL);

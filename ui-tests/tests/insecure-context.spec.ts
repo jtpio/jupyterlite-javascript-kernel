@@ -3,7 +3,13 @@
 
 import { expect, test } from '@jupyterlab/galata';
 
-import { KERNELS, createNotebook, getOutputs, runCode } from './utils';
+import {
+  KERNELS,
+  WORKER_KERNEL,
+  createNotebook,
+  getOutputs,
+  runCode
+} from './utils';
 
 // JupyterLite served over plain http from another host than localhost, like
 // on a LAN, is an insecure context: crypto.randomUUID does not exist there.
@@ -71,3 +77,18 @@ for (const kernel of KERNELS) {
     });
   });
 }
+
+test.describe(`Insecure context input (${WORKER_KERNEL.displayName})`, () => {
+  test('Fail prompt() without the service worker over plain http', async ({
+    page
+  }) => {
+    // The browsers only allow service workers in secure contexts
+    await createNotebook(page, WORKER_KERNEL);
+    const index = await runCode(page, 'prompt("Name?")');
+    await expect(
+      await getOutputs(page, index, 'application/vnd.jupyter.stderr')
+    ).toContainText(
+      'StdinNotImplementedError: prompt() needs the service worker of JupyterLite'
+    );
+  });
+});

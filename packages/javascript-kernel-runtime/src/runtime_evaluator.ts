@@ -917,7 +917,9 @@ export namespace JavaScriptRuntimeEvaluator {
 
     /**
      * Ask the user for some input, for prompt(). It blocks until the user
-     * replies, and returns null when the input can not be requested. Without
+     * replies, and returns null when the user cancels. It throws a
+     * StdinNotImplementedError when the input can not be requested, like
+     * when the frontend does not allow it: the cell fails with it. Without
      * it, the runtime keeps its own prompt().
      */
     requestInput?: (

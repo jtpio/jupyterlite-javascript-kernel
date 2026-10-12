@@ -65,7 +65,12 @@ interface IRegisterKernelOptions {
   name: string;
   displayName: string;
   runtime: RuntimeMode;
-  browsingContextId?: string;
+
+  /**
+   * The service worker manager of JupyterLite, which relays the requests for
+   * user input of prompt() in the Web Worker runtime.
+   */
+  serviceWorkerManager?: IServiceWorkerManager | null;
 
   /**
    * The settings of the kernels. Without them, the kernels use the defaults
@@ -78,7 +83,8 @@ const registerKernel = (
   kernelspecs: IKernelSpecs,
   options: IRegisterKernelOptions
 ) => {
-  const { name, displayName, runtime, browsingContextId, settings } = options;
+  const { name, displayName, runtime, serviceWorkerManager, settings } =
+    options;
 
   kernelspecs.register({
     spec: {
@@ -105,6 +111,9 @@ const registerKernel = (
       // Read when the kernel starts, also on restart: the running kernels
       // keep their options
       const settingsOptions = (await settings?.kernelOptions(runtime)) ?? {};
+      const browsingContextId = await Private.stdinBrowsingContextId(
+        serviceWorkerManager ?? null
+      );
       const kernel = new JavaScriptKernel({
         ...options,
         ...settingsOptions,
@@ -171,6 +180,37 @@ class JavaScriptKernelStartupRegistry implements IJavaScriptKernelStartupRegistr
 }
 
 namespace Private {
+  /**
+   * The longest time in milliseconds a starting kernel waits for the
+   * service worker.
+   */
+  const SERVICE_WORKER_TIMEOUT_MS = 10000;
+
+  /**
+   * The id of the browsing context of the page, when the service worker of
+   * JupyterLite is active to relay the requests for user input. Without it,
+   * prompt() fails with a StdinNotImplementedError instead of sending
+   * requests that the server of the site can not answer.
+   */
+  export async function stdinBrowsingContextId(
+    manager: IServiceWorkerManager | null
+  ): Promise<string | undefined> {
+    // Without service workers, like in an insecure context, the manager
+    // never gets ready
+    if (!manager || !navigator.serviceWorker) {
+      return undefined;
+    }
+    if (!manager.enabled) {
+      // Registering the service worker takes a moment on the first load. The
+      // wait is capped, in case the manager failed before getting ready.
+      await Promise.race([
+        manager.ready.catch(() => undefined),
+        new Promise(resolve => setTimeout(resolve, SERVICE_WORKER_TIMEOUT_MS))
+      ]);
+    }
+    return manager.enabled ? manager.browsingContextId : undefined;
+  }
+
   /**
    * The options of a kernel from the settings of the kernels. The values of
    * the wrong type, which the settings registry should not let through, are
@@ -350,8 +390,7 @@ const kernelWorker: JupyterFrontEndPlugin<void> = {
       displayName: 'JavaScript (Web Worker)',
       runtime: 'worker',
       settings,
-      // The service worker relays the requests for user input of prompt()
-      browsingContextId: serviceWorkerManager?.browsingContextId
+      serviceWorkerManager
     });
   }
 };
