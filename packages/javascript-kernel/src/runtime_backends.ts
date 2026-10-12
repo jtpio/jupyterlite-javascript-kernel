@@ -1185,16 +1185,21 @@ function delay(ms: number): Promise<void> {
 }
 
 /**
- * Add a timeout to runtime startup operations.
+ * Add a timeout to runtime startup operations, like the activation of a
+ * startup extension: reject with an error of `errorName` when the promise
+ * does not settle in time.
  */
-async function withTimeout<T>(
+export async function withTimeout<T>(
   promise: Promise<T>,
   timeoutMs: number,
-  errorMessage: string
+  errorMessage: string,
+  errorName = 'Error'
 ): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timeout = setTimeout(() => {
-      reject(new Error(errorMessage));
+      const error = new Error(errorMessage);
+      error.name = errorName;
+      reject(error);
     }, timeoutMs);
 
     void promise.then(

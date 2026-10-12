@@ -118,9 +118,20 @@ handler)`. The default export is used when `exportName` is omitted. Disposing
 a startup registration calls its optional `deactivate` callback for active
 kernels.
 
+A startup extension registered while kernels are running is applied to them
+at once, even while a cell waits for a promise: its startup code does not
+change the output limit and the interrupt of that cell. The running kernels
+keep the registrations: when their runtime restarts, like a Web Worker
+restarted after an interrupt or an iframe reloaded by a cell, the new runtime
+gets the extensions registered since the kernel started, and not the ones
+disposed.
+
 A startup extension which throws does not stop the kernel: the next cell
 prints `The startup extension "my-extension:lsp" failed, so the kernel runs
-without it: Error: ...` on stderr, then runs as usual.
+without it: Error: ...` on stderr, then runs as usual. So does an extension
+whose `activate` does not settle within 30 s, like one awaiting a promise which
+never resolves, with `TimeoutError: it did not activate within 30 s`: the
+kernel starts without waiting for it.
 
 ### Runtime startup failures
 
@@ -685,7 +696,8 @@ Jupyter.comm.registerTarget('my-echo', (comm, data, buffers) => {
 - `Jupyter.comm.open(targetName, data?, metadata?, buffers?)` opens a comm and returns it
 - `Jupyter.comm.registerTarget(targetName, handler)` calls `handler(comm, data, buffers)` when the frontend opens a comm on the target, and `Jupyter.comm.unregisterTarget(targetName)` removes it. A comm opened on a target without a handler, or whose handler throws, is closed, like in `ipykernel`. The `jupyter.widget.control` target is built in: it sends the state of the widgets to the frontend
 - the kernel answers the `comm_info_request` messages with the open comms, so a frontend can find the comms of a running kernel
-- a comm has a `commId` and a `targetName`, `send(data, metadata?, buffers?)` and `close(data?)` methods, and the `onMsg` and `onClose` callbacks, called with the data and the binary buffers (`ArrayBuffer`) of the messages of the frontend
+- a comm has a `commId` and a `targetName`, `send(data, metadata?, buffers?)` and `close(data?)` methods, and the `onMsg` and `onClose` callbacks, called with the data and the binary buffers (`ArrayBuffer`) of the messages of the frontend, objects of the realm of the cells in both kernels, so that `buffers[0] instanceof ArrayBuffer` holds
+- once closed, by the kernel or by the frontend, a comm sends nothing: closing it again does nothing, and does not call `onClose` again. So does `close()` on a widget, and `unlink()` on a link: a closed widget does not sync its new values anymore, like in `ipywidgets`
 - the outputs of the comm callbacks, and their errors, go to the cell which ran last. The comm messages they send, and the outputs captured by an `Output` widget, go to the message of the frontend which they handle
 
 `context.registerCommTarget()` registers the target of a [startup extension](#kernel-startup-extensions) before the code of the cells runs.

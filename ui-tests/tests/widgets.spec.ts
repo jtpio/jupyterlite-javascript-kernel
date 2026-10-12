@@ -718,6 +718,73 @@ for (const kernel of KERNELS) {
       ).toHaveText('message click\n');
     });
 
+    test('Give the values of the frontend to the cells as their own objects', async ({
+      page
+    }) => {
+      const index = await runCode(
+        page,
+        [
+          'const { Button, IntRangeSlider } = Jupyter.widgets;',
+          'const button = new Button({ description: "Click me" });',
+          'button.onMsg(content => console.log(`plain object ${content.constructor === Object}`));',
+          'const range = new IntRangeSlider({ value: [2, 5], max: 10, description: "Range" });',
+          'display(button);',
+          'range'
+        ].join('\n')
+      );
+      const outputs = await getOutputs(page, index);
+      await outputs.getByRole('button', { name: 'Click me' }).click();
+      await expect(
+        await getOutputs(page, index, 'application/vnd.jupyter.stdout')
+      ).toHaveText('plain object true\n');
+
+      // The pair of values the user picked is an array of the cells
+      await outputs.getByRole('slider').last().click();
+      await page.keyboard.press('ArrowRight');
+      await expect(outputs.locator('.widget-readout')).toContainText('6');
+      const cell = await runCode(
+        page,
+        '`${range.value} ${range.value instanceof Array}`'
+      );
+      expect(await page.notebook.getCellTextOutput(cell)).toEqual([
+        "'2,6 true'"
+      ]);
+    });
+
+    test('Close the widgets and the links once', async ({ page }) => {
+      const index = await runCode(
+        page,
+        [
+          'const { IntSlider, IntText, HBox, jslink } = Jupyter.widgets;',
+          'const source = new IntSlider({ value: 1, description: "Source" });',
+          'const target = new IntText({ value: 1, description: "Target" });',
+          'const link = jslink([source, "value"], [target, "value"]);',
+          'link.on("close", () => console.log("unlinked"));',
+          'source.on("close", () => console.log("closed"));',
+          'new HBox({ children: [source, target] })'
+        ].join('\n')
+      );
+      const widget = await getOutputs(page, index);
+      let cell = await runCode(page, 'link.unlink();\nlink.unlink();');
+      await expect(
+        await getOutputs(page, cell, 'application/vnd.jupyter.stdout')
+      ).toHaveText('unlinked\n');
+
+      // The target does not change the source anymore
+      const input = widget.getByRole('spinbutton');
+      await input.fill('9');
+      await input.press('Enter');
+      await expect(widget.locator('.widget-readout')).toHaveText('1');
+
+      cell = await runCode(
+        page,
+        'source.close();\nsource.close();\nsource.value = 5;'
+      );
+      await expect(
+        await getOutputs(page, cell, 'application/vnd.jupyter.stdout')
+      ).toHaveText('closed\n');
+    });
+
     test('Upload files to the kernel with a FileUpload', async ({ page }) => {
       const index = await runCode(
         page,

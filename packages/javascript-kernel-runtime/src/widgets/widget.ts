@@ -128,7 +128,7 @@ export class Widget {
     defineTraits(Object.getPrototypeOf(this), Object.keys(defaults));
     const given = withoutUndefined(state ?? {});
     const initial = { ...defaults, ...given };
-    this._validate(initial, new Set(Object.keys(given)));
+    this._validateState(initial, new Set(Object.keys(given)));
     this._state = { ...initial, ...this._modelState(ctor) };
 
     const {
@@ -154,7 +154,9 @@ export class Widget {
   }
 
   /**
-   * Close the widget and its comm channel.
+   * Close the widget and its comm channel, and call the 'close' listeners.
+   * Closing it again does nothing, and a closed widget sends nothing to the
+   * frontend, like in ipywidgets.
    */
   close(): void {
     this._comm.close();
@@ -179,7 +181,7 @@ export class Widget {
       typeof nameOrState === 'string' ? { [nameOrState]: value } : nameOrState
     );
     const next = { ...this._state, ...updates };
-    this._validate(next, new Set(Object.keys(updates)));
+    this._validateState(next, new Set(Object.keys(updates)));
 
     const changes = this._applyState(next);
     if (changes.length > 0) {
@@ -326,7 +328,8 @@ export class Widget {
    * validators of ipywidgets: coerce its values in place, or throw to reject
    * it. It is called with the whole state, in the constructor, for `set()`
    * and for the updates of the frontend, which get back the values changed
-   * here.
+   * here. When it throws, the widgets it created with `_createWidget()`, like
+   * a default layout, are closed.
    *
    * @param state - The whole new state, to update in place.
    * @param names - The names of the properties being set: the ones given to
@@ -352,10 +355,37 @@ export class Widget {
     const bound = (ctor._boundClasses?.get(cls) ?? cls) as WidgetClass<T>;
     const previous = creatingManager;
     creatingManager = this._manager;
+    let widget: T;
     try {
-      return new bound(state);
+      widget = new bound(state);
     } finally {
       creatingManager = previous;
+    }
+    this._validationWidgets?.push(widget);
+    return widget;
+  }
+
+  /**
+   * Validate a new state with `_validate()`. When it is rejected, close the
+   * widgets created for it, like a default layout, so that they do not stay
+   * open in the frontend.
+   */
+  private _validateState(
+    state: Record<string, unknown>,
+    names: ReadonlySet<string>
+  ): void {
+    const previous = this._validationWidgets;
+    const created: Widget[] = [];
+    this._validationWidgets = created;
+    try {
+      this._validate(state, names);
+    } catch (error) {
+      for (const widget of created) {
+        widget.close();
+      }
+      throw error;
+    } finally {
+      this._validationWidgets = previous;
     }
   }
 
@@ -377,7 +407,7 @@ export class Widget {
         received[key] = this._deserializeProperty(key, val);
       }
       const next = { ...this._state, ...received };
-      this._validate(next, new Set(Object.keys(received)));
+      this._validateState(next, new Set(Object.keys(received)));
 
       // Send back the values changed by the validation, like a clamped value
       const corrected: Record<string, unknown> = {};
@@ -598,6 +628,9 @@ export class Widget {
     WidgetObserveCallback,
     Map<string, WidgetEventCallback>
   >;
+  // Set by `_validateState()` while `_validate()` runs, in the constructor:
+  // declared without a field, which would reset it after `super()`
+  declare private _validationWidgets: Widget[] | undefined;
 }
 
 /**

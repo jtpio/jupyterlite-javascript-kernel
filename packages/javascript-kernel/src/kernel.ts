@@ -22,7 +22,8 @@ import {
   RuntimeRestartedError,
   RuntimeStartupError,
   RuntimeStoppedError,
-  WorkerRuntimeBackend
+  WorkerRuntimeBackend,
+  withTimeout
 } from './runtime_backends';
 import type { RuntimeMode } from './runtime_protocol';
 import { KERNEL_VERSION } from './version';
@@ -471,7 +472,8 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
    * Called once a runtime backend is initialized, before `ready` resolves.
    *
    * An error thrown here makes the runtime fail to start: the cells then
-   * fail with a RuntimeStartupError. The errors of the startup extensions
+   * fail with a RuntimeStartupError. The errors of the startup extensions,
+   * and the ones which do not activate within STARTUP_EXTENSION_TIMEOUT_MS,
    * are printed in the outputs of the next cell, and the kernel keeps
    * running without them.
    */
@@ -479,17 +481,22 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
     context: JavaScriptKernel.IRuntimeReadyContext
   ): Promise<void> {
     this._runtimeReadyContext = context;
-    for (const extension of this._startupExtensions) {
+    for (const extension of [...this._startupExtensions]) {
       await this._applyStartupExtension(extension, context);
     }
   }
 
   /**
-   * Apply a startup extension to an initialized runtime.
+   * Apply a startup extension to an initialized runtime. The kernel keeps
+   * it, and applies it again when its runtime restarts, like a Web Worker
+   * which did not stop after an interrupt.
    */
   async applyStartupExtension(
     extension: JavaScriptKernel.IStartupExtension
   ): Promise<void> {
+    if (!this._startupExtensions.some(item => item.id === extension.id)) {
+      this._startupExtensions.push(extension);
+    }
     await this.ready;
     const context = this._runtimeReadyContext;
     if (!context) {
@@ -499,11 +506,15 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
   }
 
   /**
-   * Remove runtime registrations made by a startup extension.
+   * Remove runtime registrations made by a startup extension: the kernel
+   * does not apply it again when its runtime restarts.
    */
   async removeStartupExtension(
     extension: JavaScriptKernel.IStartupExtension
   ): Promise<void> {
+    this._startupExtensions = this._startupExtensions.filter(
+      item => item.id !== extension.id
+    );
     await this.ready;
     const context = this._runtimeReadyContext;
     this._failedStartupExtensions.delete(extension.id);
@@ -825,7 +836,9 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
    *
    * An extension which fails does not stop the runtime: its error is printed
    * in the outputs of the next cell, and it is not applied again to this
-   * runtime.
+   * runtime. So does an extension which does not activate within
+   * STARTUP_EXTENSION_TIMEOUT_MS, like one awaiting a promise which never
+   * settles: the runtime becomes ready without waiting for it.
    */
   private async _applyStartupExtension(
     extension: JavaScriptKernel.IStartupExtension,
@@ -837,8 +850,15 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
     ) {
       return;
     }
+    const timeout = (this.constructor as typeof JavaScriptKernel)
+      .STARTUP_EXTENSION_TIMEOUT_MS;
     try {
-      await extension.activate(context);
+      await withTimeout(
+        Promise.resolve(extension.activate(context)),
+        timeout,
+        `it did not activate within ${timeout / 1000} s`,
+        'TimeoutError'
+      );
     } catch (error) {
       this._failedStartupExtensions.add(extension.id);
       const normalized = this.normalizeError(error);
@@ -887,6 +907,12 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
   private _runtimeReadyContext: JavaScriptKernel.IRuntimeReadyContext | null =
     null;
   private _runtimeMode: RuntimeMode;
+
+  /**
+   * The time in milliseconds a startup extension has to activate, before
+   * the kernel runs without it.
+   */
+  static readonly STARTUP_EXTENSION_TIMEOUT_MS: number = 30000;
 }
 
 /**

@@ -240,6 +240,10 @@ export class LoopGuard {
   /**
    * Start an execution: clear the interruption and the loop timeout of the
    * previous one, and restart the clock.
+   *
+   * The executions can overlap, like a cell starting while some startup code
+   * awaits: they share the interruption, which stops all of them, until the
+   * last one ends.
    */
   beginExecution(): void {
     this._state.flag = RUNNING;
@@ -248,12 +252,16 @@ export class LoopGuard {
       Atomics.store(this._interruptBuffer, 0, 0);
     }
     this._tripped = null;
+    this._executions += 1;
+    if (this._interrupt && !this._interrupt.interrupted) {
+      return;
+    }
     let reject: (reason: unknown) => void = () => undefined;
     const promise = new Promise<never>((_, rejectPromise) => {
       reject = rejectPromise;
     });
     promise.catch(() => undefined);
-    this._interrupt = { promise, reject };
+    this._interrupt = { promise, reject, interrupted: false };
   }
 
   /**
@@ -284,6 +292,7 @@ export class LoopGuard {
     safe(() => {
       error.stack = `${KEYBOARD_INTERRUPT}: ${error.message}`;
     });
+    this._interrupt.interrupted = true;
     this._interrupt.reject(error);
   }
 
@@ -314,10 +323,14 @@ export class LoopGuard {
   }
 
   /**
-   * End the current execution.
+   * End the current execution. The interruption stays until the last of the
+   * overlapping executions ends.
    */
   endExecution(): void {
-    this._interrupt = null;
+    this._executions = Math.max(0, this._executions - 1);
+    if (this._executions === 0) {
+      this._interrupt = null;
+    }
   }
 
   /**
@@ -469,9 +482,11 @@ export class LoopGuard {
   private _postTask: ITaskPoster;
   private _taskStart = -1;
   private _tripped: Error | null = null;
+  private _executions = 0;
   private _interrupt: {
     promise: Promise<never>;
     reject: (reason: unknown) => void;
+    interrupted: boolean;
   } | null = null;
 }
 

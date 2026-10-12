@@ -283,12 +283,13 @@ export class CommManager {
   ): void {
     const comm = this._comms.get(commId);
     if (comm) {
+      // Closed before onClose runs: closing it there sends nothing
+      this._widgets.delete(commId);
+      this._comms.delete(commId);
       const onClose = comm.onClose;
       if (onClose) {
         this.invokeCallback(() => onClose(data, buffers));
       }
-      this._widgets.delete(commId);
-      this._comms.delete(commId);
     }
   }
 
@@ -397,9 +398,12 @@ export class CommManager {
   }
 
   /**
-   * Create an IComm instance bound to this manager.
+   * Create an IComm instance bound to this manager. Once closed, by the
+   * kernel or by the frontend, the comm sends nothing: closing it again does
+   * not send another comm_close, nor call its onClose again.
    */
   private _createComm(commId: string, targetName: string): IComm {
+    const isOpen = (): boolean => this._comms.get(commId) === comm;
     const comm: IComm = {
       get commId() {
         return commId;
@@ -412,6 +416,9 @@ export class CommManager {
         metadata?: Record<string, unknown>,
         buffers?: ArrayBuffer[]
       ): void => {
+        if (!isOpen()) {
+          return;
+        }
         this._onOutput({
           type: 'comm_msg',
           content: {
@@ -423,6 +430,12 @@ export class CommManager {
         });
       },
       close: (data: Record<string, unknown> = {}): void => {
+        if (!isOpen()) {
+          return;
+        }
+        // Closed before onClose runs, which may close it again
+        this._widgets.delete(commId);
+        this._comms.delete(commId);
         this._onOutput({
           type: 'comm_close',
           content: {
@@ -431,8 +444,6 @@ export class CommManager {
           }
         });
         comm.onClose?.(data);
-        this._widgets.delete(commId);
-        this._comms.delete(commId);
       },
       display: (): void => {
         this.displayWidget(commId);

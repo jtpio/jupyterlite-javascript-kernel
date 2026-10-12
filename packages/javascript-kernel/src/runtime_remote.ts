@@ -105,6 +105,29 @@ export function createRemoteRuntimeApi(
   // of the cells, which run after their request
   let stdinAllowed = false;
 
+  // Read before the code of the cells runs, which can replace it
+  const realmClone = globalScope.structuredClone as
+    | typeof structuredClone
+    | undefined;
+
+  /**
+   * The data and the buffers of a comm message of the frontend as values of
+   * the realm of the cells. In an iframe, the runtime API runs in the page,
+   * and gets the objects of the page, which fail the checks of the cells
+   * like `buffers[0] instanceof ArrayBuffer` or `value instanceof Array`. In
+   * a Web Worker, they arrive cloned in the realm of the cells.
+   */
+  const toRealm = <T>(value: T): T => {
+    if (globalScope === globalThis || typeof realmClone !== 'function') {
+      return value;
+    }
+    try {
+      return realmClone.call(globalScope, value);
+    } catch {
+      return value;
+    }
+  };
+
   const ensureEvaluator = (): JavaScriptRuntimeEvaluator => {
     if (!evaluator) {
       throw new Error('Runtime is not initialized');
@@ -254,11 +277,12 @@ export function createRemoteRuntimeApi(
       parentMessageId?: string,
       parentHeader?: Parameters<IRemoteRuntimeApi['handleCommOpen']>[5]
     ): Promise<void> {
+      const inbound = toRealm({ data, buffers });
       await ensureEvaluator().handleCommOpen(
         commId,
         targetName,
-        data,
-        buffers,
+        inbound.data,
+        inbound.buffers,
         parentMessageId,
         parentHeader as Record<string, unknown> | undefined
       );
@@ -273,10 +297,11 @@ export function createRemoteRuntimeApi(
       parentMessageId?: string,
       parentHeader?: Parameters<IRemoteRuntimeApi['handleCommMsg']>[4]
     ): Promise<void> {
+      const inbound = toRealm({ data, buffers });
       await ensureEvaluator().handleCommMsg(
         commId,
-        data,
-        buffers,
+        inbound.data,
+        inbound.buffers,
         parentMessageId,
         parentHeader as Record<string, unknown> | undefined
       );
@@ -290,10 +315,11 @@ export function createRemoteRuntimeApi(
       parentMessageId?: string,
       parentHeader?: Parameters<IRemoteRuntimeApi['handleCommClose']>[4]
     ): Promise<void> {
+      const inbound = toRealm({ data, buffers });
       await ensureEvaluator().handleCommClose(
         commId,
-        data,
-        buffers,
+        inbound.data,
+        inbound.buffers,
         parentMessageId,
         parentHeader as Record<string, unknown> | undefined
       );

@@ -280,6 +280,12 @@ export class JavaScriptRuntimeEvaluator {
    * run after it ended, like the code after an `await` in an async function
    * it did not wait for, or its unhandled rejections: like the ones of the
    * cell before it, they go to that cell.
+   *
+   * The startup code, run without parent message and without execution
+   * count, can run while a cell awaits, like the code of a startup extension
+   * registered late: it keeps the output limit, the captures of the Output
+   * widgets and the interruption of that cell, so that an interrupt still
+   * stops the cell.
    */
   async execute(
     code: string,
@@ -290,13 +296,18 @@ export class JavaScriptRuntimeEvaluator {
   ): Promise<KernelMessage.IExecuteReplyMsg['content']> {
     const silent = options.silent === true;
     const previous = this._router.cell;
-    if (parentMessageId !== undefined || parentHeader !== undefined) {
+    const hasParent =
+      parentMessageId !== undefined || parentHeader !== undefined;
+    if (hasParent) {
       this._router.cell = toParent(parentMessageId, parentHeader, silent);
     } else if (silent) {
       this._router.cell = { ...previous, silent };
     }
     const cell = this._router.cell;
-    if (!silent) {
+    const startup = !hasParent && executionCount <= 0;
+    // The startup code running while a cell awaits shares its interruption
+    const nested = startup && this._guard.isExecuting;
+    if (!silent && !startup) {
       // A silent execution keeps the output limit of the cell before it
       this._outputs.resetStreamOutput(cell.header);
       // The async callbacks the cells before captured in Output widgets
@@ -308,13 +319,17 @@ export class JavaScriptRuntimeEvaluator {
       // not cleared on interrupt
       this._timers.enable();
     }
-    this._guard.beginExecution();
+    if (!nested) {
+      this._guard.beginExecution();
+    }
     this._router.beginExecution();
     try {
       return await this._execute(code, executionCount, options);
     } finally {
       this._router.endExecution();
-      this._guard.endExecution();
+      if (!nested) {
+        this._guard.endExecution();
+      }
       if (silent && this._router.cell === cell) {
         this._router.cell = previous;
       }

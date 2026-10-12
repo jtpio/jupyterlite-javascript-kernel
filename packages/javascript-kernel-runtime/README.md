@@ -150,7 +150,12 @@ The methods of the evaluator:
   must run the job queue of the engine until the promise settles: browsers do
   it on their own, QuickJS runs `JS_ExecutePendingJob` in a loop, and
   quickjs-emscripten `runtime.executePendingJobs()`. The `options` come from
-  the `execute_request`, see below.
+  the `execute_request`, see below. The startup code, run without a parent
+  message and with the execution count 0, can run while a cell waits for a
+  promise, like the code of a startup extension registered late: it keeps
+  the output limit, the `Output` captures and the interrupt of that cell,
+  which an interrupt still stops. A cell starting while the startup code
+  waits shares its interrupt, until the last of them ends.
 - `complete(code, cursorPos)`, `inspect(code, cursorPos, detailLevel)` and
   `isComplete(code)` are synchronous, and return the content of the replies.
   The cursor positions are in code points, like in the Jupyter protocol.
@@ -231,7 +236,11 @@ messages any window can post, like the `message` events of a window, without
 checking their source: they would run code in the realm. The evaluator reads
 the globals of `globalScope` when it is created, so when the realm is
 replaced, like an iframe reloaded with `location.reload()`, dispose it and
-create a new one for the new realm. A host running the cells in a hidden
+create a new one for the new realm. Such a host passes the `data` and the
+`buffers` of the comm messages as objects of the realm of the cells, like the
+JupyterLite kernel does with the `structuredClone()` of the iframe, so that the
+handlers of the cells can check them with `instanceof`, like in a Web Worker,
+whose messages arrive cloned in its realm. A host running the cells in a hidden
 iframe should keep it rendered, like the JupyterLite kernel does with
 `visibility: hidden` and a fixed size: in a `display: none` container, the
 elements of the cells have no layout, their `offsetWidth` and

@@ -103,6 +103,8 @@ export class DOMWidget extends Widget {
     names: ReadonlySet<string>
   ): void {
     super._validate(state, names);
+    // The layout and the style created here are closed by `Widget` when the
+    // state is rejected, here or by a subclass
     state.layout = this._toWidget('layout', state.layout, Layout);
     const styleClass = (this.constructor as typeof DOMWidget).styleClass;
     if (styleClass || (state.style !== null && state.style !== undefined)) {
