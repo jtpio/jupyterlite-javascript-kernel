@@ -3,7 +3,7 @@
 
 import type { KernelMessage } from '@jupyterlab/services';
 
-import { parse, type Comment } from 'acorn';
+import { Parser, type Comment } from 'acorn';
 import { simple as walkSimple } from 'acorn-walk';
 import { generate } from 'astring';
 
@@ -59,10 +59,16 @@ const PROBE_URL = '__jsKernelProbe__';
 const MAX_CELLS = 500;
 
 /**
- * The names of the parameters of the compiled cells, for the helpers the
- * kernel passes to them: the loop guard.
+ * The name of the helper defining the globals declared by the cells over the
+ * accessors of the global scope, like `name` in a window.
  */
-const HELPER_PARAMETERS = [LOOP_GUARD_NAME];
+const DEFINE_GLOBAL_NAME = '__jsKernelDefine__';
+
+/**
+ * The names of the parameters of the compiled cells, for the helpers the
+ * kernel passes to them: the loop guard and the definition of the globals.
+ */
+const HELPER_PARAMETERS = [LOOP_GUARD_NAME, DEFINE_GLOBAL_NAME];
 
 /**
  * The minimum number of frames of the stack traces: the frames of the kernel
@@ -91,16 +97,186 @@ const LOOP_KINDS: Record<string, LoopKind> = {
 export const ECMASCRIPT_EDITION = 2026;
 
 /**
- * Parse the code of a cell. Cells are parsed as modules, so that they can
- * use import declarations and top-level await.
+ * The options of acorn for the code of the cells.
+ */
+const PARSE_OPTIONS = {
+  ecmaVersion: 'latest',
+  allowAwaitOutsideFunction: true
+} as const;
+
+/**
+ * The types of the import and export statements.
+ */
+const MODULE_STATEMENTS = [
+  'ImportDeclaration',
+  'ExportNamedDeclaration',
+  'ExportDefaultDeclaration',
+  'ExportAllDeclaration'
+];
+
+/**
+ * The parser of the cells. The export lists of a cell can name the
+ * declarations of the previous cells, which acorn would report as undefined.
+ * A cell parsed as a script, with `allowImportExportEverywhere`, can use the
+ * import and export statements at the top level only, like a module.
+ */
+const CellParser = Parser.extend(
+  BaseParser =>
+    class extends BaseParser {
+      checkLocalExport(): void {
+        // The names can be declared by another cell
+      }
+
+      parse(): any {
+        const program = super.parse();
+        const parser = this as any;
+        if (parser.options.allowImportExportEverywhere) {
+          const topLevel = new Set(program.body);
+          walkSimple(
+            program,
+            Object.fromEntries(
+              MODULE_STATEMENTS.map(type => [
+                type,
+                (node: any) => {
+                  if (!topLevel.has(node)) {
+                    parser.raise(
+                      node.start,
+                      "'import' and 'export' may only appear at the top level"
+                    );
+                  }
+                }
+              ])
+            )
+          );
+        }
+        return program;
+      }
+    }
+);
+
+/**
+ * Parse the code of a cell, like a REPL does.
+ *
+ * A cell which is an object literal, like `{ a: 1, b: 2 }`, is parsed as an
+ * expression, not as a block. The other cells are parsed as modules, so that
+ * they can use the import and export declarations, or else as scripts, for
+ * the names reserved in strict mode, like `package`, with the import and
+ * export declarations allowed at the top level. The cells run in sloppy
+ * mode either way, with top-level await. When the code is neither a module
+ * nor a script, the error found the furthest in the code is thrown.
  */
 function parseCode(code: string, comments?: Comment[]): any {
-  return parse(code, {
-    ecmaVersion: 'latest',
-    sourceType: 'module',
-    onComment: comments
-  });
+  const objectLiteral = parseObjectLiteral(code, comments);
+  if (objectLiteral) {
+    return objectLiteral;
+  }
+  let error: any = null;
+  for (const sourceType of ['module', 'script'] as const) {
+    // The comments of a failed parse are dropped
+    const found: Comment[] = [];
+    try {
+      const ast = CellParser.parse(code, {
+        ...PARSE_OPTIONS,
+        sourceType,
+        allowImportExportEverywhere: sourceType === 'script',
+        onComment: found
+      });
+      comments?.push(...found);
+      return ast;
+    } catch (e: any) {
+      if (error === null || (e?.pos ?? -1) > (error?.pos ?? -1)) {
+        error = e;
+      }
+    }
+  }
+  throw error;
 }
+
+/**
+ * Parse a cell which is an object literal, like `{ a: 1 }`, or an expression
+ * starting with one, as a program with an expression statement. Returns null
+ * for the other cells, which are parsed as blocks, like Node.js REPL does.
+ */
+function parseObjectLiteral(code: string, comments?: Comment[]): any | null {
+  if (!/^\s*\{/.test(code) || !/\}\s*$/.test(code)) {
+    return null;
+  }
+  const found: Comment[] = [];
+  const expression = safe(
+    () =>
+      CellParser.parseExpressionAt(code, code.indexOf('{'), {
+        ...PARSE_OPTIONS,
+        sourceType: 'module',
+        onComment: found
+      }) as any,
+    null
+  );
+  if (!expression || code.slice(expression.end).trim() !== '') {
+    return null;
+  }
+  comments?.push(...found);
+  return {
+    type: 'Program',
+    start: 0,
+    end: code.length,
+    sourceType: 'module',
+    body: [
+      {
+        type: 'ExpressionStatement',
+        start: expression.start,
+        end: expression.end,
+        expression
+      }
+    ]
+  };
+}
+
+/**
+ * The declaration of an export statement, like `const a = 1` for
+ * `export const a = 1`, or null for the exports without a named declaration.
+ * The other statements are returned as they are.
+ */
+function unwrapExport(node: any): any | null {
+  if (
+    node.type !== 'ExportNamedDeclaration' &&
+    node.type !== 'ExportDefaultDeclaration' &&
+    node.type !== 'ExportAllDeclaration'
+  ) {
+    return node;
+  }
+  const declaration = node.declaration;
+  if (
+    declaration?.type === 'VariableDeclaration' ||
+    ((declaration?.type === 'FunctionDeclaration' ||
+      declaration?.type === 'ClassDeclaration') &&
+      declaration.id)
+  ) {
+    return declaration;
+  }
+  return null;
+}
+
+/**
+ * The message of the error for a declaration of a global which can not be
+ * replaced, like `location` in a window.
+ */
+function fixedGlobalMessage(name: string): string {
+  return `'${name}' is a built-in global and cannot be redeclared in a cell; pick another name`;
+}
+
+/**
+ * How a top-level declaration of a cell is kept in the global scope:
+ * - `assign`: assigned, for the names without a global or with a writable
+ *   one
+ * - `setter`: declared in the cell, then assigned, for the event handlers
+ *   like `onmessage`, so that their setter installs the handler
+ * - `define`: declared in the cell, then defined as a writable property of
+ *   the global scope, for the accessors like `name` or `status`, whose
+ *   setter would convert or ignore the value
+ * - `fixed`: a global which can not be replaced, like `location` or `top`
+ *   in a window, which is a syntax error
+ */
+type GlobalKind = 'assign' | 'setter' | 'define' | 'fixed';
 
 /**
  * The symbol of the method returning the MIME bundle of an object.
@@ -388,6 +564,20 @@ export class JavaScriptExecutor {
       throw this._toCellSyntaxError(error, name);
     }
 
+    const fixed = this._fixedGlobalDeclaration(ast);
+    if (fixed) {
+      this._registerCell(name, createCellSource({ name: displayName, code }));
+      const { line, column } = offsetToLineColumn(
+        lineStarts(code),
+        fixed.start
+      );
+      throw new CellSyntaxError(fixedGlobalMessage(fixed.name), {
+        token: name,
+        line,
+        column
+      });
+    }
+
     const { edited, map, hoisted, withReturn } = this._rewriteCell(
       code,
       ast,
@@ -416,13 +606,14 @@ export class JavaScriptExecutor {
       this._editedCode.set(name, edited);
     }
 
-    // The loop guard is a parameter of the compiled function, which the code
+    // The helpers are parameters of the compiled function, which the code
     // of the cell can not replace
     const compiled = this._compile(body);
     const guard = this._loopGuard?.fn;
+    const defineGlobal = this._defineGlobal;
     return {
       asyncFunction: function (this: unknown) {
-        return compiled.call(this, guard);
+        return compiled.call(this, guard, defineGlobal);
       },
       withReturn,
       docs: this._declarationDocs(code, ast, comments),
@@ -641,7 +832,13 @@ export class JavaScriptExecutor {
     try {
       const ast = parseCode(code);
 
-      for (const node of ast.body) {
+      for (const statement of ast.body) {
+        // The declarations of the export statements are kept, the other
+        // exports are left out
+        const node = unwrapExport(statement);
+        if (!node) {
+          continue;
+        }
         switch (node.type) {
           case 'FunctionDeclaration':
             // Store function by name - later definitions override
@@ -1039,19 +1236,16 @@ export class JavaScriptExecutor {
   }
 
   /**
-   * Collect identifiers from a declaration pattern.
+   * Collect the identifier nodes of a declaration pattern.
    */
-  private _collectDeclaredIdentifiers(
-    pattern: any,
-    identifiers: string[]
-  ): void {
+  private _collectDeclaredIdentifiers(pattern: any, identifiers: any[]): void {
     if (!pattern) {
       return;
     }
 
     switch (pattern.type) {
       case 'Identifier':
-        identifiers.push(pattern.name);
+        identifiers.push(pattern);
         break;
       case 'ObjectPattern':
         for (const prop of pattern.properties) {
@@ -1079,39 +1273,143 @@ export class JavaScriptExecutor {
   }
 
   /**
+   * Get the identifier nodes declared by a function, class or variable
+   * declaration.
+   */
+  private _declaredIdentifiers(node: any): any[] {
+    const identifiers: any[] = [];
+    if (node.type === 'VariableDeclaration') {
+      for (const declaration of node.declarations) {
+        this._collectDeclaredIdentifiers(declaration.id, identifiers);
+      }
+    } else if (
+      ['FunctionDeclaration', 'ClassDeclaration'].includes(node.type) &&
+      node.id
+    ) {
+      identifiers.push(node.id);
+    }
+    return identifiers;
+  }
+
+  /**
    * Get the names declared by a function, class or variable declaration.
    */
   private _declaredNames(node: any): string[] {
-    const names: string[] = [];
-    if (node.type === 'VariableDeclaration') {
-      for (const declaration of node.declarations) {
-        this._collectDeclaredIdentifiers(declaration.id, names);
+    return this._declaredIdentifiers(node).map(identifier => identifier.name);
+  }
+
+  /**
+   * How a top-level declaration named `name` is kept in the global scope,
+   * from the property of the global scope with this name.
+   */
+  private _globalKind(name: string): GlobalKind {
+    let scope = this._globalScope;
+    let own = true;
+    while (scope) {
+      const current = scope;
+      const descriptor = safe(() =>
+        Object.getOwnPropertyDescriptor(current, name)
+      );
+      if (descriptor) {
+        if (descriptor.writable === true) {
+          return 'assign';
+        }
+        if (name.startsWith('on') && descriptor.set) {
+          return 'setter';
+        }
+        // A property of a prototype is shadowed by the defined one
+        return own && !descriptor.configurable ? 'fixed' : 'define';
       }
-    } else if (
-      ['FunctionDeclaration', 'ClassDeclaration'].includes(node.type)
-    ) {
-      names.push(node.id.name);
+      scope = safe(() => Object.getPrototypeOf(current), null);
+      own = false;
+    }
+    return 'assign';
+  }
+
+  /**
+   * The first identifier declared at the top level of a cell for a global
+   * which can not be replaced, like `location` in a window, if any.
+   */
+  private _fixedGlobalDeclaration(ast: any): any | null {
+    for (const statement of ast.body) {
+      const node = unwrapExport(statement);
+      if (!node) {
+        continue;
+      }
+      const identifiers =
+        node.type === 'ImportDeclaration'
+          ? node.specifiers.map((specifier: any) => specifier.local)
+          : this._declaredIdentifiers(node);
+      const kept = this._keptGlobalNames(node);
+      for (const identifier of identifiers) {
+        if (
+          !kept.has(identifier.name) &&
+          this._globalKind(identifier.name) === 'fixed'
+        ) {
+          return identifier;
+        }
+      }
+    }
+    return null;
+  }
+
+  /**
+   * The names of the globals which can not be replaced declared without a
+   * value by a var declaration, like `var undefined;`. As in a script, the
+   * declaration keeps the global: the name is assigned like the other var
+   * declarations, `var window;` becoming `    window;`.
+   */
+  private _keptGlobalNames(node: any): Set<string> {
+    const names = new Set<string>();
+    if (node.type === 'VariableDeclaration' && node.kind === 'var') {
+      for (const declaration of node.declarations) {
+        if (
+          !declaration.init &&
+          declaration.id.type === 'Identifier' &&
+          this._globalKind(declaration.id.name) === 'fixed'
+        ) {
+          names.add(declaration.id.name);
+        }
+      }
     }
     return names;
   }
 
   /**
-   * Whether a node declares a global that cannot hold any value, like `name`
-   * or `location`.
+   * The code copying the local declaration of a name to the global scope,
+   * for the names declared over a global without a writable property.
    */
-  private _declaresBuiltinGlobal(node: any): boolean {
-    return this._declaredNames(node).some(name => {
-      let scope = this._globalScope;
-      while (scope) {
-        const descriptor = Object.getOwnPropertyDescriptor(scope, name);
-        if (descriptor) {
-          return descriptor.writable !== true;
-        }
-        scope = Object.getPrototypeOf(scope);
-      }
-      return false;
-    });
+  private _copyToGlobalCode(name: string): string {
+    return this._globalKind(name) === 'define'
+      ? `${DEFINE_GLOBAL_NAME}(this, "${name}", ${name});`
+      : this._addToGlobalThisCode(name);
   }
+
+  /**
+   * Define a global declared by a cell as a writable property of the global
+   * scope, and of the `this` of the cell when it is another object. Called by
+   * the cells for the names of the accessors of the global scope.
+   */
+  private _defineGlobal = (scope: unknown, name: string, value: unknown) => {
+    for (const target of new Set([this._globalScope, scope])) {
+      if (
+        target === null ||
+        (typeof target !== 'object' && typeof target !== 'function')
+      ) {
+        continue;
+      }
+      try {
+        Object.defineProperty(target, name, {
+          value,
+          writable: true,
+          configurable: true,
+          enumerable: true
+        });
+      } catch {
+        throw new TypeError(fixedGlobalMessage(name));
+      }
+    }
+  };
 
   /**
    * Transform import source with magic imports.
@@ -1219,6 +1517,7 @@ export class JavaScriptExecutor {
    * Rewrite the code of a cell to run in the body of an async function:
    * import statements to dynamic imports, top-level declarations to
    * assignments to the global scope, and the last expression to a return.
+   * The export keywords are removed, keeping the declarations.
    *
    * The rewrites are edits of the code of the cell, which keep its lines,
    * with a map of the positions for the tracebacks.
@@ -1237,23 +1536,32 @@ export class JavaScriptExecutor {
     // First, so that the end of a loop goes before the texts inserted after
     // the statement
     this._instrumentLoops(edits, ast, cellName);
+    // The var declarations are hoisted first, then the functions
+    const hoistedVars: string[] = [];
     const hoisted: string[] = [];
     // The names of the builtin globals that the code of the cell can assign
     // again after their declaration
     const reassignable = new Set<string>();
 
-    ast.body.forEach((node: any, i: number) => {
+    ast.body.forEach((statement: any, i: number) => {
+      const node = this._rewriteExport(edits, statement, i);
+      if (!node) {
+        return;
+      }
+      // The var declarations without a value of the globals which can not be
+      // replaced are assigned, which keeps the global
+      const kept = this._keptGlobalNames(node);
+      const names = this._declaredNames(node).filter(name => !kept.has(name));
       if (node.type === 'ImportDeclaration') {
         this._rewriteImport(edits, node, i);
-      } else if (this._declaresBuiltinGlobal(node)) {
+      } else if (names.some(name => this._globalKind(name) !== 'assign')) {
         // Keep the declaration local, and copy it to the global scope where
         // it is declared, so that it is kept if a later line throws
-        const names = this._declaredNames(node);
         if (node.type !== 'VariableDeclaration' || node.kind !== 'const') {
           names.forEach(name => reassignable.add(name));
         }
         const copies = names
-          .map(name => this._addToGlobalThisCode(name))
+          .map(name => this._copyToGlobalCode(name))
           .join(' ');
         const separator =
           node.type === 'VariableDeclaration' && code[node.end - 1] !== ';'
@@ -1271,6 +1579,15 @@ export class JavaScriptExecutor {
         edits.insert(node.end, ';');
       } else if (node.type === 'VariableDeclaration') {
         this._rewriteVariableDeclaration(edits, node);
+        // A var declaration keeps the value of the global, and the global
+        // exists before the code of the cell runs
+        if (node.kind === 'var') {
+          for (const name of this._declaredNames(node)) {
+            hoistedVars.push(
+              `if (!("${name}" in globalThis)) globalThis["${name}"] = undefined;`
+            );
+          }
+        }
       }
     });
 
@@ -1289,7 +1606,7 @@ export class JavaScriptExecutor {
     // last expression, with the values of their last assignments
     if (reassignable.size > 0) {
       const copies = [...reassignable]
-        .map(name => this._addToGlobalThisCode(name))
+        .map(name => this._copyToGlobalCode(name))
         .join(' ');
       if (withReturn) {
         edits.insert(last.start, `;${copies} `);
@@ -1304,7 +1621,58 @@ export class JavaScriptExecutor {
     }
 
     const { code: edited, map } = edits.apply();
-    return { edited, map, hoisted: hoisted.join(' '), withReturn };
+    return {
+      edited,
+      map,
+      hoisted: [...hoistedVars, ...hoisted].join(' '),
+      withReturn
+    };
+  }
+
+  /**
+   * Remove the export keywords of a top-level statement, since a cell is not
+   * a module, and return the declaration to rewrite: `export const a = 1`
+   * declares `a` like `const a = 1`. The exported lists are removed, the
+   * re-exports load their module, and the anonymous default exports are
+   * evaluated. Returns null when the statement is rewritten. The other
+   * statements are returned as they are.
+   */
+  private _rewriteExport(edits: SourceEdits, node: any, index: number): any {
+    const code = edits.source;
+    if (
+      node.type !== 'ExportNamedDeclaration' &&
+      node.type !== 'ExportDefaultDeclaration' &&
+      node.type !== 'ExportAllDeclaration'
+    ) {
+      return node;
+    }
+    if (node.source) {
+      this._rewriteImport(edits, { ...node, specifiers: [] }, index);
+      return null;
+    }
+    // Replace the export keywords, or the export list, with a semicolon and
+    // spaces, keeping the columns and the line breaks. The semicolon ends the
+    // previous statement when it has none, like `f()` before `export default
+    // (a)`, which would be a call of its result otherwise.
+    const declaration = node.declaration;
+    const end = declaration ? declaration.start : node.end;
+    edits.replace(
+      node.start,
+      end,
+      ';' + code.slice(node.start + 1, end).replace(/[^\r\n\u2028\u2029]/g, ' ')
+    );
+    if (!declaration) {
+      return null;
+    }
+    const unwrapped = unwrapExport(node);
+    if (unwrapped) {
+      return unwrapped;
+    }
+    // An anonymous function or class, or an expression, which could start
+    // with a brace
+    edits.insert(declaration.start, '(');
+    edits.insert(declaration.end, code[node.end - 1] === ';' ? ')' : ');');
+    return null;
   }
 
   /**
@@ -1405,14 +1773,15 @@ export class JavaScriptExecutor {
       localNames.push(namespaceImportName);
     }
     for (const name of localNames) {
-      statements.push(this._addToGlobalThisCode(name));
+      statements.push(this._copyToGlobalCode(name));
     }
     edits.replace(node.start, node.end, statements.join(' ') + lineBreaks);
   }
 
   /**
    * Rewrite a variable declaration to an assignment, e.g. `let a = 1, b;`
-   * to `    a = 1, b = undefined;`.
+   * to `    a = 1, b = undefined;`. The var declarations without a value keep
+   * the value of the global: `var b;` becomes `    b;`.
    */
   private _rewriteVariableDeclaration(edits: SourceEdits, node: any): void {
     const declarations = node.declarations;
@@ -1426,7 +1795,7 @@ export class JavaScriptExecutor {
       (isPattern ? ';(' : '').padEnd(node.kind.length)
     );
     for (const declaration of declarations) {
-      if (!declaration.init) {
+      if (!declaration.init && node.kind !== 'var') {
         edits.insert(declaration.end, ' = undefined');
       }
     }

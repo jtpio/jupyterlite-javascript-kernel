@@ -189,6 +189,17 @@ Limits of automatic cleanup:
 - It will not automatically remove all event listeners or timers.
 - It cannot safely revert all stateful third-party module internals.
 
+## Cells
+
+The cells run like in a REPL, such as the Node.js REPL:
+
+- The top-level declarations (`var`, `let`, `const`, `function`, `class` and the imported names) become globals, shared with the next cells. A cell can declare a name again, and the `const` and `let` declarations are not constant: `const a = 1` followed by `a = 2` works.
+- A `var` declaration without a value keeps the value of the variable, and the variable exists before its declaration, like in a script: `var z;` does not reset `z`, and `console.log(y); var y = 1` prints `undefined`.
+- A cell which is an object literal, like `{ a: 1, b: 2 }`, shows the object, instead of running a block.
+- The `export` keywords are ignored, so the code of a module can be pasted in a cell: `export const x = 1` declares `x`, the `export { ... }` lists are removed, and `export ... from '...'` loads the module.
+- The cells can use top-level `await` and the `import` statements of the modules, and they run in sloppy mode, so the names reserved only in strict mode, like `package` or `interface`, can be declared, also in a cell with `import` or `export` statements.
+- The declarations named like a global of the browser keep their value: after `const name = { a: 1 }`, `name.a` is `1` in the next cells, instead of `window.name` turning the value to a string, and `function onmessage(event) {}` installs the event handler. The globals which can not be replaced, like `location`, `top`, `window` and `document` in `JavaScript (IFrame)`, can not be declared: `const location = 'Paris'` fails with `SyntaxError: 'location' is a built-in global and cannot be redeclared in a cell; pick another name`, instead of navigating the iframe away. As in a script, a `var` declaration without a value, like `var window;`, keeps the global.
+
 ## Imports
 
 The `import` statements of the cells load the npm packages by name from the [jsDelivr](https://www.jsdelivr.com/) CDN, with the magic imports:

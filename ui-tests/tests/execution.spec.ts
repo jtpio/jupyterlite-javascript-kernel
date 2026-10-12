@@ -92,6 +92,65 @@ for (const kernel of KERNELS) {
       expect(await page.notebook.getCellTextOutput(index)).toEqual(["'set'"]);
     });
 
+    test('Keep declarations named like the accessors of the global scope', async ({
+      page
+    }) => {
+      // `name` is a global of both the window and the Web Worker, which
+      // only holds strings
+      await runCode(page, 'const name = { a: 1 }');
+      let index = await runCode(page, 'name.a');
+      expect(await page.notebook.getCellTextOutput(index)).toEqual(['1']);
+
+      // The functions named like an event handler install the handler
+      await runCode(
+        page,
+        'function onmessageerror(event) {\nglobalThis.received = event.data;\n}'
+      );
+      index = await runCode(
+        page,
+        "dispatchEvent(new MessageEvent('messageerror', { data: 'hi' }));\nreceived"
+      );
+      expect(await page.notebook.getCellTextOutput(index)).toEqual(["'hi'"]);
+    });
+
+    test('Run cells like a REPL', async ({ page }) => {
+      // The export keywords are removed, keeping the declarations
+      await runCode(
+        page,
+        'export const x = 1;\nexport function double(n) { return 2 * n; }'
+      );
+      let index = await runCode(page, 'double(x)');
+      expect(await page.notebook.getCellTextOutput(index)).toEqual(['2']);
+
+      // A default export after a statement without a semicolon is not an
+      // argument of the statement
+      index = await runCode(
+        page,
+        "console.log('module')\nexport default { a: 1 }"
+      );
+      await expect(await getOutputs(page, index)).toHaveText(['module\n']);
+
+      // The names reserved in modules can be declared, also next to an
+      // import statement
+      index = await runCode(page, 'const package = 3;\npackage');
+      expect(await page.notebook.getCellTextOutput(index)).toEqual(['3']);
+      index = await runCode(
+        page,
+        "import answer from 'data:text/javascript,export default 4';\nconst interface = answer;\ninterface"
+      );
+      expect(await page.notebook.getCellTextOutput(index)).toEqual(['4']);
+
+      // A var declaration without a value keeps the value of the variable,
+      // and the variable exists before its declaration
+      await runCode(page, 'var z = 3;');
+      index = await runCode(page, 'var z;\nz');
+      expect(await page.notebook.getCellTextOutput(index)).toEqual(['3']);
+      index = await runCode(page, 'console.log(y);\nvar y = 1;');
+      await expect(
+        await getOutputs(page, index, 'application/vnd.jupyter.stdout')
+      ).toHaveText(['undefined\n']);
+    });
+
     test('Await promises at the top level', async ({ page }) => {
       const index = await runCode(
         page,
@@ -137,24 +196,28 @@ for (const kernel of KERNELS) {
     });
 
     test('Show syntax errors', async ({ page }) => {
-      const index = await runCode(page, 'let = 1');
+      const index = await runCode(page, 'const = 1');
       expect(await page.notebook.getCellTextOutput(index)).toEqual([
-        "In[1]:1\nlet = 1\n^\n\nSyntaxError: The keyword 'let' is reserved"
+        'In[1]:1\nconst = 1\n      ^\n\nSyntaxError: Unexpected token'
       ]);
     });
 
     test('Show object literals', async ({ page }) => {
-      const index = await runCode(
-        page,
-        '({ language: "JavaScript", year: 1995 })'
-      );
+      // A cell which is an object literal is not a block, with or without
+      // parentheses
+      for (const code of [
+        '({ language: "JavaScript", year: 1995 })',
+        '{ language: "JavaScript", year: 1995 }'
+      ]) {
+        const index = await runCode(page, code);
 
-      const json = (await getOutputs(page, index)).and(
-        page.locator('.jp-RenderedJSON')
-      );
-      await expect(json).toContainText('language');
-      await expect(json).toContainText('"JavaScript"');
-      await expect(json).toContainText('1995');
+        const json = (await getOutputs(page, index)).and(
+          page.locator('.jp-RenderedJSON')
+        );
+        await expect(json).toContainText('language');
+        await expect(json).toContainText('"JavaScript"');
+        await expect(json).toContainText('1995');
+      }
     });
   });
 }
@@ -213,6 +276,26 @@ test.describe(`IFrame runtime (${IFRAME_KERNEL.displayName})`, () => {
       'RuntimeReloadedError: The code reloaded or left the page of the iframe, so the runtime was restarted: the variables, functions and imports of the previous cells are lost. Run those cells again.'
     );
 
+    index = await runCode(page, '1 + 1');
+    expect(await page.notebook.getCellTextOutput(index)).toEqual(['2']);
+  });
+
+  test('Refuse to redeclare the globals which can not be replaced', async ({
+    page
+  }) => {
+    // Assigning `location` would navigate the iframe away
+    let index = await runCode(page, "const location = 'Paris';");
+    expect(await page.notebook.getCellTextOutput(index)).toEqual([
+      "In[1]:1\nconst location = 'Paris';\n      ^\n\nSyntaxError: 'location' is a built-in global and cannot be redeclared in a cell; pick another name"
+    ]);
+
+    // A var declaration without a value keeps the global, as in a script
+    index = await runCode(page, 'var window;\nwindow === globalThis');
+    expect(await page.notebook.getCellTextOutput(index)).toEqual(['true']);
+
+    // The kernel keeps running, in the same page
+    index = await runCode(page, 'typeof location');
+    expect(await page.notebook.getCellTextOutput(index)).toEqual(["'object'"]);
     index = await runCode(page, '1 + 1');
     expect(await page.notebook.getCellTextOutput(index)).toEqual(['2']);
   });

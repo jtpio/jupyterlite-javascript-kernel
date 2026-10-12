@@ -4,8 +4,9 @@ An engine-neutral Jupyter runtime for JavaScript: the part of a JavaScript
 kernel that runs next to the user code. It covers:
 
 - the rewriting of the cells with [acorn](https://github.com/acornjs/acorn)
-  and [astring](https://github.com/davidbonnet/astring): top-level `await`,
-  declarations kept in the global scope, `import` statements
+  and [astring](https://github.com/davidbonnet/astring), like a REPL:
+  top-level `await`, declarations kept in the global scope, `import` and
+  `export` statements, object literal cells
 - Node.js-style `inspect()` of the values, and the `console`
 - `display()` and the rich outputs (HTML, Markdown, SVG, images, JSON, ...)
 - the tracebacks of the errors, with their locations in the cells
@@ -266,6 +267,37 @@ thread running the cells. The options left out, or `undefined`, keep their
 value. `new ExecutorConfig(options)` creates a configuration from them, and
 `executor.config.update(options)` changes the configuration of an executor:
 the next cells use it.
+
+## Cells
+
+`executor.makeAsyncFromCode(code, { name })` compiles a cell to an async
+function, called with the global scope as `this`, in sloppy mode:
+
+- A cell which is an object literal, like `{ a: 1 }`, is parsed as an
+  expression. The other cells are parsed as modules, or else as scripts, for
+  the names reserved in strict mode like `package`, with the `import` and
+  `export` statements allowed at the top level. When both fail, the
+  syntax error found the furthest in the code is thrown. `isComplete`,
+  `extractImports` and `registerCode` parse the cells the same way.
+- The `import` statements become dynamic imports. The `export` keywords are
+  removed, keeping the declarations, the export lists are removed, and the
+  re-exports load their module. A semicolon replaces the first character of
+  the removed code, which ends the previous statement when it has none.
+- The top-level declarations become assignments to the global scope. The
+  `var` declarations are hoisted, as `if (!("x" in globalThis))
+globalThis["x"] = undefined`, and keep the value of the global when they
+  have no value.
+- The declarations named like a property of the global scope which is not a
+  writable data property are kept in the cell and copied to the global scope
+  after the declaration and at the end of the cell. The accessors, like
+  `name` or `status` in a window, are replaced with a writable data property
+  (`Object.defineProperty`), since their setter would convert or ignore the
+  value, except the event handlers (`on...`), which are assigned to install
+  the handler. The non-configurable properties of the global scope, like
+  `location`, `top`, `window` and `document` in a window, or `undefined`,
+  can not be replaced: their declaration throws a `CellSyntaxError` at the
+  declared name, before the cell runs, except a `var` declaration without a
+  value, like `var window;`, which keeps the global, as in a script.
 
 ## Interrupts and loop timeout
 
