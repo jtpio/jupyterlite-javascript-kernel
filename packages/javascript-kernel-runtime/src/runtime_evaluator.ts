@@ -897,6 +897,9 @@ export class JavaScriptRuntimeEvaluator {
         continue;
       }
       this._lastValueGetters.set(name, get);
+      // A declaration of the name in a cell assigns it when it runs, so a
+      // cell which throws before keeps the error
+      this._executor.registerReplacingSetter(set);
       // The documentation is the one of the value once it was replaced
       introspection.setGlobalDoc(name, () =>
         this._ownsLastValue(name) ? doc : undefined

@@ -113,7 +113,8 @@ They are configurable accessors of `globalScope`, not enumerable, installed
 only when `globalScope` has no such name, like the `_` of a library loaded
 by the page. Assigning one replaces it with a plain property, and so does a
 declaration or an import of the name in a cell, like
-`import _ from 'lodash-es'`: the evaluator then stops changing it.
+`import _ from 'lodash-es'`, when it runs: the evaluator then stops changing
+it.
 `dispose()` removes the accessors, and keeps the values the cells assigned.
 The contextual help documents them with
 `executor.introspection.setGlobalDoc(name, doc)`, which documents a global
@@ -333,12 +334,12 @@ The `import` statements of the cells load the npm packages from jsDelivr by
 default. The `magicImports` of `executorOptions` change it, with the fields of
 `IMagicImportsConfig`, all optional:
 
-| Field             | Description                                                                                                                                                                        |
-| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `enabled`         | Whether the package names are loaded from the CDN, true by default. Without it, the `import` statements become `import(source)`, handled by the module loader of the engine.       |
-| `baseUrl`         | The base URL of the CDN, `https://cdn.jsdelivr.net/` by default. The engine would resolve a relative URL against the module running the cells, if at all, so pass an absolute URL. |
-| `enableAutoNpm`   | Whether `npm/` is added in front of the package names, like jsDelivr serves them, true by default.                                                                                 |
-| `appendEsmSuffix` | Whether `/+esm` is added after the package paths which do not end with `.js`, `.mjs`, `.cjs`, `.wasm` or `+esm`, for jsDelivr, true by default.                                    |
+| Field             | Description                                                                                                                                                                                                                                                                                               |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`         | Whether the package names are loaded from the CDN, true by default. Without it, the `import` statements become `import(source)`, handled by the module loader of the engine.                                                                                                                              |
+| `baseUrl`         | The base URL of the CDN, `https://cdn.jsdelivr.net/` by default. The engine would resolve a relative URL against the module running the cells, if at all, so pass an absolute URL.                                                                                                                        |
+| `enableAutoNpm`   | Whether `npm/` is added in front of the package names, like jsDelivr serves them, true by default.                                                                                                                                                                                                        |
+| `appendEsmSuffix` | Whether `/+esm` is added after the package paths which do not end with `.js`, `.mjs`, `.cjs`, `.wasm` or `+esm`, for jsDelivr, true by default. The imports with a `type` attribute, in their statement or in the options of `import()` written in the code, like `{ with: { type: 'json' } }`, get none. |
 
 For example, without network module loading, turn off the magic imports:
 
@@ -408,11 +409,13 @@ DOM elements and an image of the canvases, and else its text, formatted by
 function, called with the global scope as `this`, in sloppy mode:
 
 - A cell which is an object literal, like `{ a: 1 }`, is parsed as an
-  expression. The other cells are parsed as modules, or else as scripts, for
-  the names reserved in strict mode like `package`, with the `import` and
-  `export` statements allowed at the top level. When both fail, the
-  syntax error found the furthest in the code is thrown. `isComplete`,
-  `extractImports` and `registerCode` parse the cells the same way.
+  expression, and put in parentheses when it is not returned, like
+  `{ a, b } = obj`. The other cells are parsed as modules, or else as
+  scripts, for the names reserved in strict mode like `package`, with the
+  `import` and `export` statements allowed at the top level. When both
+  fail, the syntax error found the furthest in the code is thrown.
+  `isComplete`, `extractImports` and `registerCode` parse the cells the same
+  way.
 - The `import` statements become dynamic imports, with their attributes
   (`with { type: 'json' }`), followed by a check of each imported name, `in`
   the module namespace: a name that the module does not export throws a
@@ -420,7 +423,12 @@ function, called with the global scope as `this`, in sloppy mode:
 export named 'y'`, before any name is bound. The `export` keywords are
   removed, keeping the declarations, the export lists are removed, and the
   re-exports load their module. A semicolon replaces the first character of
-  the removed code, which ends the previous statement when it has none.
+  the removed code, which ends the previous statement when it has none. The
+  expression of a default export, with its parentheses, is evaluated in
+  parentheses: `export default (a)` becomes `;              ((a));`.
+- `import.meta`, also in a function, throws a `CellSyntaxError` at its
+  location, `Cannot use 'import.meta' outside a module`, before the cell
+  runs, since the cells are compiled as the body of a function.
 - The sources of the `import()` expressions go through the magic imports
   too, in the functions of the cell as well: a string is rewritten when the
   cell is compiled, and the other sources when the import runs, by a helper
@@ -438,13 +446,21 @@ export named 'y'`, before any name is bound. The `export` keywords are
   `var` declarations are hoisted, as `if (!("x" in globalThis))
 globalThis["x"] = undefined`, and keep the value of the global when they
   have no value.
-- The declarations named like a property of the global scope which is not a
-  writable data property are kept in the cell and copied to the global scope
-  after the declaration and at the end of the cell. The accessors, like
-  `name` or `status` in a window, are replaced with a writable data property
-  (`Object.defineProperty`), since their setter would convert or ignore the
-  value, except the event handlers (`on...`), which are assigned to install
-  the handler. The non-configurable properties of the global scope, like
+- The `using` and `await using` declarations are kept in the cell, which
+  disposes their resource when it ends, like a module, and copied to the
+  global scope after the declaration.
+- The declarations named like an accessor of the global scope, like `name`
+  or `status` in a window, are assignments too, after the accessor is
+  replaced with a writable data property keeping its value
+  (`Object.defineProperty`) when the cell starts, since its setter would
+  convert or ignore the value. The functions of the cell read and assign the
+  global, like the next cells. The event handlers (`on...`) are assigned,
+  which installs the handler: they hold what their setter keeps, `null` for
+  a value which is not a function. The accessors registered with
+  `executor.registerReplacingSetter(set)`, whose setter replaces them with
+  a plain property, like `_` and `_error`, are assigned too, when the
+  declaration runs. A `var` declaration without a value keeps these globals
+  as they are. The non-configurable properties of the global scope, like
   `location`, `top`, `window` and `document` in a window, or `undefined`,
   can not be replaced: their declaration throws a `CellSyntaxError` at the
   declared name, before the cell runs, except a `var` declaration without a

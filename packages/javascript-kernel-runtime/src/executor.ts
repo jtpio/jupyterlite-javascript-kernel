@@ -3,7 +3,7 @@
 
 import type { KernelMessage } from '@jupyterlab/services';
 
-import { Parser, type Comment } from 'acorn';
+import { Parser, tokenizer, type Comment } from 'acorn';
 import { simple as walkSimple } from 'acorn-walk';
 import { generate, GENERATOR } from 'astring';
 
@@ -285,6 +285,50 @@ function missingExportMessage(source: string, name: string): string {
 }
 
 /**
+ * The start of the expression of a default export, after `export default`,
+ * with its parentheses, which acorn leaves out of the node of the
+ * expression: the `(` of `export default (a)`.
+ */
+function defaultExportStart(code: string, node: any): number {
+  const head = code.slice(node.start, node.declaration.start);
+  const tokens = [...tokenizer(head, PARSE_OPTIONS)];
+  return tokens.length > 2
+    ? node.start + tokens[2].start
+    : node.declaration.start;
+}
+
+/**
+ * The attributes of the options of an import() written in the code, like
+ * `{ type: 'json' }` for `import('./data.json', { with: { type: 'json' } })`.
+ * Undefined when the options are not an object literal with string values.
+ */
+function staticImportAttributes(
+  options: any
+): Record<string, string> | undefined {
+  if (options?.type !== 'ObjectExpression') {
+    return undefined;
+  }
+  const property = options.properties.find(
+    (p: any) =>
+      p.type === 'Property' &&
+      !p.computed &&
+      (p.key.name ?? p.key.value) === 'with'
+  );
+  if (property?.value.type !== 'ObjectExpression') {
+    return undefined;
+  }
+  const attributes: Record<string, string> = {};
+  for (const p of property.value.properties) {
+    const value = p.type === 'Property' && !p.computed && staticString(p.value);
+    if (typeof value !== 'string') {
+      return undefined;
+    }
+    attributes[p.key.name ?? String(p.key.value)] = value;
+  }
+  return attributes;
+}
+
+/**
  * The attributes of an import statement, like `{ type: 'json' }` for
  * `import data from './data.json' with { type: 'json' }`. Undefined when the
  * statement has none.
@@ -346,6 +390,21 @@ function staticString(node: any): string | null {
 }
 
 /**
+ * The first `import.meta` of a cell, in its functions too, if any.
+ */
+function findImportMeta(ast: any): any | null {
+  let found: any = null;
+  walkSimple(ast, {
+    MetaProperty: (node: any) => {
+      if (node.meta.name === 'import' && (!found || node.start < found.start)) {
+        found = node;
+      }
+    }
+  });
+  return found;
+}
+
+/**
  * The message of the error for a declaration of a global which can not be
  * replaced, like `location` in a window.
  */
@@ -357,11 +416,12 @@ function fixedGlobalMessage(name: string): string {
  * How a top-level declaration of a cell is kept in the global scope:
  * - `assign`: assigned, for the names without a global or with a writable
  *   one
- * - `setter`: declared in the cell, then assigned, for the event handlers
- *   like `onmessage`, so that their setter installs the handler
- * - `define`: declared in the cell, then defined as a writable property of
- *   the global scope, for the accessors like `name` or `status`, whose
- *   setter would convert or ignore the value
+ * - `setter`: assigned, for the event handlers like `onmessage`, so that
+ *   their setter installs the handler, and for the accessors whose setter
+ *   replaces them, like `_` (see `registerReplacingSetter`)
+ * - `define`: defined as a writable property of the global scope, keeping
+ *   its value, when the cell starts, then assigned, for the accessors like
+ *   `name` or `status`, whose setter would convert or ignore the value
  * - `fixed`: a global which can not be replaced, like `location` or `top`
  *   in a window, which is a syntax error
  */
@@ -624,6 +684,17 @@ export class JavaScriptExecutor {
   }
 
   /**
+   * Register the setter of an accessor of the global scope which replaces
+   * the accessor with a plain property holding the value, like the one of
+   * `_` installed by the evaluator. The declarations of its name in the cells
+   * assign it when they run, like the event handlers, instead of replacing
+   * the accessor when the cell starts.
+   */
+  registerReplacingSetter(setter: (value: any) => void): void {
+    this._replacingSetters.add(setter);
+  }
+
+  /**
    * Convert user code to an async function, called with the global scope as
    * `this`.
    *
@@ -669,16 +740,25 @@ export class JavaScriptExecutor {
 
     const fixed = this._fixedGlobalDeclaration(ast);
     if (fixed) {
-      this._registerCell(name, createCellSource({ name: displayName, code }));
-      const { line, column } = offsetToLineColumn(
-        lineStarts(code),
-        fixed.start
+      this._throwSyntaxError(
+        code,
+        name,
+        displayName,
+        fixed.start,
+        fixedGlobalMessage(fixed.name)
       );
-      throw new CellSyntaxError(fixedGlobalMessage(fixed.name), {
-        token: name,
-        line,
-        column
-      });
+    }
+
+    // The cells are compiled as the body of a function, not as modules
+    const meta = findImportMeta(ast);
+    if (meta) {
+      this._throwSyntaxError(
+        code,
+        name,
+        displayName,
+        meta.start,
+        "Cannot use 'import.meta' outside a module"
+      );
     }
 
     const { edited, map, hoisted, withReturn, hasDynamicImports } =
@@ -801,14 +881,14 @@ export class JavaScriptExecutor {
       for (const node of ast.body) {
         if (node.type === 'ImportDeclaration') {
           const source = String(node.source.value);
-          const url = this._transformImportSource(source);
+          const attributes = importAttributes(node.attributes);
+          const url = this._transformImportSource(source, attributes);
 
           const importInfo: IImportInfo = {
             source,
             url,
             namedImports: {}
           };
-          const attributes = importAttributes(node.attributes);
           if (attributes) {
             importInfo.attributes = attributes;
           }
@@ -949,7 +1029,10 @@ export class JavaScriptExecutor {
         ImportExpression: (node: any) => {
           const value = staticString(node.source);
           if (value !== null) {
-            const url = this._transformImportSource(value);
+            const url = this._transformImportSource(
+              value,
+              staticImportAttributes(node.options)
+            );
             node.source = {
               type: 'Literal',
               value: url,
@@ -1443,7 +1526,10 @@ export class JavaScriptExecutor {
         if (descriptor.writable === true) {
           return 'assign';
         }
-        if (name.startsWith('on') && descriptor.set) {
+        if (
+          descriptor.set &&
+          (name.startsWith('on') || this._replacingSetters.has(descriptor.set))
+        ) {
           return 'setter';
         }
         // A property of a prototype is shadowed by the defined one
@@ -1483,10 +1569,11 @@ export class JavaScriptExecutor {
   }
 
   /**
-   * The names of the globals which can not be replaced declared without a
-   * value by a var declaration, like `var undefined;`. As in a script, the
-   * declaration keeps the global: the name is assigned like the other var
-   * declarations, `var window;` becoming `    window;`.
+   * The names of the globals which are not writable data properties declared
+   * without a value by a var declaration, like `var undefined;`, `var name;`
+   * or `var onmessage;`. As in a script, the declaration keeps the global:
+   * the name is assigned like the other var declarations, `var window;`
+   * becoming `    window;`.
    */
   private _keptGlobalNames(node: any): Set<string> {
     const names = new Set<string>();
@@ -1495,7 +1582,7 @@ export class JavaScriptExecutor {
         if (
           !declaration.init &&
           declaration.id.type === 'Identifier' &&
-          this._globalKind(declaration.id.name) === 'fixed'
+          this._globalKind(declaration.id.name) !== 'assign'
         ) {
           names.add(declaration.id.name);
         }
@@ -1506,7 +1593,7 @@ export class JavaScriptExecutor {
 
   /**
    * The code copying the local declaration of a name to the global scope,
-   * for the names declared over a global without a writable property.
+   * like an imported name or a using declaration.
    */
   private _copyToGlobalCode(name: string): string {
     return this._globalKind(name) === 'define'
@@ -1517,9 +1604,14 @@ export class JavaScriptExecutor {
   /**
    * Define a global declared by a cell as a writable property of the global
    * scope, and of the `this` of the cell when it is another object. Called by
-   * the cells for the names of the accessors of the global scope.
+   * the cells for the names of the accessors of the global scope. Without a
+   * value, the property keeps the value of the accessor.
    */
-  private _defineGlobal = (scope: unknown, name: string, value: unknown) => {
+  private _defineGlobal = (
+    scope: unknown,
+    name: string,
+    ...value: unknown[]
+  ) => {
     for (const target of new Set([this._globalScope, scope])) {
       if (
         target === null ||
@@ -1529,7 +1621,10 @@ export class JavaScriptExecutor {
       }
       try {
         Object.defineProperty(target, name, {
-          value,
+          value:
+            value.length > 0
+              ? value[0]
+              : safe(() => (target as Record<string, unknown>)[name]),
           writable: true,
           configurable: true,
           enumerable: true
@@ -1541,9 +1636,14 @@ export class JavaScriptExecutor {
   };
 
   /**
-   * Transform import source with magic imports.
+   * Transform import source with magic imports. The imports with a `type`
+   * attribute, like the JSON modules, get no `/+esm`, which serves
+   * JavaScript.
    */
-  private _transformImportSource(source: string): string {
+  private _transformImportSource(
+    source: string,
+    attributes?: Record<string, string>
+  ): string {
     if (!this._config.magicImports.enabled) {
       return source;
     }
@@ -1568,6 +1668,7 @@ export class JavaScriptExecutor {
 
     if (
       this._config.magicImports.appendEsmSuffix !== false &&
+      attributes?.type === undefined &&
       this._shouldAppendEsmSuffix(sourcePath)
     ) {
       transformedSource = this._appendEsmSuffix(transformedSource);
@@ -1669,37 +1770,44 @@ export class JavaScriptExecutor {
     // the statement
     this._instrumentLoops(edits, ast, cellName);
     const hasDynamicImports = this._rewriteDynamicImports(edits, ast);
-    // The var declarations are hoisted first, then the functions
+    // The accessors of the global scope are defined first, then the var
+    // declarations are hoisted, then the functions
+    const defined: string[] = [];
     const hoistedVars: string[] = [];
     const hoisted: string[] = [];
-    // The names of the builtin globals that the code of the cell can assign
-    // again after their declaration
-    const reassignable = new Set<string>();
 
     ast.body.forEach((statement: any, i: number) => {
       const node = this._rewriteExport(edits, statement, i);
       if (!node) {
         return;
       }
-      // The var declarations without a value of the globals which can not be
-      // replaced are assigned, which keeps the global
+      // The var declarations without a value of the globals which are not
+      // writable data properties are assigned, which keeps the global
       const kept = this._keptGlobalNames(node);
       const names = this._declaredNames(node).filter(name => !kept.has(name));
+      // The accessors, like `name` or `status`, become writable data
+      // properties keeping their value, before the code of the cell runs, so
+      // that the declarations and the functions of the cell assign and read
+      // the global, like the other names. The event handlers are assigned,
+      // which installs the handler.
+      for (const name of names) {
+        if (this._globalKind(name) === 'define') {
+          defined.push(`${DEFINE_GLOBAL_NAME}(this, "${name}");`);
+        }
+      }
       if (node.type === 'ImportDeclaration') {
         this._rewriteImport(edits, node, i);
-      } else if (names.some(name => this._globalKind(name) !== 'assign')) {
-        // Keep the declaration local, and copy it to the global scope where
-        // it is declared, so that it is kept if a later line throws
-        if (node.type !== 'VariableDeclaration' || node.kind !== 'const') {
-          names.forEach(name => reassignable.add(name));
-        }
+      } else if (
+        node.type === 'VariableDeclaration' &&
+        node.kind.endsWith('using')
+      ) {
+        // Keep the using declarations in the cell, which disposes their
+        // resources when it ends, like a module, and copy them to the
+        // global scope
         const copies = names
           .map(name => this._copyToGlobalCode(name))
           .join(' ');
-        const separator =
-          node.type === 'VariableDeclaration' && code[node.end - 1] !== ';'
-            ? '; '
-            : ' ';
+        const separator = code[node.end - 1] !== ';' ? '; ' : ' ';
         edits.insert(node.end, `${separator}${copies}`);
       } else if (node.type === 'FunctionDeclaration') {
         // Assign the function before the code runs, using a hoisted factory
@@ -1737,22 +1845,17 @@ export class JavaScriptExecutor {
         (last.expression.type !== 'AssignmentExpression' &&
           !code.slice(last.expression.end, last.end).includes(';')));
 
-    // Copy the builtin globals again at the end of the cell, before the
-    // last expression, with the values of their last assignments
-    if (reassignable.size > 0) {
-      const copies = [...reassignable]
-        .map(name => this._copyToGlobalCode(name))
-        .join(' ');
-      if (withReturn) {
-        edits.insert(last.start, `;${copies} `);
-      } else {
-        edits.insert(last.end, `; ${copies}`);
-      }
-    }
-
     if (withReturn) {
       // Before the semicolon of an expression
       edits.insert(last.start, 'return (');
+      edits.insert(last.expression.end, ')');
+    } else if (
+      last?.type === 'ExpressionStatement' &&
+      code[last.start] === '{'
+    ) {
+      // An object literal cell which is not returned, like `{ a, b } = obj`,
+      // which would be a block otherwise
+      edits.insert(last.start, '(');
       edits.insert(last.expression.end, ')');
     }
 
@@ -1760,7 +1863,7 @@ export class JavaScriptExecutor {
     return {
       edited,
       map,
-      hoisted: [...hoistedVars, ...hoisted].join(' '),
+      hoisted: [...defined, ...hoistedVars, ...hoisted].join(' '),
       withReturn,
       hasDynamicImports
     };
@@ -1790,9 +1893,14 @@ export class JavaScriptExecutor {
     // Replace the export keywords, or the export list, with a semicolon and
     // spaces, keeping the columns and the line breaks. The semicolon ends the
     // previous statement when it has none, like `f()` before `export default
-    // (a)`, which would be a call of its result otherwise.
+    // (a)`, which would be a call of its result otherwise. The parentheses of
+    // a default export are kept.
     const declaration = node.declaration;
-    const end = declaration ? declaration.start : node.end;
+    const end = !declaration
+      ? node.end
+      : node.type === 'ExportDefaultDeclaration'
+        ? defaultExportStart(code, node)
+        : declaration.start;
     edits.replace(
       node.start,
       end,
@@ -1806,9 +1914,13 @@ export class JavaScriptExecutor {
       return unwrapped;
     }
     // An anonymous function or class, or an expression, which could start
-    // with a brace
-    edits.insert(declaration.start, '(');
-    edits.insert(declaration.end, code[node.end - 1] === ';' ? ')' : ');');
+    // with a brace, wrapped with its parentheses, before the semicolon
+    edits.insert(end, '(');
+    if (code[node.end - 1] === ';') {
+      edits.insert(node.end - 1, ')');
+    } else {
+      edits.insert(node.end, ');');
+    }
     return null;
   }
 
@@ -1865,9 +1977,10 @@ export class JavaScriptExecutor {
   private _rewriteImport(edits: SourceEdits, node: any, index: number): void {
     const code = edits.source;
     const source = String(node.source.value);
+    const attributes = importAttributes(node.attributes);
     const importCall = `import(${JSON.stringify(
-      this._transformImportSource(source)
-    )}${importOptionsCode(importAttributes(node.attributes))})`;
+      this._transformImportSource(source, attributes)
+    )}${importOptionsCode(attributes)})`;
     const replace = (start: number, end: number, text: string) => {
       const lineBreaks = lineStarts(code.slice(start, end)).length - 1;
       edits.replace(start, end, text + '\n'.repeat(lineBreaks));
@@ -1932,7 +2045,7 @@ export class JavaScriptExecutor {
    * Rewrite the dynamic imports of a cell, in its functions too, to load the
    * package names from the CDN, like the import statements. A string source
    * is rewritten when the cell is compiled, the other sources when the
-   * import runs.
+   * import runs, with the attributes of the options written in the code.
    *
    * @returns Whether the cell has dynamic imports.
    */
@@ -1943,11 +2056,12 @@ export class JavaScriptExecutor {
         found = true;
         const source = node.source;
         const value = staticString(source);
+        const attributes = staticImportAttributes(node.options);
         if (value !== null) {
           edits.replace(
             source.start,
             source.end,
-            JSON.stringify(this._transformImportSource(value))
+            JSON.stringify(this._transformImportSource(value, attributes))
           );
           return;
         }
@@ -1957,7 +2071,10 @@ export class JavaScriptExecutor {
           source.start,
           `(typeof ${IMPORT_SOURCE_NAME} == 'function' ? ${IMPORT_SOURCE_NAME} : s => s)(`
         );
-        edits.insert(source.end, ')');
+        edits.insert(
+          source.end,
+          attributes ? `, ${JSON.stringify(attributes)})` : ')'
+        );
       }
     });
     return found;
@@ -1967,8 +2084,13 @@ export class JavaScriptExecutor {
    * Resolve the source of a dynamic import when it runs, for the sources
    * which are not strings in the code. Called by the cells.
    */
-  private _resolveImportSource = (source: unknown): unknown =>
-    typeof source === 'string' ? this._transformImportSource(source) : source;
+  private _resolveImportSource = (
+    source: unknown,
+    attributes?: Record<string, string>
+  ): unknown =>
+    typeof source === 'string'
+      ? this._transformImportSource(source, attributes)
+      : source;
 
   /**
    * Rewrite a variable declaration to an assignment, e.g. `let a = 1, b;`
@@ -2075,13 +2197,29 @@ export class JavaScriptExecutor {
     }
     const statement =
       body.find((node: any) => node.type !== 'ExpressionStatement') ?? body[1];
-    const offset = statement ? statement.start : code.length;
+    this._throwSyntaxError(
+      code,
+      name,
+      displayName,
+      statement ? statement.start : code.length,
+      statement ? 'Expected an expression' : 'Expected an expression, got none'
+    );
+  }
+
+  /**
+   * Register the code of a cell for the tracebacks, and throw a
+   * CellSyntaxError at an offset of the code.
+   */
+  private _throwSyntaxError(
+    code: string,
+    name: string,
+    displayName: string,
+    offset: number,
+    message: string
+  ): never {
     this._registerCell(name, createCellSource({ name: displayName, code }));
     const { line, column } = offsetToLineColumn(lineStarts(code), offset);
-    throw new CellSyntaxError(
-      statement ? 'Expected an expression' : 'Expected an expression, got none',
-      { token: name, line, column }
-    );
+    throw new CellSyntaxError(message, { token: name, line, column });
   }
 
   /**
@@ -2360,6 +2498,7 @@ export class JavaScriptExecutor {
    */
   private _editedCode = new Map<string, string>();
   private _loopGuard: LoopGuard | null = null;
+  private _replacingSetters = new WeakSet<object>();
   private _functionConstructor: FunctionConstructor;
   private _silentCount = 0;
   private _introspection: Introspection | null = null;

@@ -113,6 +113,53 @@ for (const kernel of KERNELS) {
       expect(await page.notebook.getCellTextOutput(index)).toEqual(["'hi'"]);
     });
 
+    test('Share the declarations named like accessors with the functions of the cell', async ({
+      page
+    }) => {
+      // A var declaration without a value keeps the accessor, like in a
+      // script
+      let index = await runCode(page, 'var name;\ntypeof name');
+      expect(await page.notebook.getCellTextOutput(index)).toEqual([
+        "'string'"
+      ]);
+
+      // The functions of the cell assign and read the global
+      await runCode(
+        page,
+        [
+          "let name = 'Ada';",
+          'function rename(n) {',
+          'name = n;',
+          '}',
+          'function greet() {',
+          "return 'Hi ' + name;",
+          '}'
+        ].join('\n')
+      );
+      index = await runCode(page, "rename('Bob');\nname");
+      expect(await page.notebook.getCellTextOutput(index)).toEqual(["'Bob'"]);
+      index = await runCode(page, "name = 'Cy';\ngreet()");
+      expect(await page.notebook.getCellTextOutput(index)).toEqual(["'Hi Cy'"]);
+
+      // The last expression of the cell changes the global, `origin` being
+      // an accessor of both the window and the Web Worker
+      index = await runCode(page, 'let origin = 0;\norigin++');
+      expect(await page.notebook.getCellTextOutput(index)).toEqual(['0']);
+      index = await runCode(page, 'origin');
+      expect(await page.notebook.getCellTextOutput(index)).toEqual(['1']);
+
+      // A var declaration without a value keeps the event handler
+      await runCode(
+        page,
+        'function onmessageerror(event) {\nglobalThis.received = event.data;\n}'
+      );
+      index = await runCode(
+        page,
+        "var onmessageerror;\ndispatchEvent(new MessageEvent('messageerror', { data: 'kept' }));\nreceived"
+      );
+      expect(await page.notebook.getCellTextOutput(index)).toEqual(["'kept'"]);
+    });
+
     test('Run cells like a REPL', async ({ page }) => {
       // The export keywords are removed, keeping the declarations
       await runCode(
@@ -129,6 +176,42 @@ for (const kernel of KERNELS) {
         "console.log('module')\nexport default { a: 1 }"
       );
       await expect(await getOutputs(page, index)).toHaveText(['module\n']);
+
+      // A default export in parentheses is evaluated
+      index = await runCode(
+        page,
+        "export default (console.log('in parentheses'));"
+      );
+      await expect(await getOutputs(page, index)).toHaveText([
+        'in parentheses\n'
+      ]);
+      await runCode(page, 'export default (globalThis.exported = 3)');
+      index = await runCode(page, 'exported');
+      expect(await page.notebook.getCellTextOutput(index)).toEqual(['3']);
+
+      // A cell destructuring an object literal assigns the names
+      await runCode(page, '{ left, right } = { left: 1, right: 2 }');
+      index = await runCode(page, 'left + right');
+      expect(await page.notebook.getCellTextOutput(index)).toEqual(['3']);
+
+      // A using declaration disposes its resource at the end of the cell,
+      // and the name is kept
+      index = await runCode(
+        page,
+        [
+          'using resource = {',
+          "[Symbol.dispose]() { console.log('disposed'); }",
+          '};',
+          "console.log('used');"
+        ].join('\n')
+      );
+      await expect(await getOutputs(page, index)).toHaveText([
+        'used\ndisposed\n'
+      ]);
+      index = await runCode(page, 'typeof resource');
+      expect(await page.notebook.getCellTextOutput(index)).toEqual([
+        "'object'"
+      ]);
 
       // The names reserved in modules can be declared, also next to an
       // import statement
@@ -181,6 +264,15 @@ for (const kernel of KERNELS) {
       ).toContainText('Uncaught RangeError: later');
       index = await runCode(page, '_error.message');
       expect(await page.notebook.getCellTextOutput(index)).toEqual(["'later'"]);
+
+      // A declaration of _error replaces it when it runs, so the error
+      // thrown before is kept
+      index = await runCode(page, "let _error = JSON.parse('x');");
+      await expect(await getOutputs(page, index)).toContainText('SyntaxError');
+      index = await runCode(page, '_error.name');
+      expect(await page.notebook.getCellTextOutput(index)).toEqual([
+        "'SyntaxError'"
+      ]);
     });
 
     test('Replace _ with an import or an assignment', async ({ page }) => {
@@ -249,9 +341,15 @@ for (const kernel of KERNELS) {
     });
 
     test('Show syntax errors', async ({ page }) => {
-      const index = await runCode(page, 'const = 1');
+      let index = await runCode(page, 'const = 1');
       expect(await page.notebook.getCellTextOutput(index)).toEqual([
         'In[1]:1\nconst = 1\n      ^\n\nSyntaxError: Unexpected token'
+      ]);
+
+      // The cells are not modules
+      index = await runCode(page, 'const here = 1;\nimport.meta.url');
+      expect(await page.notebook.getCellTextOutput(index)).toEqual([
+        "In[2]:2\nimport.meta.url\n^\n\nSyntaxError: Cannot use 'import.meta' outside a module"
       ]);
     });
 

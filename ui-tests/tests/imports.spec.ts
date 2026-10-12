@@ -145,6 +145,26 @@ for (const kernel of KERNELS) {
       expect(await page.notebook.getCellTextOutput(index)).toEqual(['true']);
     });
 
+    test('Import the JSON files of packages', async ({ page }) => {
+      await page.goto('lab/index.html');
+      const form = await openKernelSettings(page);
+      await setKernelSetting(page, form, 'CDN base URL', 'fake-cdn/');
+      await createNotebook(page, kernel, { open: false });
+
+      // A JSON module of a package gets no /+esm, which serves JavaScript
+      let index = await runCode(
+        page,
+        "import data from 'imports-fixture/data.json' with { type: 'json' };\ndata.answer"
+      );
+      expect(await page.notebook.getCellTextOutput(index)).toEqual(['42']);
+
+      index = await runCode(
+        page,
+        "const json = await import('imports-fixture/data.json', { with: { type: 'json' } });\njson.default === data"
+      );
+      expect(await page.notebook.getCellTextOutput(index)).toEqual(['true']);
+    });
+
     test('Import JSON modules and string names', async ({ page }) => {
       await createNotebook(page, kernel);
       let index = await runCode(
