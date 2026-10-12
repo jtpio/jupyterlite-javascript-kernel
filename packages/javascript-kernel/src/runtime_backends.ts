@@ -11,6 +11,7 @@ import * as Comlink from 'comlink';
 import {
   JavaScriptExecutor,
   normalizeError,
+  type IExecutorOptions,
   type RuntimeOutputHandler,
   type RuntimeOutputMessage
 } from '@jupyterlite/javascript-kernel-runtime';
@@ -42,6 +43,12 @@ export interface IRuntimeBackendOptions {
    * limit in the Web Worker.
    */
   loopTimeout?: number;
+
+  /**
+   * The options of the executor, like the CDN of the magic imports, applied
+   * when the runtime starts.
+   */
+  executorOptions?: IExecutorOptions;
 }
 
 /**
@@ -504,6 +511,7 @@ export class IFrameRuntimeBackend extends AbstractRuntimeBackend {
           {
             baseUrl: resolveBaseUrl(this._options.baseUrl),
             maxStreamOutput: this._options.maxStreamOutput,
+            executorOptions: this._options.executorOptions,
             loopTimeout:
               this._options.loopTimeout ??
               IFrameRuntimeBackend.DEFAULT_LOOP_TIMEOUT_MS
@@ -777,6 +785,7 @@ export class WorkerRuntimeBackend extends AbstractRuntimeBackend {
             baseUrl: resolveBaseUrl(this._options.baseUrl),
             browsingContextId: this._options.browsingContextId,
             maxStreamOutput: this._options.maxStreamOutput,
+            executorOptions: this._options.executorOptions,
             loopTimeout: this._options.loopTimeout ?? 0,
             interruptBuffer: this._interruptBuffer ?? undefined
           },

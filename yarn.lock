@@ -455,7 +455,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@jupyterlab/settingregistry@npm:^4.6.4, @jupyterlab/settingregistry@npm:~4.6.4":
+"@jupyterlab/settingregistry@npm:^4.6.0, @jupyterlab/settingregistry@npm:^4.6.4, @jupyterlab/settingregistry@npm:~4.6.4":
   version: 4.6.4
   resolution: "@jupyterlab/settingregistry@npm:4.6.4"
   dependencies:
@@ -594,9 +594,12 @@ __metadata:
   dependencies:
     "@jupyter/builder": ^1.2.0
     "@jupyterlab/application": ^4.6.0
+    "@jupyterlab/coreutils": ^6.6.0
+    "@jupyterlab/settingregistry": ^4.6.0
     "@jupyterlite/apputils": ^0.8.0
     "@jupyterlite/javascript-kernel": ^0.4.0-alpha.5
     "@jupyterlite/services": ^0.8.0
+    "@lumino/coreutils": ^2.2.2
     "@lumino/disposable": ^2.1.5
     "@lumino/signaling": ^2.1.5
     npm-run-all2: ^7.0.1

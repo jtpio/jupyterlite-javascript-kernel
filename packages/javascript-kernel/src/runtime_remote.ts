@@ -112,6 +112,7 @@ export function createRemoteRuntimeApi(
       evaluator = new JavaScriptRuntimeEvaluator({
         globalScope,
         executor,
+        executorOptions: options.executorOptions,
         onOutput: message => {
           emitOutput(onOutput, message);
         },

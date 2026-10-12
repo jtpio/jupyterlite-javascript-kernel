@@ -20,4 +20,4 @@ jlpm playwright install chromium
 jlpm test
 ```
 
-`jlpm test` serves the site on http://localhost:8000. Some tests load packages from [jsDelivr](https://www.jsdelivr.com), so they need a network connection.
+`jlpm test` serves the site on http://localhost:8000. Some tests load packages from [jsDelivr](https://www.jsdelivr.com), so they need a network connection. `jlpm build` also copies `fixtures/fake-cdn` into the site, a fake CDN for the tests of the settings: a site built with `jupyter lite build` alone makes them fail with import errors.

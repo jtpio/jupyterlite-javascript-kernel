@@ -54,6 +54,7 @@ build-function = "hatch_jupyter_builder.npm_builder"
 ensured-targets = [
     "jupyterlite_javascript_kernel/labextension/static/style.js",
     "jupyterlite_javascript_kernel/labextension/package.json",
+    "jupyterlite_javascript_kernel/labextension/schemas/@jupyterlite/javascript-kernel-extension/kernel-settings.json",
 ]
 skip-if-exists = ["jupyterlite_javascript_kernel/labextension/static/style.js"]
 

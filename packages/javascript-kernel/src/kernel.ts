@@ -10,6 +10,7 @@ import {
   KEYBOARD_INTERRUPT,
   normalizeError as normalizeUnknownError,
   stripAnsi,
+  type IExecutorOptions,
   type JavaScriptExecutor,
   type RuntimeOutputMessage
 } from '@jupyterlite/javascript-kernel-runtime';
@@ -40,6 +41,7 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
     this._browsingContextId = options.browsingContextId;
     this._maxStreamOutput = options.maxStreamOutput;
     this._loopTimeout = options.loopTimeout;
+    this._executorOptions = options.executorOptions;
     this._startupExtensions = [...(options.startupExtensions ?? [])];
     this._backend = this.createBackend(this._runtimeMode);
   }
@@ -383,7 +385,8 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
         this.processRuntimeMessage(message);
       },
       maxStreamOutput: this._maxStreamOutput,
-      loopTimeout: this._loopTimeout
+      loopTimeout: this._loopTimeout,
+      executorOptions: this._executorOptions
     };
 
     if (runtimeMode === 'worker') {
@@ -640,6 +643,7 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
   private _browsingContextId?: string;
   private _maxStreamOutput?: number;
   private _loopTimeout?: number;
+  private _executorOptions?: IExecutorOptions;
   private _startupExtensions: JavaScriptKernel.IStartupExtension[];
   private _appliedStartupExtensions = new Set<string>();
   private _runtimeReadyContext: JavaScriptKernel.IRuntimeReadyContext | null =
@@ -740,5 +744,12 @@ export namespace JavaScriptKernel {
      * changes it with `Jupyter.loopTimeout`.
      */
     loopTimeout?: number;
+
+    /**
+     * The configuration of the executor, like the CDN of the magic imports,
+     * as plain data. Applied when the runtime starts, also to the executor
+     * of executorFactory.
+     */
+    executorOptions?: IExecutorOptions;
   }
 }

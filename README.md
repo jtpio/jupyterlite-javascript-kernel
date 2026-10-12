@@ -170,12 +170,32 @@ Limits of automatic cleanup:
 - It will not automatically remove all event listeners or timers.
 - It cannot safely revert all stateful third-party module internals.
 
+## Imports
+
+The `import` statements of the cells load the npm packages by name from the [jsDelivr](https://www.jsdelivr.com/) CDN, with the magic imports:
+
+```javascript
+import confetti from 'canvas-confetti';
+import { capitalize } from 'lodash-es';
+import * as d3 from 'd3-array@3';
+```
+
+The import sources are rewritten like this:
+
+- a package name, with an optional version and path, loads from `https://cdn.jsdelivr.net/npm/`, with `/+esm` added for jsDelivr to serve an ES module: `lodash-es` loads `https://cdn.jsdelivr.net/npm/lodash-es/+esm`, and `d3-array@3` loads `https://cdn.jsdelivr.net/npm/d3-array@3/+esm`
+- the paths ending with `.js`, `.mjs`, `.cjs`, `.wasm` or `+esm` get no `/+esm`: `lodash-es/capitalize.js` loads `https://cdn.jsdelivr.net/npm/lodash-es/capitalize.js`
+- the sources starting with `npm/` or `gh/` keep their path: `gh/user/repo/file.js` loads `https://cdn.jsdelivr.net/gh/user/repo/file.js`
+- a query or a hash stays at the end, after `/+esm`
+- the URLs (`https://...`), the protocol-relative URLs (`//...`), the relative and absolute paths (`./`, `../`, `/`) and the import map specifiers (`#...`) are left unchanged
+
+The packages load at run time, so the magic imports need a network connection to the CDN. The CDN, the rules and the magic imports themselves can be changed in the [settings](#settings), for example to use [esm.sh](https://esm.sh/) or packages hosted with the JupyterLite site. Only the `import` statements at the top level of the cells are rewritten: `await import()` loads a URL, like `await import('https://cdn.jsdelivr.net/npm/dayjs/+esm')`. The modules loaded by name by the [startup extensions](#kernel-startup-extensions) use the same rules.
+
 ## Interrupting code and loop protection
 
 The stop button of the notebook toolbar, **Kernel > Interrupt Kernel** and <kbd>I</kbd>, <kbd>I</kbd> stop the running cell with `KeyboardInterrupt: Execution interrupted`, and cancel the cells waiting to run. The variables of the cell are kept. An interrupt also clears the `setTimeout()` and `setInterval()` timers created by the cells, so it stops the background intervals, even when no cell is running.
 
 - A cell waiting for a promise that never settles, an `await` in a loop and a sleep loop stop at once, in both kernels.
-- `JavaScript (IFrame)` runs on the thread of the page, so a synchronous loop freezes JupyterLite: the page can not even handle the stop button. A loop running for more than 10 s without letting the page respond is stopped with a `LoopTimeoutError`, like `The while loop at line 2 of In[3] ran for more than 10 s without letting the page respond, so it was stopped.`, and the kernel keeps its state. The time spent waiting in `alert()`, `confirm()` and `prompt()` does not count. Change the limit with `Jupyter.loopTimeout = 30000` (in ms, 0 turns it off) or with the `loopTimeout` option of the kernel, or run long computations in `JavaScript (Web Worker)`.
+- `JavaScript (IFrame)` runs on the thread of the page, so a synchronous loop freezes JupyterLite: the page can not even handle the stop button. A loop running for more than 10 s without letting the page respond is stopped with a `LoopTimeoutError`, like `The while loop at line 2 of In[3] ran for more than 10 s without letting the page respond, so it was stopped.`, and the kernel keeps its state. The time spent waiting in `alert()`, `confirm()` and `prompt()` does not count. Change the limit for the next kernels with the **Loop timeout (ms)** [setting](#settings), in a cell with `Jupyter.loopTimeout = 30000` (in ms, 0 turns it off), or with the `loopTimeout` option of the kernel, or run long computations in `JavaScript (Web Worker)`.
 - `JavaScript (Web Worker)` runs off the page thread, so the page stays responsive. When the page is cross-origin isolated (served with the `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp` or `credentialless` headers), the loops stop at once and the state is kept. Otherwise, code that does not yield is stopped by restarting the Web Worker after 2 s, or at once with a second interrupt: the cell explains that the variables, functions, imports and widgets of the previous cells are lost.
 
 `KeyboardInterrupt` and `LoopTimeoutError` can be caught, but the loops keep throwing them, `KeyboardInterrupt` until the next execution and `LoopTimeoutError` until the page handles a task, and the cell is reported as failed even when its code caught them.
@@ -243,7 +263,7 @@ The `console` methods print to the outputs of the cell, with the values formatte
 - `console.count`, `console.countReset`, `console.time`, `console.timeLog`, `console.timeEnd` and `console.assert` work like in the browser
 - `console.clear` clears the outputs of the cell
 - consecutive writes to the standard output or the standard error are sent together, at most every 50 ms, so printing thousands of lines in a loop is fast. The outputs keep their order: the pending text is sent before any rich output, error, widget message or prompt, and when the cell finishes. In the Web Worker kernel, a long loop shows its output while it runs
-- a cell prints at most 5,000,000 characters on the standard output and the standard error, about 50,000 lines of 100 characters: the rest is not shown, and a notice is printed instead. This stops a runaway loop of `console.log` before it freezes the page. The count starts again with the next cell, or when the cell calls `console.clear()` or `clearOutput()`. The errors thrown later by a cell that reached the limit, in a timer or an event listener, are printed in the console of the browser
+- a cell prints at most 5,000,000 characters on the standard output and the standard error, about 50,000 lines of 100 characters: the rest is not shown, and a notice is printed instead. This stops a runaway loop of `console.log` before it freezes the page. Change the limit with the **Output limit (characters)** [setting](#settings). The count starts again with the next cell, or when the cell calls `console.clear()` or `clearOutput()`. The errors thrown later by a cell that reached the limit, in a timer or an event listener, are printed in the console of the browser
 
 ## Errors
 
@@ -369,6 +389,85 @@ The widget runtime is split into files that roughly follow the upstream `ipywidg
 
 See the [example notebook](examples/widgets.ipynb) for more usage examples.
 
+## Comms
+
+`Jupyter.comm` opens [comms](https://jupyter-client.readthedocs.io/en/latest/messaging.html#custom-messages) with the frontend, the channel of the widgets, for frontend extensions talking to the code of the cells:
+
+```javascript
+// A comm opened by the kernel
+const comm = Jupyter.comm.open('my-target', { hello: 'frontend' });
+comm.onMsg = (data, buffers) => console.log('received', data);
+comm.send({ value: 42 });
+
+// The comms opened by the frontend on a target
+Jupyter.comm.registerTarget('my-echo', (comm, data, buffers) => {
+  comm.onMsg = data => comm.send(data);
+  comm.onClose = data => console.log('closed');
+});
+```
+
+- `Jupyter.comm.open(targetName, data?, metadata?, buffers?)` opens a comm and returns it
+- `Jupyter.comm.registerTarget(targetName, handler)` calls `handler(comm, data, buffers)` when the frontend opens a comm on the target, and `Jupyter.comm.unregisterTarget(targetName)` removes it. A comm opened on a target without a handler, or whose handler throws, is closed, like in `ipykernel`
+- a comm has a `commId` and a `targetName`, `send(data, metadata?, buffers?)` and `close(data?)` methods, and the `onMsg` and `onClose` callbacks, called with the data and the binary buffers (`ArrayBuffer`) of the messages of the frontend
+- the outputs of the callbacks, and their errors, go to the cell which ran last
+
+`context.registerCommTarget()` registers the target of a [startup extension](#kernel-startup-extensions) before the code of the cells runs.
+
+## Configuration
+
+### Settings
+
+Open **Settings > Settings Editor** and search for **JavaScript Kernel** to change the settings of the kernels. They apply to the kernels started next: the running kernels keep their settings until **Kernel > Restart Kernel**.
+
+| Setting                   | Key                     | Default                     | Effect                                                                                                                                                               |
+| ------------------------- | ----------------------- | --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Magic imports             | `magicImports`          | `true`                      | Load the packages imported by name from a CDN, see [Imports](#imports). When disabled, only URLs and the specifiers of an import map can be imported.                |
+| CDN base URL              | `magicImportsBaseUrl`   | `https://cdn.jsdelivr.net/` | The base URL of the CDN. A relative URL, like `vendor/`, is resolved against the URL of the JupyterLite site.                                                        |
+| Add the npm/ prefix       | `magicImportsNpmPrefix` | `true`                      | Load `lodash-es` from `<CDN base URL>/npm/lodash-es`, like jsDelivr. Disable it for the CDNs serving the packages at their root, like esm.sh.                        |
+| Add the +esm suffix       | `magicImportsEsmSuffix` | `true`                      | Add `/+esm` after the package paths which do not end with `.js`, `.mjs`, `.cjs` or `.wasm`, for jsDelivr to serve ES modules. Disable it for other CDNs.             |
+| Loop timeout (ms)         | `loopTimeout`           | `10000`                     | The time a loop can keep the page busy in `JavaScript (IFrame)` before it is stopped, see [loop protection](#interrupting-code-and-loop-protection). 0 turns it off. |
+| Output limit (characters) | `maxStreamOutput`       | `5000000`                   | The number of characters a cell can print with the `console` methods, see [Console](#console). 0 for no limit.                                                       |
+
+The settings are saved in the browser, for each user. A custom CDN in the settings of a user can make a shared notebook behave differently for them: the defaults of a deployment belong in `overrides.json`.
+
+### Default settings for a deployment
+
+A JupyterLite deployment sets the defaults of the settings with an `overrides.json` file in the lite directory (where `jupyter lite build` runs). The build merges it into the `jupyter-lite.json` of the site, and `jupyter lite check` validates it against the schema of the settings. The users can still change the settings.
+
+Load the packages from [esm.sh](https://esm.sh/):
+
+```json
+{
+  "@jupyterlite/javascript-kernel-extension:kernel-settings": {
+    "magicImportsBaseUrl": "https://esm.sh/",
+    "magicImportsNpmPrefix": false,
+    "magicImportsEsmSuffix": false
+  }
+}
+```
+
+Serve the packages with the site, to work offline, from a `vendor` folder next to the `index.html` of the site with the layout of jsDelivr, like `vendor/npm/lodash-es/lodash.js` imported with `import _ from 'lodash-es/lodash.js'`:
+
+```json
+{
+  "@jupyterlite/javascript-kernel-extension:kernel-settings": {
+    "magicImportsBaseUrl": "vendor/"
+  }
+}
+```
+
+Turn off the magic imports:
+
+```json
+{
+  "@jupyterlite/javascript-kernel-extension:kernel-settings": {
+    "magicImports": false
+  }
+}
+```
+
+The CDN also serves the modules that the [startup extensions](#kernel-startup-extensions) load by name: a CDN without them breaks those extensions.
+
 ### Enable or disable specific modes
 
 The two runtime modes are registered by separate plugins:
@@ -402,15 +501,17 @@ Disable iframe mode:
 }
 ```
 
+Disabling `@jupyterlite/javascript-kernel-extension:kernel-settings` makes the kernels ignore the settings, and use the built-in defaults.
+
 ## Contributing
 
 ### Packages
 
 The repository contains three npm packages:
 
-- `@jupyterlite/javascript-kernel-runtime`: the code running next to the user code, in the iframe or the Web Worker. It executes the cells, formats the outputs, and implements comms and widgets. It does not depend on JupyterLite, so that other JavaScript kernels can reuse it. It is engine-neutral: it only needs the ECMAScript built-ins, and compiles without the DOM types, which the build checks. It also ships single-file builds, with `acorn`, `acorn-walk` and `astring` included, for kernels that do not use npm, and exports the engine-neutral helpers of the tracebacks, like `parseStack` and `formatError`, for other kernels. The evaluator batches the stream outputs: a host can pass its `scheduler` (or `null` when the engine has no host timers, and then calls `evaluator.flushOutputs()` itself), a `flushInterval` (0 turns the batching off) and a `maxStreamOutput` per cell. It interrupts the cells with `evaluator.interrupt()`, and stops the loops with a `loopTimeout` or, from another thread, an `interruptBuffer`. See its [README](packages/javascript-kernel-runtime/README.md).
-- `@jupyterlite/javascript-kernel`: the JupyterLite kernel, with the iframe and Web Worker runtimes. It also exports everything from `@jupyterlite/javascript-kernel-runtime`. JupyterLite only cancels the queued cells on interrupt: `installKernelInterrupts(client)` makes its kernel client also call the `interrupt()` method of the kernels, like `JavaScriptKernel.interrupt()`. The extension calls it, and the extensions of kernels building on `JavaScriptKernel`, like the p5.js kernel, can call it too, since installing it twice does nothing.
-- `@jupyterlite/javascript-kernel-extension`: the JupyterLite extension registering the kernels.
+- `@jupyterlite/javascript-kernel-runtime`: the code running next to the user code, in the iframe or the Web Worker. It executes the cells, formats the outputs, and implements comms and widgets. It does not depend on JupyterLite, so that other JavaScript kernels can reuse it. It is engine-neutral: it only needs the ECMAScript built-ins, and compiles without the DOM types, which the build checks. It also ships single-file builds, with `acorn`, `acorn-walk` and `astring` included, for kernels that do not use npm, and exports the engine-neutral helpers of the tracebacks, like `parseStack` and `formatError`, for other kernels. The evaluator batches the stream outputs: a host can pass its `scheduler` (or `null` when the engine has no host timers, and then calls `evaluator.flushOutputs()` itself), a `flushInterval` (0 turns the batching off) and a `maxStreamOutput` per cell. It interrupts the cells with `evaluator.interrupt()`, and stops the loops with a `loopTimeout` or, from another thread, an `interruptBuffer`. The `executorOptions` of the evaluator (an `IExecutorOptions`, as plain data) configure the magic imports, also of an existing executor, like `ExecutorConfig.update()`. See its [README](packages/javascript-kernel-runtime/README.md).
+- `@jupyterlite/javascript-kernel`: the JupyterLite kernel, with the iframe and Web Worker runtimes. It also exports everything from `@jupyterlite/javascript-kernel-runtime`. JupyterLite only cancels the queued cells on interrupt: `installKernelInterrupts(client)` makes its kernel client also call the `interrupt()` method of the kernels, like `JavaScriptKernel.interrupt()`. The extension calls it, and the extensions of kernels building on `JavaScriptKernel`, like the p5.js kernel, can call it too, since installing it twice does nothing. The `executorOptions`, `loopTimeout` and `maxStreamOutput` options of `JavaScriptKernel` configure the runtime when it starts: the extension sets them from the [settings](#settings), and the kernels building on `JavaScriptKernel` keep the defaults unless they pass them.
+- `@jupyterlite/javascript-kernel-extension`: the JupyterLite extension registering the kernels, with their settings.
 
 ### Development install
 

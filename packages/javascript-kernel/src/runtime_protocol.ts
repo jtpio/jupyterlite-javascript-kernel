@@ -4,7 +4,10 @@
 import type { KernelMessage } from '@jupyterlab/services';
 import type { IWorkerKernel } from '@jupyterlite/services';
 
-import type { RuntimeOutputMessage } from '@jupyterlite/javascript-kernel-runtime';
+import type {
+  IExecutorOptions,
+  RuntimeOutputMessage
+} from '@jupyterlite/javascript-kernel-runtime';
 
 /**
  * Supported runtime backends for the JavaScript kernel.
@@ -33,6 +36,11 @@ export interface IRuntimeInitializeOptions extends IWorkerKernel.IOptions {
    * before it is stopped with a LoopTimeoutError, 0 for no limit.
    */
   loopTimeout?: number;
+
+  /**
+   * The options of the executor, like the CDN of the magic imports.
+   */
+  executorOptions?: IExecutorOptions;
 
   /**
    * A flag shared with the page to interrupt the loops of a Web Worker,

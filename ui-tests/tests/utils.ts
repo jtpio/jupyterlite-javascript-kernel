@@ -82,13 +82,17 @@ export async function waitForKernelIdle(
  * Open JupyterLite and create a new notebook with a kernel, from the
  * File > New > Notebook menu.
  *
+ * @param options.open - Whether to open JupyterLite first, true by default.
  * @returns The name of the notebook.
  */
 export async function createNotebook(
   page: IJupyterLabPageFixture,
-  kernel: IKernel
+  kernel: IKernel,
+  options: { open?: boolean } = {}
 ): Promise<string> {
-  await page.goto('lab/index.html');
+  if (options.open ?? true) {
+    await page.goto('lab/index.html');
+  }
   const name = await page.notebook.createNew(undefined, {
     kernel: kernel.name
   });
@@ -143,4 +147,65 @@ export async function getOutputs(
       ? `.jp-OutputArea-output[data-mime-type="${mimeType}"]`
       : '.jp-OutputArea-output'
   );
+}
+
+/**
+ * Open the settings of the JavaScript kernels from the Settings > Settings
+ * Editor menu, searching for them.
+ *
+ * @returns The form of the settings.
+ */
+export async function openKernelSettings(
+  page: IJupyterLabPageFixture
+): Promise<Locator> {
+  await page.menu.clickMenuItem('Settings>Settings Editor');
+  await page
+    .locator('.jp-PluginList')
+    .getByRole('searchbox')
+    .fill('JavaScript');
+  await page.getByRole('tab', { name: 'JavaScript Kernel' }).click();
+  const form = page
+    .locator('.jp-SettingsForm')
+    .filter({ hasText: 'JavaScript Kernel' });
+  await expect(form.getByLabel('Magic imports', { exact: true })).toBeVisible();
+  return form;
+}
+
+/**
+ * Get the field of a setting in the form of the Settings Editor, from its
+ * title: the label of a checkbox, or the heading above a text field.
+ */
+export function getSettingField(form: Locator, title: string): Locator {
+  return form
+    .getByLabel(title, { exact: true })
+    .or(
+      form
+        .getByRole('heading', { name: title, exact: true })
+        .locator('..')
+        .locator('input')
+    );
+}
+
+/**
+ * Change a setting of the JavaScript kernels in the form of the Settings
+ * Editor, and wait for it to be saved: the tab of the editor shows it is
+ * modified until the setting is saved, half a second after the change.
+ *
+ * @param value - The value of a text field, or whether to check a checkbox.
+ */
+export async function setKernelSetting(
+  page: IJupyterLabPageFixture,
+  form: Locator,
+  label: string,
+  value: string | boolean
+): Promise<void> {
+  const field = getSettingField(form, label);
+  if (typeof value === 'boolean') {
+    await field.setChecked(value);
+  } else {
+    await field.fill(value);
+  }
+  const tab = page.activity.getTabLocator('Settings');
+  await expect(tab).toHaveClass(/jp-mod-dirty/);
+  await expect(tab).not.toHaveClass(/jp-mod-dirty/);
 }

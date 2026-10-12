@@ -131,12 +131,45 @@ interface ICanvasLike {
 }
 
 /**
- * Configuration for magic imports.
+ * Configuration for magic imports: the import statements of bare package
+ * names, like `import _ from 'lodash-es'`, load the package from a CDN.
  */
 export interface IMagicImportsConfig {
+  /**
+   * Whether the bare package names are loaded from the CDN. Without it, the
+   * import sources are left to the module loader of the engine.
+   */
   enabled: boolean;
+
+  /**
+   * The base URL of the CDN, `https://cdn.jsdelivr.net/` by default.
+   */
   baseUrl: string;
+
+  /**
+   * Whether `npm/` is added in front of the package names, like jsDelivr
+   * serves them. The sources starting with `npm/` or `gh/` are kept as is.
+   */
   enableAutoNpm: boolean;
+
+  /**
+   * Whether `/+esm` is added after the package paths, for jsDelivr to serve
+   * them as ES modules, unless they end with `.js`, `.mjs`, `.cjs`, `.wasm`
+   * or `+esm`. True by default.
+   */
+  appendEsmSuffix?: boolean;
+}
+
+/**
+ * The options of an executor, as plain data, which can be sent to another
+ * realm or thread, like the configuration of a kernel.
+ */
+export interface IExecutorOptions {
+  /**
+   * The configuration of the magic imports. The fields left out keep their
+   * current value.
+   */
+  magicImports?: Partial<IMagicImportsConfig>;
 }
 
 /**
@@ -228,6 +261,31 @@ export interface ICodeRegistry {
  */
 export class ExecutorConfig {
   /**
+   * Instantiate a new ExecutorConfig.
+   *
+   * @param options - The options changing the defaults.
+   */
+  constructor(options: IExecutorOptions = {}) {
+    this.update(options);
+  }
+
+  /**
+   * Change the configuration with some options. The options left out, or
+   * undefined, keep their current value.
+   */
+  update(options: IExecutorOptions): void {
+    if (options.magicImports) {
+      const changes: Partial<IMagicImportsConfig> = {};
+      for (const [key, value] of Object.entries(options.magicImports)) {
+        if (value !== undefined) {
+          (changes as Record<string, unknown>)[key] = value;
+        }
+      }
+      this._magicImports = { ...this._magicImports, ...changes };
+    }
+  }
+
+  /**
    * Get the magic imports configuration.
    */
   get magicImports(): IMagicImportsConfig {
@@ -244,7 +302,8 @@ export class ExecutorConfig {
   private _magicImports: IMagicImportsConfig = {
     enabled: true,
     baseUrl: 'https://cdn.jsdelivr.net/',
-    enableAutoNpm: true
+    enableAutoNpm: true,
+    appendEsmSuffix: true
   };
 }
 
@@ -266,6 +325,13 @@ export class JavaScriptExecutor {
     const scopeFunction = safe(() => globalScope.Function);
     this._functionConstructor =
       typeof scopeFunction === 'function' ? scopeFunction : Function;
+  }
+
+  /**
+   * The configuration of the executor, read when the cells are compiled.
+   */
+  get config(): ExecutorConfig {
+    return this._config;
   }
 
   /**
@@ -1073,7 +1139,10 @@ export class JavaScriptExecutor {
       transformedPath
     )}${suffix}`;
 
-    if (this._shouldAppendEsmSuffix(sourcePath)) {
+    if (
+      this._config.magicImports.appendEsmSuffix !== false &&
+      this._shouldAppendEsmSuffix(sourcePath)
+    ) {
       transformedSource = this._appendEsmSuffix(transformedSource);
     }
 

@@ -1,0 +1,48 @@
+{
+  "title": "JavaScript Kernel",
+  "description": "Settings of the JavaScript kernels. The changes apply to the kernels started next, and after Kernel > Restart Kernel.",
+  "jupyter.lab.setting-icon-label": "JavaScript Kernel",
+  "type": "object",
+  "properties": {
+    "magicImports": {
+      "title": "Magic imports",
+      "description": "Load the packages imported by name, like import confetti from 'canvas-confetti', from a CDN. When disabled, only URLs and the specifiers of an import map can be imported.",
+      "type": "boolean",
+      "default": true
+    },
+    "magicImportsBaseUrl": {
+      "title": "CDN base URL",
+      "description": "The base URL of the CDN serving the packages. A relative URL, like vendor/, is resolved against the URL of the JupyterLite site, to serve the packages from the deployment.",
+      "type": "string",
+      "minLength": 1,
+      "default": "https://cdn.jsdelivr.net/"
+    },
+    "magicImportsNpmPrefix": {
+      "title": "Add the npm/ prefix",
+      "description": "Load 'lodash-es' from <CDN base URL>/npm/lodash-es, like jsDelivr serves the packages. Disable it for the CDNs serving the packages at their root, like esm.sh.",
+      "type": "boolean",
+      "default": true
+    },
+    "magicImportsEsmSuffix": {
+      "title": "Add the +esm suffix",
+      "description": "Add /+esm after the package paths which do not end with .js, .mjs, .cjs or .wasm, for jsDelivr to serve them as ES modules. Disable it for other CDNs.",
+      "type": "boolean",
+      "default": true
+    },
+    "loopTimeout": {
+      "title": "Loop timeout (ms)",
+      "description": "The time in milliseconds a loop can keep the page busy in the JavaScript (IFrame) kernel, which runs on the thread of the page, before it is stopped with a LoopTimeoutError. 0 turns it off. The JavaScript (Web Worker) kernel runs off the page thread, and has no loop timeout by default.",
+      "type": "integer",
+      "minimum": 0,
+      "default": 10000
+    },
+    "maxStreamOutput": {
+      "title": "Output limit (characters)",
+      "description": "The number of characters a cell can print with console.log() and the other console methods. The rest is not shown, with a notice. 0 for no limit.",
+      "type": "integer",
+      "minimum": 0,
+      "default": 5000000
+    }
+  },
+  "additionalProperties": false
+}

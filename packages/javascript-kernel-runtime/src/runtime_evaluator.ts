@@ -5,7 +5,12 @@ import type { KernelMessage } from '@jupyterlab/services';
 
 import type { IMimeBundle } from '@jupyterlab/nbformat';
 
-import { JavaScriptExecutor, type IAsyncCodeResult } from './executor';
+import {
+  ExecutorConfig,
+  JavaScriptExecutor,
+  type IAsyncCodeResult,
+  type IExecutorOptions
+} from './executor';
 import { CommManager } from './comm';
 import type { CommTargetHandler } from './comm';
 import { createConsole, type KernelConsole } from './console';
@@ -59,7 +64,14 @@ export class JavaScriptRuntimeEvaluator {
     // Output widget captures the outputs between two of them
     this._onOutput = this._outputs.handler;
     this._executor =
-      options.executor ?? new JavaScriptExecutor(options.globalScope);
+      options.executor ??
+      new JavaScriptExecutor(
+        options.globalScope,
+        new ExecutorConfig(options.executorOptions)
+      );
+    if (options.executor && options.executorOptions) {
+      options.executor.config.update(options.executorOptions);
+    }
     this._guard = new LoopGuard({
       globalScope: this._globalScope,
       timeout: options.loopTimeout,
@@ -896,6 +908,12 @@ export namespace JavaScriptRuntimeEvaluator {
      * off the magic imports). Defaults to a JavaScriptExecutor of globalScope.
      */
     executor?: JavaScriptExecutor;
+
+    /**
+     * The options of the executor, like the CDN of the magic imports, as
+     * plain data. They also change the configuration of `executor`.
+     */
+    executorOptions?: IExecutorOptions;
 
     /**
      * Ask the user for some input, for prompt(). It blocks until the user

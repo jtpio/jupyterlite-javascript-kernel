@@ -20,7 +20,8 @@
   "files": [
     "lib/*.d.ts",
     "lib/*.js.map",
-    "lib/*.js"
+    "lib/*.js",
+    "schema/*.json"
   ],
   "scripts": {
     "build": "jlpm build:lib && jlpm build:labextension:dev",
@@ -40,9 +41,12 @@
   },
   "dependencies": {
     "@jupyterlab/application": "^4.6.0",
+    "@jupyterlab/coreutils": "^6.6.0",
+    "@jupyterlab/settingregistry": "^4.6.0",
     "@jupyterlite/apputils": "^0.8.0",
     "@jupyterlite/javascript-kernel": "^0.4.0-alpha.5",
     "@jupyterlite/services": "^0.8.0",
+    "@lumino/coreutils": "^2.2.2",
     "@lumino/disposable": "^2.1.5",
     "@lumino/signaling": "^2.1.5"
   },
@@ -58,6 +62,7 @@
   "jupyterlab": {
     "extension": true,
     "outputDir": "../../jupyterlite_javascript_kernel/labextension",
+    "schemaDir": "schema",
     "sharedPackages": {
       "@jupyterlite/apputils": {
         "bundled": false,

@@ -94,7 +94,8 @@ const reply = await evaluator.execute('1 + 1', 1);
 | `flushInterval`          | The longest time in milliseconds the text written to stdout or stderr is kept, to send the consecutive writes together. 50 by default, 0 sends one message per write.                                                                                                         |
 | `maxStreamBufferSize`    | The size of the pending text of a stream, in UTF-16 code units, from which it is sent. 1,000,000 by default.                                                                                                                                                                  |
 | `maxStreamOutput`        | The number of characters a cell can print on stdout and stderr, counted from the start of the cell or its last `clear_output`: the rest is dropped, with a notice on stderr. 5,000,000 by default, 0 for no limit.                                                            |
-| `executor`               | A `JavaScriptExecutor`, to configure it, for example to turn off the magic imports.                                                                                                                                                                                           |
+| `executor`               | A `JavaScriptExecutor`, to configure it, for example to customize the compilation of the cells.                                                                                                                                                                               |
+| `executorOptions`        | `IExecutorOptions`, plain data: the configuration of the magic imports, see below. Also applied to `executor`.                                                                                                                                                                |
 | `loopTimeout`            | The time in milliseconds a loop of the cells can keep the page busy before it is stopped with a `LoopTimeoutError`, 0 (the default) for no limit. See [Interrupts and loop timeout](#interrupts-and-loop-timeout).                                                            |
 | `interruptBuffer`        | An `Int32Array` view of a `SharedArrayBuffer`, to interrupt the loops from another thread: the host sets its first element to 1 with `Atomics.store()`.                                                                                                                       |
 
@@ -201,19 +202,43 @@ The cells use the timers of the host, if any. The runtime itself only uses
 the ones of `scheduler`, to send the pending text of the streams.
 
 The `import` statements of the cells load the npm packages from jsDelivr by
-default. Without network module loading, turn off the magic imports: the
-`import` statements then become `import(source)`, handled by the module
-loader of the engine.
+default. The `magicImports` of `executorOptions` change it, with the fields of
+`IMagicImportsConfig`, all optional:
+
+| Field             | Description                                                                                                                                                                        |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`         | Whether the package names are loaded from the CDN, true by default. Without it, the `import` statements become `import(source)`, handled by the module loader of the engine.       |
+| `baseUrl`         | The base URL of the CDN, `https://cdn.jsdelivr.net/` by default. The engine would resolve a relative URL against the module running the cells, if at all, so pass an absolute URL. |
+| `enableAutoNpm`   | Whether `npm/` is added in front of the package names, like jsDelivr serves them, true by default.                                                                                 |
+| `appendEsmSuffix` | Whether `/+esm` is added after the package paths which do not end with `.js`, `.mjs`, `.cjs`, `.wasm` or `+esm`, for jsDelivr, true by default.                                    |
+
+For example, without network module loading, turn off the magic imports:
 
 ```javascript
-const config = new runtime.ExecutorConfig();
-config.magicImports = { ...config.magicImports, enabled: false };
 const evaluator = new runtime.JavaScriptRuntimeEvaluator({
   globalScope: globalThis,
   onOutput,
-  executor: new runtime.JavaScriptExecutor(globalThis, config)
+  executorOptions: { magicImports: { enabled: false } }
 });
 ```
+
+Or load the packages from esm.sh:
+
+```javascript
+const executorOptions = {
+  magicImports: {
+    baseUrl: 'https://esm.sh/',
+    enableAutoNpm: false,
+    appendEsmSuffix: false
+  }
+};
+```
+
+The options are plain data, which a kernel can send to the realm or the
+thread running the cells. The options left out, or `undefined`, keep their
+value. `new ExecutorConfig(options)` creates a configuration from them, and
+`executor.config.update(options)` changes the configuration of an executor:
+the next cells use it.
 
 ## Interrupts and loop timeout
 

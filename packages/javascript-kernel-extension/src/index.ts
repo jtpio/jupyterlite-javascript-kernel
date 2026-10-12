@@ -6,10 +6,15 @@ import {
   JupyterFrontEndPlugin
 } from '@jupyterlab/application';
 
+import { PageConfig } from '@jupyterlab/coreutils';
+import { ISettingRegistry } from '@jupyterlab/settingregistry';
+
 import { IServiceWorkerManager } from '@jupyterlite/apputils';
 import type { IKernel } from '@jupyterlite/services';
 
 import { IKernelClient, IKernelSpecs } from '@jupyterlite/services';
+import { Token } from '@lumino/coreutils';
+import type { ReadonlyPartialJSONObject } from '@lumino/coreutils';
 import { DisposableDelegate } from '@lumino/disposable';
 import type { IDisposable } from '@lumino/disposable';
 import { Signal } from '@lumino/signaling';
@@ -26,6 +31,34 @@ import jsLogo32 from '../style/icons/logo-32x32.png';
 import jsLogo64 from '../style/icons/logo-64x64.png';
 
 /**
+ * The id of the plugin of the settings of the kernels.
+ */
+const KERNEL_SETTINGS_ID =
+  '@jupyterlite/javascript-kernel-extension:kernel-settings';
+
+/**
+ * The settings of the JavaScript kernels.
+ */
+interface IKernelSettings {
+  /**
+   * The options of a kernel from the current settings, read when the kernel
+   * starts.
+   */
+  kernelOptions(
+    runtime: RuntimeMode
+  ): Promise<Partial<JavaScriptKernel.IOptions>>;
+}
+
+/**
+ * The token of the settings of the JavaScript kernels, private to the
+ * extension.
+ */
+const IKernelSettings = new Token<IKernelSettings>(
+  '@jupyterlite/javascript-kernel-extension:IKernelSettings',
+  'The settings of the JavaScript kernels.'
+);
+
+/**
  * Register a JavaScript kernelspec for a given runtime.
  */
 interface IRegisterKernelOptions {
@@ -33,13 +66,19 @@ interface IRegisterKernelOptions {
   displayName: string;
   runtime: RuntimeMode;
   browsingContextId?: string;
+
+  /**
+   * The settings of the kernels. Without them, the kernels use the defaults
+   * of the runtime.
+   */
+  settings?: IKernelSettings | null;
 }
 
 const registerKernel = (
   kernelspecs: IKernelSpecs,
   options: IRegisterKernelOptions
 ) => {
-  const { name, displayName, runtime, browsingContextId } = options;
+  const { name, displayName, runtime, browsingContextId, settings } = options;
 
   kernelspecs.register({
     spec: {
@@ -63,8 +102,12 @@ const registerKernel = (
       }
     },
     create: async (options: IKernel.IOptions): Promise<IKernel> => {
+      // Read when the kernel starts, also on restart: the running kernels
+      // keep their options
+      const settingsOptions = (await settings?.kernelOptions(runtime)) ?? {};
       const kernel = new JavaScriptKernel({
         ...options,
+        ...settingsOptions,
         runtime,
         browsingContextId,
         startupExtensions: Private.startupExtensions
@@ -128,6 +171,60 @@ class JavaScriptKernelStartupRegistry implements IJavaScriptKernelStartupRegistr
 }
 
 namespace Private {
+  /**
+   * The options of a kernel from the settings of the kernels. The values of
+   * the wrong type, which the settings registry should not let through, are
+   * left out, so the kernel uses its defaults.
+   */
+  export function toKernelOptions(
+    composite: ReadonlyPartialJSONObject,
+    runtime: RuntimeMode
+  ): Partial<JavaScriptKernel.IOptions> {
+    const flag = (key: string): boolean | undefined => {
+      const value = composite[key];
+      return typeof value === 'boolean' ? value : undefined;
+    };
+    const count = (key: string): number | undefined => {
+      const value = composite[key];
+      return typeof value === 'number' && Number.isFinite(value) && value >= 0
+        ? value
+        : undefined;
+    };
+    return {
+      executorOptions: {
+        magicImports: {
+          enabled: flag('magicImports'),
+          baseUrl: resolveCdnUrl(composite.magicImportsBaseUrl),
+          enableAutoNpm: flag('magicImportsNpmPrefix'),
+          appendEsmSuffix: flag('magicImportsEsmSuffix')
+        }
+      },
+      maxStreamOutput: count('maxStreamOutput'),
+      // The Web Worker runs off the page thread: its loops are interrupted,
+      // or it is restarted
+      loopTimeout: runtime === 'iframe' ? count('loopTimeout') : undefined
+    };
+  }
+
+  /**
+   * Resolve the CDN base URL of the settings against the URL of the site.
+   *
+   * A relative URL is made absolute here, in the page: the dynamic imports
+   * would resolve it against the page in the iframe, and against the script
+   * of the Web Worker.
+   */
+  export function resolveCdnUrl(value: unknown): string | undefined {
+    const url = typeof value === 'string' ? value.trim() : '';
+    if (!url) {
+      return undefined;
+    }
+    try {
+      return new URL(url, new URL(PageConfig.getBaseUrl(), location.href)).href;
+    } catch {
+      return undefined;
+    }
+  }
+
   export const startupExtensions: JavaScriptKernel.IStartupExtension[] = [];
   export const kernels = new Set<JavaScriptKernel>();
 
@@ -176,17 +273,60 @@ const startupExtensionsRegistry: JupyterFrontEndPlugin<IJavaScriptKernelStartupR
   };
 
 /**
+ * Plugin providing the settings of the JavaScript kernels, edited in the
+ * Settings Editor, with the defaults of the deployment from overrides.json.
+ */
+const kernelSettings: JupyterFrontEndPlugin<IKernelSettings> = {
+  id: KERNEL_SETTINGS_ID,
+  description: 'Provides the settings of the JavaScript kernels.',
+  autoStart: true,
+  provides: IKernelSettings,
+  optional: [ISettingRegistry],
+  activate: (
+    app: JupyterFrontEnd,
+    registry: ISettingRegistry | null
+  ): IKernelSettings => {
+    // Not awaited, so the kernels are registered at once: only the kernels
+    // starting wait for the settings
+    const loaded = registry
+      ? registry.load(KERNEL_SETTINGS_ID).catch(error => {
+          console.warn(
+            '[javascript-kernel] Failed to load the settings, using the defaults.',
+            error
+          );
+          return null;
+        })
+      : Promise.resolve(null);
+    return {
+      kernelOptions: async runtime => {
+        const settings = await loaded;
+        // The composite has the last saved values
+        return settings
+          ? Private.toKernelOptions(settings.composite, runtime)
+          : {};
+      }
+    };
+  }
+};
+
+/**
  * Plugin registering the iframe JavaScript kernel.
  */
 const kernelIFrame: JupyterFrontEndPlugin<void> = {
   id: '@jupyterlite/javascript-kernel-extension:kernel-iframe',
   autoStart: true,
   requires: [IKernelSpecs],
-  activate: (app: JupyterFrontEnd, kernelspecs: IKernelSpecs) => {
+  optional: [IKernelSettings],
+  activate: (
+    app: JupyterFrontEnd,
+    kernelspecs: IKernelSpecs,
+    settings: IKernelSettings | null
+  ) => {
     registerKernel(kernelspecs, {
       name: 'javascript',
       displayName: 'JavaScript (IFrame)',
-      runtime: 'iframe'
+      runtime: 'iframe',
+      settings
     });
   }
 };
@@ -198,16 +338,18 @@ const kernelWorker: JupyterFrontEndPlugin<void> = {
   id: '@jupyterlite/javascript-kernel-extension:kernel-worker',
   autoStart: true,
   requires: [IKernelSpecs],
-  optional: [IServiceWorkerManager],
+  optional: [IServiceWorkerManager, IKernelSettings],
   activate: (
     app: JupyterFrontEnd,
     kernelspecs: IKernelSpecs,
-    serviceWorkerManager: IServiceWorkerManager | null
+    serviceWorkerManager: IServiceWorkerManager | null,
+    settings: IKernelSettings | null
   ) => {
     registerKernel(kernelspecs, {
       name: 'javascript-worker',
       displayName: 'JavaScript (Web Worker)',
       runtime: 'worker',
+      settings,
       // The service worker relays the requests for user input of prompt()
       browsingContextId: serviceWorkerManager?.browsingContextId
     });
@@ -232,7 +374,14 @@ const kernelInterrupts: JupyterFrontEndPlugin<void> = {
 
 const plugins: Array<
   | JupyterFrontEndPlugin<IJavaScriptKernelStartupRegistry>
+  | JupyterFrontEndPlugin<IKernelSettings>
   | JupyterFrontEndPlugin<void>
-> = [startupExtensionsRegistry, kernelIFrame, kernelWorker, kernelInterrupts];
+> = [
+  startupExtensionsRegistry,
+  kernelSettings,
+  kernelIFrame,
+  kernelWorker,
+  kernelInterrupts
+];
 
 export default plugins;
