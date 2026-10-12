@@ -2,8 +2,8 @@
 // Distributed under the terms of the Modified BSD License.
 
 /**
- * Build the single-file bundles of the runtime from lib/, with acorn and
- * astring included, for the kernels that do not use npm:
+ * Build the single-file bundles of the runtime from lib/, with acorn,
+ * acorn-walk and astring included, for the kernels that do not use npm:
  *
  *   dist/javascript-kernel-runtime.umd.js      UMD (CommonJS, AMD or global)
  *   dist/javascript-kernel-runtime.umd.min.js  the same, minified
@@ -43,13 +43,17 @@ function dependency(dependencyName) {
   return { name: dependencyName, version, text };
 }
 
-const dependencies = [dependency('acorn'), dependency('astring')];
+const dependencies = [
+  dependency('acorn'),
+  dependency('acorn-walk'),
+  dependency('astring')
+];
 
 const banner =
   `${name} ${version} | ${license}\n` +
   `Includes ${dependencies
     .map(dependency => `${dependency.name} ${dependency.version} (MIT)`)
-    .join(' and ')}, see THIRD_PARTY_LICENSES.txt`;
+    .join(', ')}, see THIRD_PARTY_LICENSES.txt`;
 
 /**
  * The rspack configuration of one of the bundles.
@@ -64,7 +68,7 @@ function config({ filename, library, minimize, module = false }) {
     node: false,
     devtool: 'source-map',
     resolve: {
-      // The ES modules of acorn and astring, not the browser build of astring
+      // The ES modules of the dependencies, not the browser build of astring
       mainFields: ['module', 'main'],
       conditionNames: ['import', 'module', 'default']
     },

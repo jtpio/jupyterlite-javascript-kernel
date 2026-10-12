@@ -10,6 +10,7 @@ import {
   KERNELS,
   WORKER_KERNEL,
   createNotebook,
+  getOutputs,
   runCode,
   waitForKernelIdle
 } from './utils';
@@ -192,8 +193,59 @@ for (const kernel of KERNELS) {
         other === IFRAME_KERNEL ? "'object'" : "'undefined'"
       ]);
     });
+
+    test('Keep running after a cell replaces postMessage and Function', async ({
+      page
+    }) => {
+      await createNotebook(page, kernel);
+      await runCode(page, 'function postMessage() {}');
+      let index = await runCode(page, '1 + 1');
+      expect(await page.notebook.getCellTextOutput(index)).toEqual(['2']);
+
+      await runCode(page, 'Function = undefined;');
+      index = await runCode(page, 'const point = { x: 1 + 2 };\npoint.x');
+      expect(await page.notebook.getCellTextOutput(index)).toEqual(['3']);
+
+      // The completion evaluates the code before the dot
+      const input = await page.notebook.getCellInputLocator(index + 1);
+      await input!.click();
+      await page.keyboard.type('point.');
+      await page.keyboard.press('Tab');
+      await expect(
+        page.locator('.jp-Completer-item .jp-Completer-match').first()
+      ).toHaveText('x');
+    });
   });
 }
+
+test.describe(`Closed runtime (${WORKER_KERNEL.displayName})`, () => {
+  test('Fail the requests once a cell closed the Web Worker', async ({
+    page
+  }) => {
+    await createNotebook(page, WORKER_KERNEL);
+    let index = await runCode(page, 'self.close()');
+    const stopped =
+      'RuntimeStoppedError: The JavaScript runtime stopped: the code closed the Web Worker with close(). Restart the kernel.';
+    await expect(
+      await getOutputs(page, index, 'application/vnd.jupyter.stderr')
+    ).toHaveText(stopped);
+
+    // The next cells fail instead of waiting forever
+    index = await runCode(page, '1 + 1');
+    await expect(
+      await getOutputs(page, index, 'application/vnd.jupyter.stderr')
+    ).toHaveText(stopped);
+
+    await page.menu.clickMenuItem('Kernel>Restart Kernel…');
+    await page
+      .getByRole('dialog')
+      .getByRole('button', { name: 'Confirm Kernel Restart' })
+      .click();
+    await waitForKernelIdle(page, WORKER_KERNEL);
+    index = await runCode(page, '1 + 1');
+    expect(await page.notebook.getCellTextOutput(index)).toEqual(['2']);
+  });
+});
 
 test.describe(`Kernel info (${IFRAME_KERNEL.displayName})`, () => {
   test('Store the language info in the notebook metadata', async ({ page }) => {

@@ -4,6 +4,7 @@
 import type { KernelMessage } from '@jupyterlab/services';
 
 import { parse, type Comment } from 'acorn';
+import { simple as walkSimple } from 'acorn-walk';
 import { generate } from 'astring';
 
 import type { IMimeBundle } from '@jupyterlab/nbformat';
@@ -19,8 +20,20 @@ import {
   isRegExp,
   isSet
 } from './inspect';
+import {
+  LOOP_GUARD_NAME,
+  loopGuardCall,
+  stripLoopGuardCalls,
+  type LoopGuard,
+  type LoopKind
+} from './interrupt';
 import { Introspection, type IDeclarationDoc } from './introspection';
-import { SourceEdits, lineStarts, type PositionMap } from './source_edits';
+import {
+  SourceEdits,
+  lineStarts,
+  offsetToLineColumn,
+  type PositionMap
+} from './source_edits';
 import {
   CellSyntaxError,
   calibrate,
@@ -46,10 +59,27 @@ const PROBE_URL = '__jsKernelProbe__';
 const MAX_CELLS = 500;
 
 /**
+ * The names of the parameters of the compiled cells, for the helpers the
+ * kernel passes to them: the loop guard.
+ */
+const HELPER_PARAMETERS = [LOOP_GUARD_NAME];
+
+/**
  * The minimum number of frames of the stack traces: the frames of the kernel
  * take some, even if they are not shown.
  */
 const STACK_TRACE_LIMIT = 50;
+
+/**
+ * The kinds of the loop statements, by node type.
+ */
+const LOOP_KINDS: Record<string, LoopKind> = {
+  ForStatement: 'for',
+  ForInStatement: 'for-in',
+  ForOfStatement: 'for-of',
+  WhileStatement: 'while',
+  DoWhileStatement: 'do-while'
+};
 
 /**
  * The ECMAScript edition accepted by the kernel.
@@ -231,6 +261,25 @@ export class JavaScriptExecutor {
   constructor(globalScope: Record<string, any>, config?: ExecutorConfig) {
     this._globalScope = globalScope;
     this._config = config || new ExecutorConfig();
+    // The Function constructor of the realm, read before any code of the
+    // cells runs, which could replace it
+    const scopeFunction = safe(() => globalScope.Function);
+    this._functionConstructor =
+      typeof scopeFunction === 'function' ? scopeFunction : Function;
+  }
+
+  /**
+   * The guard called by the loops of the cells, to interrupt them. Without
+   * it (the default), the loops are not instrumented.
+   *
+   * The functions of a cell keep the guard of the cell, also when they are
+   * called later, from another cell or a callback.
+   */
+  get loopGuard(): LoopGuard | null {
+    return this._loopGuard;
+  }
+  set loopGuard(value: LoopGuard | null) {
+    this._loopGuard = value;
   }
 
   /**
@@ -273,7 +322,11 @@ export class JavaScriptExecutor {
       throw this._toCellSyntaxError(error, name);
     }
 
-    const { edited, map, hoisted, withReturn } = this._rewriteCell(code, ast);
+    const { edited, map, hoisted, withReturn } = this._rewriteCell(
+      code,
+      ast,
+      options.name
+    );
 
     // The hoisted code goes on a line of its own, before the code of the
     // cell, whose lines are kept. The ";" stops a "use strict" directive,
@@ -293,12 +346,47 @@ export class JavaScriptExecutor {
       })
     );
 
+    if (edited.includes(LOOP_GUARD_NAME)) {
+      this._editedCode.set(name, edited);
+    }
+
+    // The loop guard is a parameter of the compiled function, which the code
+    // of the cell can not replace
+    const compiled = this._compile(body);
+    const guard = this._loopGuard?.fn;
     return {
-      asyncFunction: this._compile(body),
+      asyncFunction: function (this: unknown) {
+        return compiled.call(this, guard);
+      },
       withReturn,
       docs: this._declarationDocs(code, ast, comments),
       name
     };
+  }
+
+  /**
+   * The source code of a function, as written in its cell: without the
+   * calls to the loop guard added by the kernel.
+   *
+   * @param fn - The function.
+   */
+  functionSource(fn: unknown): string {
+    const source = safe(() => Function.prototype.toString.call(fn), '');
+    if (!source.includes(LOOP_GUARD_NAME)) {
+      return source;
+    }
+    // The function is in the edited code of a cell, from the newest
+    for (const [name, edited] of [...this._editedCode].reverse()) {
+      const start = edited.indexOf(source);
+      const cell = this._cells.get(name);
+      if (start < 0 || !cell) {
+        continue;
+      }
+      const from = cell.map.toOriginal(start);
+      const to = cell.map.toOriginal(start + source.length - 1) + 1;
+      return cell.code.slice(from, to);
+    }
+    return stripLoopGuardCalls(source);
   }
 
   /**
@@ -681,7 +769,7 @@ export class JavaScriptExecutor {
     }
 
     if (typeof value === 'function') {
-      const source = safe(() => Function.prototype.toString.call(value), '');
+      const source = this.functionSource(value);
       return {
         'text/plain': text(),
         'text/html': `<pre style="margin:0"><code>${escapeHtml(source)}</code></pre>`
@@ -831,7 +919,8 @@ export class JavaScriptExecutor {
             this._globalScope
           ),
         builtinDocumentation: expression =>
-          this.getBuiltinDocumentation(expression)
+          this.getBuiltinDocumentation(expression),
+        functionSource: fn => this.functionSource(fn)
       });
     }
     return this._introspection;
@@ -880,12 +969,7 @@ export class JavaScriptExecutor {
    * Create a function using the runtime realm's Function constructor.
    */
   private _createScopedFunction(...args: string[]): JSCallable {
-    const scopeFunction = this._globalScope.Function;
-    const functionConstructor =
-      typeof scopeFunction === 'function'
-        ? (scopeFunction as FunctionConstructor)
-        : Function;
-    return functionConstructor(...args) as JSCallable;
+    return this._functionConstructor(...args) as JSCallable;
   }
 
   /**
@@ -1072,7 +1156,8 @@ export class JavaScriptExecutor {
    */
   private _rewriteCell(
     code: string,
-    ast: any
+    ast: any,
+    cellName?: string
   ): {
     edited: string;
     map: PositionMap;
@@ -1080,6 +1165,9 @@ export class JavaScriptExecutor {
     withReturn: boolean;
   } {
     const edits = new SourceEdits(code);
+    // First, so that the end of a loop goes before the texts inserted after
+    // the statement
+    this._instrumentLoops(edits, ast, cellName);
     const hoisted: string[] = [];
     // The names of the builtin globals that the code of the cell can assign
     // again after their declaration
@@ -1148,6 +1236,48 @@ export class JavaScriptExecutor {
 
     const { code: edited, map } = edits.apply();
     return { edited, map, hoisted: hoisted.join(' '), withReturn };
+  }
+
+  /**
+   * Insert a call to the loop guard at the start of the body of every loop
+   * of a cell, in its functions too. The body becomes a block when it is a
+   * single statement. The inserted texts have no line breaks, so the lines
+   * of the cell are kept.
+   */
+  private _instrumentLoops(
+    edits: SourceEdits,
+    ast: any,
+    cellName?: string
+  ): void {
+    const guard = this._loopGuard;
+    if (!guard) {
+      return;
+    }
+    let starts: number[] | null = null;
+    const instrument = (node: any) => {
+      starts ??= lineStarts(edits.source);
+      const { line, column } = offsetToLineColumn(starts, node.start);
+      const kind =
+        node.type === 'ForOfStatement' && node.await
+          ? 'for-await'
+          : LOOP_KINDS[node.type];
+      const call = loopGuardCall(
+        guard.registerSite({ kind, line, column: column + 1, cell: cellName })
+      );
+      const body = node.body;
+      if (body.type === 'BlockStatement') {
+        edits.insert(body.start + 1, call);
+      } else {
+        edits.insert(body.start, `{${call}`);
+        edits.insert(body.end, '}');
+      }
+    };
+    walkSimple(
+      ast,
+      Object.fromEntries(
+        Object.keys(LOOP_KINDS).map(type => [type, instrument])
+      )
+    );
   }
 
   /**
@@ -1243,13 +1373,13 @@ export class JavaScriptExecutor {
    * Compile the body of a cell to an async function, in the realm of the
    * global scope.
    */
-  private _compile(body: string): () => Promise<any> {
+  private _compile(body: string): (...helpers: unknown[]) => Promise<any> {
     if (!this._asyncFunction) {
       this._asyncFunction = this._createScopedFunction(
         'return (async function () {}).constructor'
-      )() as (...args: string[]) => () => Promise<any>;
+      )() as (...args: string[]) => (...helpers: unknown[]) => Promise<any>;
     }
-    return this._asyncFunction(...this._helperParameters, body);
+    return this._asyncFunction(...HELPER_PARAMETERS, body);
   }
 
   /**
@@ -1294,6 +1424,7 @@ export class JavaScriptExecutor {
         break;
       }
       this._cells.delete(oldest);
+      this._editedCode.delete(oldest);
     }
   }
 
@@ -1579,15 +1710,18 @@ export class JavaScriptExecutor {
   private _formatStack = (error: unknown, colors: boolean) =>
     this.formatStackFrames(error, colors);
 
-  /**
-   * The names of the parameters of the compiled cells, for the helpers the
-   * kernel passes to them.
-   */
-  private _helperParameters: string[] = [];
-  private _asyncFunction: ((...args: string[]) => () => Promise<any>) | null =
-    null;
+  private _asyncFunction:
+    | ((...args: string[]) => (...helpers: unknown[]) => Promise<any>)
+    | null = null;
   private _calibration: ICalibration | null | undefined = undefined;
   private _cells = new Map<string, ICellSource>();
+  /**
+   * The edited code of the cells with loops, to show the source of their
+   * functions without the loop guard.
+   */
+  private _editedCode = new Map<string, string>();
+  private _loopGuard: LoopGuard | null = null;
+  private _functionConstructor: FunctionConstructor;
   private _silentCount = 0;
   private _introspection: Introspection | null = null;
   private _config: ExecutorConfig;

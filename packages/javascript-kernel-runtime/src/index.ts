@@ -8,6 +8,7 @@ export { uuid, decodeUtf8 } from './env';
 export * from './errors';
 export * from './executor';
 export * from './inspect';
+export * from './interrupt';
 export * from './introspection';
 export * from './output_batcher';
 export * from './protocol';

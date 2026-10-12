@@ -631,6 +631,7 @@ __metadata:
     "@jupyterlab/services": ^7.6.0
     "@rspack/core": ^2.2.5
     acorn: ^8.19.0
+    acorn-walk: ^8.3.5
     astring: ^1.9.0
     rimraf: ~5.0.1
     typescript: ~5.0.2
@@ -2145,7 +2146,16 @@ __metadata:
   languageName: node
   linkType: hard
 
-"acorn@npm:^8.19.0, acorn@npm:^8.9.0":
+"acorn-walk@npm:^8.3.5":
+  version: 8.3.5
+  resolution: "acorn-walk@npm:8.3.5"
+  dependencies:
+    acorn: ^8.11.0
+  checksum: ea8b55206c8913ce1d71a62dc10215ad919e3caf64053de72038e0be25dd8ef1454ffdcb6f25ed3b5325204f7ae18131e7fbbdfd7554f9538985a570188c60a8
+  languageName: node
+  linkType: hard
+
+"acorn@npm:^8.11.0, acorn@npm:^8.19.0, acorn@npm:^8.9.0":
   version: 8.19.0
   resolution: "acorn@npm:8.19.0"
   bin:

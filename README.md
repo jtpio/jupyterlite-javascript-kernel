@@ -107,6 +107,8 @@ kernels.
 
 Web Workers do not expose DOM APIs. In `JavaScript (Web Worker)`, APIs such as `document`, direct element access, and other main-thread-only browser APIs are unavailable.
 
+When the code of a cell does not stop after an interrupt, the kernel restarts the Web Worker, and the variables, functions, imports and widgets of the previous cells are lost. See [Interrupting code and loop protection](#interrupting-code-and-loop-protection). After `close()`, which stops the Web Worker, the cells fail with `The JavaScript runtime stopped: ... Restart the kernel.` instead of running forever.
+
 ### Import side effects in iframe mode
 
 In `JavaScript (IFrame)`, user code and imports execute in the runtime iframe scope.
@@ -167,6 +169,24 @@ Limits of automatic cleanup:
 - It will not reliably undo monkey-patched globals.
 - It will not automatically remove all event listeners or timers.
 - It cannot safely revert all stateful third-party module internals.
+
+## Interrupting code and loop protection
+
+The stop button of the notebook toolbar, **Kernel > Interrupt Kernel** and <kbd>I</kbd>, <kbd>I</kbd> stop the running cell with `KeyboardInterrupt: Execution interrupted`, and cancel the cells waiting to run. The variables of the cell are kept. An interrupt also clears the `setTimeout()` and `setInterval()` timers created by the cells, so it stops the background intervals, even when no cell is running.
+
+- A cell waiting for a promise that never settles, an `await` in a loop and a sleep loop stop at once, in both kernels.
+- `JavaScript (IFrame)` runs on the thread of the page, so a synchronous loop freezes JupyterLite: the page can not even handle the stop button. A loop running for more than 10 s without letting the page respond is stopped with a `LoopTimeoutError`, like `The while loop at line 2 of In[3] ran for more than 10 s without letting the page respond, so it was stopped.`, and the kernel keeps its state. The time spent waiting in `alert()`, `confirm()` and `prompt()` does not count. Change the limit with `Jupyter.loopTimeout = 30000` (in ms, 0 turns it off) or with the `loopTimeout` option of the kernel, or run long computations in `JavaScript (Web Worker)`.
+- `JavaScript (Web Worker)` runs off the page thread, so the page stays responsive. When the page is cross-origin isolated (served with the `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp` or `credentialless` headers), the loops stop at once and the state is kept. Otherwise, code that does not yield is stopped by restarting the Web Worker after 2 s, or at once with a second interrupt: the cell explains that the variables, functions, imports and widgets of the previous cells are lost.
+
+`KeyboardInterrupt` and `LoopTimeoutError` can be caught, but the loops keep throwing them, `KeyboardInterrupt` until the next execution and `LoopTimeoutError` until the page handles a task, and the cell is reported as failed even when its code caught them.
+
+Limitations:
+
+- The loops in the code of imported modules, in `eval()` and `new Function()` strings, and the long calls to built-in functions are not stopped in `JavaScript (IFrame)`, and in `JavaScript (Web Worker)` they only stop when the Web Worker is restarted.
+- `prompt()` in `JavaScript (IFrame)` is the native dialog of the browser, which blocks the page until it is closed.
+- The sketch of the p5.js kernel shown with `%show` runs in its own iframe, without loop protection.
+- An interrupted cell is abandoned, not unwound: its `finally` blocks do not run, and a pending `fetch()` may still resume it later. Its output then goes to the last cell that ran.
+- The guard checked by the loops makes the loops doing almost nothing about twice as slow. The loops doing real work, and the array methods like `map()`, are barely affected.
 
 ## Rich output
 
@@ -388,8 +408,8 @@ Disable iframe mode:
 
 The repository contains three npm packages:
 
-- `@jupyterlite/javascript-kernel-runtime`: the code running next to the user code, in the iframe or the Web Worker. It executes the cells, formats the outputs, and implements comms and widgets. It does not depend on JupyterLite, so that other JavaScript kernels can reuse it. It is engine-neutral: it only needs the ECMAScript built-ins, and compiles without the DOM types, which the build checks. It also ships single-file builds, with `acorn` and `astring` included, for kernels that do not use npm, and exports the engine-neutral helpers of the tracebacks, like `parseStack` and `formatError`, for other kernels. The evaluator batches the stream outputs: a host can pass its `scheduler` (or `null` when the engine has no host timers, and then calls `evaluator.flushOutputs()` itself), a `flushInterval` (0 turns the batching off) and a `maxStreamOutput` per cell. See its [README](packages/javascript-kernel-runtime/README.md).
-- `@jupyterlite/javascript-kernel`: the JupyterLite kernel, with the iframe and Web Worker runtimes. It also exports everything from `@jupyterlite/javascript-kernel-runtime`.
+- `@jupyterlite/javascript-kernel-runtime`: the code running next to the user code, in the iframe or the Web Worker. It executes the cells, formats the outputs, and implements comms and widgets. It does not depend on JupyterLite, so that other JavaScript kernels can reuse it. It is engine-neutral: it only needs the ECMAScript built-ins, and compiles without the DOM types, which the build checks. It also ships single-file builds, with `acorn`, `acorn-walk` and `astring` included, for kernels that do not use npm, and exports the engine-neutral helpers of the tracebacks, like `parseStack` and `formatError`, for other kernels. The evaluator batches the stream outputs: a host can pass its `scheduler` (or `null` when the engine has no host timers, and then calls `evaluator.flushOutputs()` itself), a `flushInterval` (0 turns the batching off) and a `maxStreamOutput` per cell. It interrupts the cells with `evaluator.interrupt()`, and stops the loops with a `loopTimeout` or, from another thread, an `interruptBuffer`. See its [README](packages/javascript-kernel-runtime/README.md).
+- `@jupyterlite/javascript-kernel`: the JupyterLite kernel, with the iframe and Web Worker runtimes. It also exports everything from `@jupyterlite/javascript-kernel-runtime`. JupyterLite only cancels the queued cells on interrupt: `installKernelInterrupts(client)` makes its kernel client also call the `interrupt()` method of the kernels, like `JavaScriptKernel.interrupt()`. The extension calls it, and the extensions of kernels building on `JavaScriptKernel`, like the p5.js kernel, can call it too, since installing it twice does nothing.
 - `@jupyterlite/javascript-kernel-extension`: the JupyterLite extension registering the kernels.
 
 ### Development install

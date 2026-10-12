@@ -465,6 +465,12 @@ export interface IIntrospectionOptions {
    * documentation.
    */
   builtinDocumentation?: (expression: string) => string | null;
+
+  /**
+   * The source code of a function, as written by the user. Defaults to
+   * Function.prototype.toString.
+   */
+  functionSource?: (fn: unknown) => string;
 }
 
 /**
@@ -475,6 +481,7 @@ export class Introspection {
     this._globalScope = options.globalScope;
     this._evaluate = options.evaluate;
     this._builtinDocumentation = options.builtinDocumentation;
+    this._functionSource = options.functionSource;
   }
 
   /**
@@ -634,7 +641,11 @@ export class Introspection {
         (detailLevel > 0 || source.split('\n').length <= 30)
       ) {
         lines.push(label('Source:'));
-        lines.push(source);
+        lines.push(
+          this._functionSource
+            ? safe(() => this._functionSource!(value), source)
+            : source
+        );
       }
     } else {
       const type =
@@ -766,5 +777,6 @@ export class Introspection {
   private _globalScope: Record<string, any>;
   private _evaluate: (expression: string) => unknown;
   private _builtinDocumentation?: (expression: string) => string | null;
+  private _functionSource?: (fn: unknown) => string;
   private _pages: WeakMap<object, string> | null = null;
 }

@@ -12,15 +12,23 @@ import { createConsole, type KernelConsole } from './console';
 import { createDisplay, type IDisplay } from './display';
 import { hostConsole } from './env';
 import { setPromiseStateResolver, type PromiseStateResolver } from './inspect';
-import { setDoc } from './introspection';
+import { LoopGuard, TimerRegistry, defaultClock } from './interrupt';
+import { getDoc, setDoc } from './introspection';
 import { OutputBatcher } from './output_batcher';
 import type { RuntimeOutputHandler } from './protocol';
+import { safe } from './utils';
 import { Widget, createWidgetClasses } from './widgets';
 
 /**
  * The names of the globals installed by the evaluator.
  */
 const GLOBALS = ['display', 'clearOutput', 'prompt', 'Jupyter'];
+
+/**
+ * The functions of the global scope which block the page until the user
+ * replies: the time they take does not count in the loop timeout.
+ */
+const BLOCKING_FUNCTIONS = ['alert', 'confirm', 'prompt', 'print'];
 
 /**
  * Shared execution logic for iframe and worker runtime backends.
@@ -52,6 +60,13 @@ export class JavaScriptRuntimeEvaluator {
     this._onOutput = this._outputs.handler;
     this._executor =
       options.executor ?? new JavaScriptExecutor(options.globalScope);
+    this._guard = new LoopGuard({
+      globalScope: this._globalScope,
+      timeout: options.loopTimeout,
+      interruptBuffer: options.interruptBuffer,
+      now
+    });
+    this._executor.loopGuard = this._guard;
 
     this._requestInput = options.requestInput;
     if (options.promiseState) {
@@ -110,6 +125,10 @@ export class JavaScriptRuntimeEvaluator {
     }
     this._restoreConsole();
     this._restoreGlobals();
+    this._guard.dispose();
+    if (this._executor.loopGuard === this._guard) {
+      this._executor.loopGuard = null;
+    }
     this._commManager.dispose();
     if (this._resetPromiseState) {
       setPromiseStateResolver(null);
@@ -152,6 +171,34 @@ export class JavaScriptRuntimeEvaluator {
   }
 
   /**
+   * The time in milliseconds a loop of the cells can keep the page busy,
+   * 0 for no limit. The code of the cells changes it with
+   * `Jupyter.loopTimeout`.
+   */
+  get loopTimeout(): number {
+    return this._guard.timeout;
+  }
+  set loopTimeout(value: number) {
+    this._guard.timeout = value;
+  }
+
+  /**
+   * Interrupt the running cell, if any, and clear the timers created by the
+   * code of the cells, which also stops the intervals when no cell runs.
+   *
+   * The cell stops waiting for its promise and fails with a
+   * KeyboardInterrupt: this only stops a cell waiting for a promise, as the
+   * host can only call it while the code of the cell is not running. Its
+   * loops throw the error too, until the next execution. To stop a loop
+   * which never yields, the host runs the evaluator in another thread and
+   * sets the `interruptBuffer`.
+   */
+  interrupt(): void {
+    this._guard.interrupt();
+    this._timers.clearAll();
+  }
+
+  /**
    * Execute user code in the configured runtime global scope.
    */
   async execute(
@@ -162,6 +209,27 @@ export class JavaScriptRuntimeEvaluator {
   ): Promise<KernelMessage.IExecuteReplyMsg['content']> {
     this._parentHeader = parentHeader;
     this._outputs.resetStreamOutput();
+    if (executionCount > 0) {
+      // The timers of the startup code, run without execution count, are
+      // not cleared on interrupt
+      this._timers.enable();
+    }
+    this._guard.beginExecution();
+    try {
+      return await this._execute(code, executionCount, parentMessageId);
+    } finally {
+      this._guard.endExecution();
+    }
+  }
+
+  /**
+   * Execute user code, with the parent message ID of the request.
+   */
+  private _execute(
+    code: string,
+    executionCount: number,
+    parentMessageId?: string
+  ): Promise<KernelMessage.IExecuteReplyMsg['content']> {
     return this._withParentMessageId(parentMessageId, async () => {
       // The name of the cell in the tracebacks
       const name = executionCount > 0 ? `In[${executionCount}]` : undefined;
@@ -182,11 +250,16 @@ export class JavaScriptRuntimeEvaluator {
       }
 
       try {
-        const resultPromise = this._evalFunc(asyncFunction);
+        // An interrupt stops waiting for the promise of the cell
+        const result = await this._guard.race(this._evalFunc(asyncFunction));
+        // The code of the cell caught the error of the loop guard: the cell
+        // still fails with it
+        const tripped = this._guard.tripped;
+        if (tripped) {
+          throw tripped;
+        }
 
         if (withReturn) {
-          const result = await resultPromise;
-
           if (result !== undefined) {
             if (result instanceof Widget) {
               this._commManager.displayWidget(result.commId);
@@ -202,8 +275,6 @@ export class JavaScriptRuntimeEvaluator {
               });
             }
           }
-        } else {
-          await resultPromise;
         }
 
         return {
@@ -544,7 +615,11 @@ export class JavaScriptRuntimeEvaluator {
         // Show the outputs printed before the input box, since the request
         // blocks the runtime
         this._outputs.flush();
-        return requestInput(String(message), password, this._parentHeader);
+        try {
+          return requestInput(String(message), password, this._parentHeader);
+        } finally {
+          this._guard.resetClock();
+        }
       };
       const prompt = setDoc((message: unknown = '', defaultValue?: unknown) => {
         const value = ask(message, false);
@@ -566,19 +641,108 @@ export class JavaScriptRuntimeEvaluator {
     }
 
     const previousJupyter = scope.Jupyter;
-    scope.Jupyter = {
+    const jupyter: Record<string, unknown> = {
       ...(typeof previousJupyter === 'object' && previousJupyter !== null
         ? previousJupyter
         : {}),
       comm: this._commManager,
       widgets: createWidgetClasses(this._commManager)
     };
+    const guard = this._guard;
+    Object.defineProperty(jupyter, 'loopTimeout', {
+      get: () => guard.timeout,
+      set: (value: unknown) => {
+        const timeout = Number(value);
+        if (!Number.isFinite(timeout) || timeout < 0) {
+          throw new RangeError(
+            'Jupyter.loopTimeout must be a number of milliseconds, 0 for no limit'
+          );
+        }
+        guard.timeout = timeout;
+      },
+      enumerable: true,
+      configurable: true
+    });
+    scope.Jupyter = jupyter;
+
+    this._timers.install(scope);
+    this._wrapBlockingFunctions();
+  }
+
+  /**
+   * Restart the clock of the loop timeout after the functions waiting for
+   * the user, like alert() and prompt(), and the synchronous requests: the
+   * page is blocked on purpose. The functions are wrapped in proxies, which
+   * still look like the native functions when inspected.
+   */
+  private _wrapBlockingFunctions(): void {
+    const scope = this._globalScope;
+    const guard = this._guard;
+    const afterCall = <T extends (...args: any[]) => any>(
+      fn: T,
+      when: (thisArg: unknown) => boolean = () => true
+    ): T =>
+      new Proxy(fn, {
+        apply: (target, thisArg, args) => {
+          if (!when(thisArg)) {
+            return Reflect.apply(target, thisArg, args);
+          }
+          try {
+            return Reflect.apply(target, thisArg, args);
+          } finally {
+            guard.resetClock();
+          }
+        }
+      });
+
+    for (const name of BLOCKING_FUNCTIONS) {
+      const original = safe(() => scope[name]);
+      // The prompt() of the kernel restarts the clock itself
+      if (typeof original !== 'function' || getDoc(original) !== undefined) {
+        continue;
+      }
+      if (!this._previousGlobals.has(name)) {
+        this._previousGlobals.set(
+          name,
+          Object.getOwnPropertyDescriptor(scope, name)
+        );
+      }
+      scope[name] = afterCall(original);
+    }
+
+    const xhr = safe(() => scope.XMLHttpRequest?.prototype);
+    if (
+      xhr &&
+      typeof xhr.open === 'function' &&
+      typeof xhr.send === 'function'
+    ) {
+      const { open, send } = xhr;
+      const synchronous = new WeakSet<object>();
+      xhr.open = new Proxy(open, {
+        apply: (target, thisArg, args) => {
+          if (args.length > 2 && !args[2]) {
+            synchronous.add(thisArg);
+          } else {
+            synchronous.delete(thisArg);
+          }
+          return Reflect.apply(target, thisArg, args);
+        }
+      });
+      xhr.send = afterCall(send, thisArg => synchronous.has(thisArg as object));
+      this._restoreXhr = () => {
+        xhr.open = open;
+        xhr.send = send;
+      };
+    }
   }
 
   /**
    * Restore the globals replaced by the kernel.
    */
   private _restoreGlobals(): void {
+    this._timers.restore();
+    this._restoreXhr?.();
+    this._restoreXhr = null;
     const scope = this._globalScope;
     for (const [name, descriptor] of this._previousGlobals) {
       if (descriptor) {
@@ -644,6 +808,9 @@ export class JavaScriptRuntimeEvaluator {
   }
 
   private _globalScope: Record<string, any>;
+  private _guard: LoopGuard;
+  private _timers = new TimerRegistry();
+  private _restoreXhr: (() => void) | null = null;
   private _onOutput: RuntimeOutputHandler;
   private _outputs: OutputBatcher;
   private _executor: JavaScriptExecutor;
@@ -795,24 +962,30 @@ export namespace JavaScriptRuntimeEvaluator {
      * stderr. 5,000,000 by default, 0 for no limit.
      */
     maxStreamOutput?: number;
+
+    /**
+     * The time in milliseconds a loop of the cells can keep the page busy
+     * before it is stopped with a LoopTimeoutError, 0 (the default) for no
+     * limit. The time counts from the first iteration, until the page can
+     * handle a task. The code of the cells changes it with
+     * `Jupyter.loopTimeout`.
+     */
+    loopTimeout?: number;
+
+    /**
+     * A flag shared with the host, to interrupt the loops of a cell from
+     * another thread: the host sets its first element to a non-zero value
+     * (with Atomics.store), and the loops throw a KeyboardInterrupt. The
+     * evaluator resets it at the start of every execution. It is a view of
+     * a SharedArrayBuffer, available when the page is cross-origin isolated.
+     */
+    interruptBuffer?: Int32Array;
   }
 
   /**
    * The timers of a host.
    */
   export type IScheduler = OutputBatcher.IScheduler;
-}
-
-/**
- * The clock of a global scope: its performance.now, or else Date.now.
- */
-function defaultClock(scope: Record<string, any>): () => number {
-  const performance = scope.performance;
-  if (typeof performance?.now === 'function') {
-    const now = performance.now;
-    return () => now.call(performance);
-  }
-  return Date.now;
 }
 
 /**

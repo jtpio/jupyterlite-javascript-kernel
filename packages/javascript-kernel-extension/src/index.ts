@@ -9,14 +9,15 @@ import {
 import { IServiceWorkerManager } from '@jupyterlite/apputils';
 import type { IKernel } from '@jupyterlite/services';
 
-import { IKernelSpecs } from '@jupyterlite/services';
+import { IKernelClient, IKernelSpecs } from '@jupyterlite/services';
 import { DisposableDelegate } from '@lumino/disposable';
 import type { IDisposable } from '@lumino/disposable';
 import { Signal } from '@lumino/signaling';
 
 import {
   IJavaScriptKernelStartupRegistry,
-  JavaScriptKernel
+  JavaScriptKernel,
+  installKernelInterrupts
 } from '@jupyterlite/javascript-kernel';
 import type { RuntimeMode } from '@jupyterlite/javascript-kernel';
 
@@ -213,9 +214,25 @@ const kernelWorker: JupyterFrontEndPlugin<void> = {
   }
 };
 
+/**
+ * Plugin stopping the running cell of the JavaScript kernels when the user
+ * interrupts them: JupyterLite only cancels the queued cells.
+ */
+const kernelInterrupts: JupyterFrontEndPlugin<void> = {
+  id: '@jupyterlite/javascript-kernel-extension:interrupts',
+  description: 'Stops the running cell of the JavaScript kernels on interrupt.',
+  autoStart: true,
+  optional: [IKernelClient],
+  activate: (app: JupyterFrontEnd, client: IKernelClient | null) => {
+    if (client) {
+      installKernelInterrupts(client);
+    }
+  }
+};
+
 const plugins: Array<
   | JupyterFrontEndPlugin<IJavaScriptKernelStartupRegistry>
   | JupyterFrontEndPlugin<void>
-> = [startupExtensionsRegistry, kernelIFrame, kernelWorker];
+> = [startupExtensionsRegistry, kernelIFrame, kernelWorker, kernelInterrupts];
 
 export default plugins;

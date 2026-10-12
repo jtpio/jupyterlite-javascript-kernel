@@ -13,6 +13,7 @@
 // adds, measured once with a probe (see calibrate).
 
 import { inspect, isError } from './inspect';
+import { LOOP_GUARD_NAME } from './interrupt';
 import { PositionMap, lineStarts, offsetToLineColumn } from './source_edits';
 import { color, hasOwn, safe } from './utils';
 
@@ -239,6 +240,12 @@ export class CellSyntaxError extends SyntaxError {
 const RUNTIME_FILE = safe(() => parseStack(new Error().stack)[0]?.file, null);
 
 /**
+ * The start of the source URLs of the code the kernel compiles in the realm
+ * of the cells, like the loop guard.
+ */
+const KERNEL_SOURCE_PREFIX = '__jsKernel';
+
+/**
  * The names engines give to the code which is not in a function.
  */
 const UNNAMED = new Set([
@@ -425,6 +432,15 @@ export function mapFrames(
       : null;
   const fallbackToken = currentToken ?? Array.from(cells.keys()).pop() ?? null;
 
+  // The errors of the loop guard are thrown by the kernel, from the loop
+  const guard = frames.findIndex(
+    frame => frame.file === LOOP_GUARD_NAME || frame.name === LOOP_GUARD_NAME
+  );
+  if (guard >= 0) {
+    frames = frames.slice(guard + 1);
+    errorPosition = null;
+  }
+
   let mapped: IMappedFrame[] = [];
   frames.forEach((frame, i) => {
     let token: string | null = cells.has(frame.file) ? frame.file : null;
@@ -468,7 +484,9 @@ export function mapFrames(
   const isKernel = (frame: IMappedFrame) =>
     frame.token === null &&
     !frame.native &&
-    (frame.file === RUNTIME_FILE || !!kernelFiles?.has(frame.file));
+    (frame.file === RUNTIME_FILE ||
+      !!kernelFiles?.has(frame.file) ||
+      frame.file.startsWith(KERNEL_SOURCE_PREFIX));
   return mapped.filter((frame, i) => {
     if (isKernel(frame)) {
       return false;

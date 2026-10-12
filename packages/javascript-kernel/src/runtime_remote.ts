@@ -118,8 +118,16 @@ export function createRemoteRuntimeApi(
         requestInput: options.browsingContextId
           ? createInputRequester(options.baseUrl, options.browsingContextId)
           : undefined,
-        maxStreamOutput: options.maxStreamOutput
+        maxStreamOutput: options.maxStreamOutput,
+        loopTimeout: options.loopTimeout,
+        interruptBuffer: options.interruptBuffer
+          ? new Int32Array(options.interruptBuffer)
+          : undefined
       });
+    },
+
+    async interrupt(): Promise<void> {
+      evaluator?.interrupt();
     },
 
     async execute(

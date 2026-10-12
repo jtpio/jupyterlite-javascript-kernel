@@ -9,6 +9,8 @@ kernel that runs next to the user code. It covers:
 - Node.js-style `inspect()` of the values, and the `console`
 - `display()` and the rich outputs (HTML, Markdown, SVG, images, JSON, ...)
 - the tracebacks of the errors, with their locations in the cells
+- the interruption of the cells, and a timeout for the loops which keep the
+  page busy
 - completion, inspection (the documentation of the names) and `isComplete`
 - comms and [Jupyter Widgets](https://ipywidgets.readthedocs.io/)
 
@@ -23,10 +25,10 @@ to be embedded by engines like
 
 - `lib/`: one ES module per source file, with the types, for bundlers.
 - `dist/javascript-kernel-runtime.umd.js`, `dist/javascript-kernel-runtime.umd.min.js`
-  and `dist/javascript-kernel-runtime.mjs`: single-file builds with acorn and
-  astring included, for the kernels that do not use npm, with their source
-  maps. `dist/THIRD_PARTY_LICENSES.txt` has the licenses of acorn and
-  astring (MIT).
+  and `dist/javascript-kernel-runtime.mjs`: single-file builds with acorn,
+  acorn-walk and astring included, for the kernels that do not use npm, with
+  their source maps. `dist/THIRD_PARTY_LICENSES.txt` has the licenses of
+  acorn, acorn-walk and astring (MIT).
 
 ## Loading
 
@@ -93,6 +95,8 @@ const reply = await evaluator.execute('1 + 1', 1);
 | `maxStreamBufferSize`    | The size of the pending text of a stream, in UTF-16 code units, from which it is sent. 1,000,000 by default.                                                                                                                                                                  |
 | `maxStreamOutput`        | The number of characters a cell can print on stdout and stderr, counted from the start of the cell or its last `clear_output`: the rest is dropped, with a notice on stderr. 5,000,000 by default, 0 for no limit.                                                            |
 | `executor`               | A `JavaScriptExecutor`, to configure it, for example to turn off the magic imports.                                                                                                                                                                                           |
+| `loopTimeout`            | The time in milliseconds a loop of the cells can keep the page busy before it is stopped with a `LoopTimeoutError`, 0 (the default) for no limit. See [Interrupts and loop timeout](#interrupts-and-loop-timeout).                                                            |
+| `interruptBuffer`        | An `Int32Array` view of a `SharedArrayBuffer`, to interrupt the loops from another thread: the host sets its first element to 1 with `Atomics.store()`.                                                                                                                       |
 
 The methods of the evaluator:
 
@@ -110,6 +114,9 @@ The methods of the evaluator:
   messages of the frontend.
 - `flushOutputs()` sends the text written to stdout and stderr and not sent
   yet, see below.
+- `interrupt()` stops the running cell, if any, with a `KeyboardInterrupt`,
+  and clears the timers of the cells. `loopTimeout` gets and sets the loop
+  timeout. See [Interrupts and loop timeout](#interrupts-and-loop-timeout).
 - `reportUncaught(error, inPromise?)` prints an error thrown outside of an
   execution on stderr, as `Uncaught Error: ...`, or
   `Uncaught (in promise) Error: ...` for the reason of a rejected promise.
@@ -190,13 +197,8 @@ const evaluator = new runtime.JavaScriptRuntimeEvaluator({
 });
 ```
 
-The host owns the interruptions and the timers:
-
-- To interrupt a cell, stop the engine (with `JS_SetInterruptHandler` in
-  QuickJS, or by terminating the iframe or the Web Worker): `execute()`
-  reports the error the engine throws.
-- The cells use the timers of the host, if any. The runtime only uses the
-  ones of `scheduler`, to send the pending text of the streams.
+The cells use the timers of the host, if any. The runtime itself only uses
+the ones of `scheduler`, to send the pending text of the streams.
 
 The `import` statements of the cells load the npm packages from jsDelivr by
 default. Without network module loading, turn off the magic imports: the
@@ -212,6 +214,77 @@ const evaluator = new runtime.JavaScriptRuntimeEvaluator({
   executor: new runtime.JavaScriptExecutor(globalThis, config)
 });
 ```
+
+## Interrupts and loop timeout
+
+The evaluator inserts a call to a loop guard at the start of the body of
+every loop of the cells, in their functions too: `while (x) f();` becomes
+`while (x) {typeof __jsKernelLoop__ == 'function' && __jsKernelLoop__(3);f();}`.
+The inserted code has no line breaks, so the line numbers of the cells are
+kept, and the frames of the guard are not shown in the tracebacks. The guard
+is a parameter of the compiled cell, which the code of the cells can not
+replace, and the functions of a cell keep it when another cell or a callback
+calls them later. The code of a function moved elsewhere, like
+`fn.toString()` sent to a Web Worker, runs without the guard. `display()`
+and the inspection show the source of the functions as written in the cell.
+
+`evaluator.interrupt()` interrupts the running cell:
+
+- The cell stops waiting for its promise, and fails with
+  `KeyboardInterrupt: Execution interrupted`. This stops the cells waiting
+  for a promise which never settles, and the async loops. The variables of
+  the cell are kept.
+- Until the next execution, the loops throw the `KeyboardInterrupt`: a
+  continuation of the interrupted cell, like a `fetch()` which resolves
+  later, stops at its next loop.
+- The timers created by the cells with `setTimeout()` and `setInterval()`
+  are cleared, even when no cell is running: this stops the background
+  intervals. The timers of the startup code, run before the first execution
+  with an execution count, are kept. `requestAnimationFrame()` is not
+  tracked, as it drives the drawing loops of libraries like p5.js.
+
+The host calls `interrupt()` while the code of the cells is not running,
+when the engine handles a message. To stop a loop which never yields:
+
+- In a thread of its own, like a Web Worker, pass an `interruptBuffer`: the
+  loops check it every few milliseconds, and throw the `KeyboardInterrupt`
+  when the host sets it from another thread. The evaluator resets it at the
+  start of every execution.
+- On the thread of the page, like in an iframe, set a `loopTimeout`: a loop
+  which keeps the page busy for longer fails with a `LoopTimeoutError`
+  naming the loop, like
+  `The while loop at line 2 of In[3] ran for more than 10 s without letting the page respond`.
+  The time counts from the first iteration, until the engine runs a task (a
+  message posted on a `MessageChannel`, or a `setTimeout(0)`): it measures
+  how long the page could not render, through the microtasks too
+  (`while (true) { await null }`). The time spent in `alert()`, `confirm()`,
+  `prompt()`, `print()` and the synchronous `XMLHttpRequest`s does not
+  count. The code of the cells changes the timeout with
+  `Jupyter.loopTimeout = 60000` (in ms, 0 turns it off).
+- An engine with an interrupt handler, like `JS_SetInterruptHandler` in
+  QuickJS, stops the engine instead: `execute()` reports the error the
+  engine throws.
+
+The errors of the guard can be caught, but they are sticky: the loops throw
+them again until the next execution (`KeyboardInterrupt`) or the next task
+(`LoopTimeoutError`), and the cell fails with them even when its code caught
+them, like `try { while (true) {} } catch {}`.
+
+The guard does not cover the code of the imported modules, the code compiled
+with `eval()` and `new Function()`, and the long calls to built-in
+functions. It adds a function call per iteration: a loop doing almost
+nothing takes about twice as long, the loops doing real work much less. The
+guard reads the clock and the `interruptBuffer` about every 4 ms, with a
+number of iterations adapted to the speed of each loop, so a fast loop does
+not delay the checks of a slow loop running after it.
+
+The runtime exports the parts, for the kernels which compile the cells
+themselves: `LoopGuard` (`fn`, the guard passed to the compiled code,
+`registerSite()`, `beginExecution()`, `race(promise)`, `interrupt()`,
+`endExecution()`, `tripped`, `timeout`, `resetClock()`), `TimerRegistry`
+(`install(scope)`, `enable()`, `clearAll()`, `restore()`), the error names
+`KEYBOARD_INTERRUPT` and `LOOP_TIMEOUT`, and `createRuntimeError(scope, name,
+message)`. The executor instruments the loops when its `loopGuard` is set.
 
 ## Tracebacks
 
@@ -313,13 +386,14 @@ const { ename, evalue, traceback } = runtime.formatError(error, context);
 
 The other host APIs are optional:
 
-| Global        | Without it                                                       |
-| ------------- | ---------------------------------------------------------------- |
-| `crypto`      | `crypto.getRandomValues()`, or else `Math.random()`, for the ids |
-| `TextDecoder` | A built-in UTF-8 decoder                                         |
-| `URL`         | The import URLs are joined as strings                            |
-| `performance` | `Date.now()` for `console.time()`                                |
-| `console`     | The evaluator installs its console                               |
+| Global           | Without it                                                                                                   |
+| ---------------- | ------------------------------------------------------------------------------------------------------------ |
+| `crypto`         | `crypto.getRandomValues()`, or else `Math.random()`, for the ids                                             |
+| `TextDecoder`    | A built-in UTF-8 decoder                                                                                     |
+| `URL`            | The import URLs are joined as strings                                                                        |
+| `performance`    | `Date.now()` for `console.time()` and the loop timeout                                                       |
+| `MessageChannel` | `setTimeout(0)` marks the tasks for the loop timeout, or else it counts from the first loop of the execution |
+| `console`        | The evaluator installs its console                                                                           |
 
 `crypto.randomUUID()` only exists in secure contexts: the ids of the comms
 also work in JupyterLite served over plain http.

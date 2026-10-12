@@ -16,9 +16,10 @@ import {
 } from '@jupyterlite/javascript-kernel-runtime';
 
 import { createRemoteRuntimeApi } from './runtime_remote';
-import type {
-  IRemoteRuntimeApi,
-  RuntimeOutputCallback
+import {
+  RUNTIME_CLOSED_MESSAGE,
+  type IRemoteRuntimeApi,
+  type RuntimeOutputCallback
 } from './runtime_protocol';
 
 /**
@@ -33,6 +34,38 @@ export interface IRuntimeBackendOptions {
    * no limit. Defaults to the limit of the runtime package.
    */
   maxStreamOutput?: number;
+
+  /**
+   * The time in milliseconds a loop of the cells can keep the runtime busy
+   * before it is stopped with a LoopTimeoutError, 0 for no limit. Defaults
+   * to 10 s in the iframe, which runs on the thread of the page, and to no
+   * limit in the Web Worker.
+   */
+  loopTimeout?: number;
+}
+
+/**
+ * The error of a request to a Web Worker runtime restarted because its code
+ * did not stop when the kernel was interrupted.
+ */
+export class RuntimeRestartedError extends Error {
+  constructor() {
+    super(
+      'The code did not stop, so the Web Worker was restarted: the variables, functions and imports of the previous cells are lost. Run those cells again.'
+    );
+    this.name = 'RuntimeRestartedError';
+  }
+}
+
+/**
+ * The error of the requests to a runtime which stopped, for example a Web
+ * Worker closed by the code of a cell.
+ */
+export class RuntimeStoppedError extends Error {
+  constructor(reason: string) {
+    super(`The JavaScript runtime stopped: ${reason}. Restart the kernel.`);
+    this.name = 'RuntimeStoppedError';
+  }
 }
 
 /**
@@ -41,6 +74,11 @@ export interface IRuntimeBackendOptions {
 export interface IRuntimeBackend {
   readonly ready: Promise<void>;
   dispose(): void;
+
+  /**
+   * Interrupt the running cell, if any, and clear the timers of the cells.
+   */
+  interrupt(): Promise<void>;
   execute(
     code: string,
     executionCount: number,
@@ -96,6 +134,8 @@ abstract class AbstractRuntimeBackend implements IRuntimeBackend {
 
   abstract dispose(): void;
 
+  abstract interrupt(): Promise<void>;
+
   /**
    * Execute code via the remote runtime API.
    */
@@ -106,12 +146,18 @@ abstract class AbstractRuntimeBackend implements IRuntimeBackend {
     parentHeader?: KernelMessage.IHeader
   ): Promise<KernelMessage.IExecuteReplyMsg['content']> {
     await this.ready;
-    return this._getRemote().execute(
-      code,
-      executionCount,
-      parentMessageId,
-      parentHeader
+    const reply = this._call<KernelMessage.IExecuteReplyMsg['content']>(
+      remote =>
+        remote.execute(code, executionCount, parentMessageId, parentHeader)
     );
+    this._running = reply;
+    try {
+      return await reply;
+    } finally {
+      if (this._running === reply) {
+        this._running = null;
+      }
+    }
   }
 
   /**
@@ -122,7 +168,9 @@ abstract class AbstractRuntimeBackend implements IRuntimeBackend {
     cursorPos: number
   ): Promise<KernelMessage.ICompleteReplyMsg['content']> {
     await this.ready;
-    return this._getRemote().complete(code, cursorPos);
+    return this._call<KernelMessage.ICompleteReplyMsg['content']>(remote =>
+      remote.complete(code, cursorPos)
+    );
   }
 
   /**
@@ -134,7 +182,9 @@ abstract class AbstractRuntimeBackend implements IRuntimeBackend {
     detailLevel: KernelMessage.IInspectRequestMsg['content']['detail_level']
   ): Promise<KernelMessage.IInspectReplyMsg['content']> {
     await this.ready;
-    return this._getRemote().inspect(code, cursorPos, detailLevel);
+    return this._call<KernelMessage.IInspectReplyMsg['content']>(remote =>
+      remote.inspect(code, cursorPos, detailLevel)
+    );
   }
 
   /**
@@ -144,7 +194,9 @@ abstract class AbstractRuntimeBackend implements IRuntimeBackend {
     code: string
   ): Promise<KernelMessage.IIsCompleteReplyMsg['content']> {
     await this.ready;
-    return this._getRemote().isComplete(code);
+    return this._call<KernelMessage.IIsCompleteReplyMsg['content']>(remote =>
+      remote.isComplete(code)
+    );
   }
 
   /**
@@ -158,15 +210,9 @@ abstract class AbstractRuntimeBackend implements IRuntimeBackend {
     parentMessageId?: string
   ): Promise<void> {
     await this.ready;
-    if (this._remote) {
-      await this._remote.handleCommOpen(
-        commId,
-        targetName,
-        data,
-        buffers,
-        parentMessageId
-      );
-    }
+    await this._callComm(remote =>
+      remote.handleCommOpen(commId, targetName, data, buffers, parentMessageId)
+    );
   }
 
   /**
@@ -179,9 +225,9 @@ abstract class AbstractRuntimeBackend implements IRuntimeBackend {
     parentMessageId?: string
   ): Promise<void> {
     await this.ready;
-    if (this._remote) {
-      await this._remote.handleCommMsg(commId, data, buffers, parentMessageId);
-    }
+    await this._callComm(remote =>
+      remote.handleCommMsg(commId, data, buffers, parentMessageId)
+    );
   }
 
   /**
@@ -194,24 +240,66 @@ abstract class AbstractRuntimeBackend implements IRuntimeBackend {
     parentMessageId?: string
   ): Promise<void> {
     await this.ready;
-    if (this._remote) {
-      await this._remote.handleCommClose(
-        commId,
-        data,
-        buffers,
-        parentMessageId
-      );
+    await this._callComm(remote =>
+      remote.handleCommClose(commId, data, buffers, parentMessageId)
+    );
+  }
+
+  /**
+   * Send a request to the remote runtime. The request fails when the runtime
+   * stops or restarts before replying: Comlink would wait forever.
+   */
+  protected async _call<T>(
+    request: (remote: Comlink.Remote<IRemoteRuntimeApi>) => Promise<T>
+  ): Promise<T> {
+    if (this._stopped) {
+      throw this._stopped;
+    }
+    if (!this._remote) {
+      throw new Error(`${this._runtimeLabel} runtime is not initialized`);
+    }
+    return Promise.race([request(this._remote), this._lost.promise]);
+  }
+
+  /**
+   * Send a comm message to the remote runtime, unless it is not initialized
+   * or stopped: the comms of a stopped runtime are gone.
+   */
+  private async _callComm(
+    request: (remote: Comlink.Remote<IRemoteRuntimeApi>) => Promise<void>
+  ): Promise<void> {
+    if (!this._remote || this._stopped) {
+      return;
+    }
+    try {
+      await this._call(request);
+    } catch (error) {
+      if (
+        !(error instanceof RuntimeStoppedError) &&
+        !(error instanceof RuntimeRestartedError)
+      ) {
+        throw error;
+      }
     }
   }
 
   /**
-   * Return remote runtime API or throw when not initialized.
+   * Fail the pending requests, which will never get a reply.
    */
-  private _getRemote(): Comlink.Remote<IRemoteRuntimeApi> {
-    if (!this._remote) {
-      throw new Error(`${this._runtimeLabel} runtime is not initialized`);
+  protected _rejectPending(error: Error): void {
+    this._lost.reject(error);
+    this._lost = createLostDelegate();
+  }
+
+  /**
+   * Stop the runtime: the pending and later requests fail with the error.
+   */
+  protected _stop(error: RuntimeStoppedError): void {
+    if (this._stopped || this._isDisposed) {
+      return;
     }
-    return this._remote;
+    this._stopped = error;
+    this._rejectPending(error);
   }
 
   /**
@@ -228,8 +316,26 @@ abstract class AbstractRuntimeBackend implements IRuntimeBackend {
   protected abstract readonly _runtimeLabel: string;
   protected abstract readonly _options: IRuntimeBackendOptions;
   protected _isDisposed = false;
+  protected _isReady = false;
   protected _ready = new PromiseDelegate<void>();
   protected _remote: Comlink.Remote<IRemoteRuntimeApi> | null = null;
+
+  /**
+   * The request executing a cell, if any.
+   */
+  protected _running: Promise<unknown> | null = null;
+  private _lost = createLostDelegate();
+  private _stopped: RuntimeStoppedError | null = null;
+}
+
+/**
+ * A promise rejected when the pending requests to a runtime will never get
+ * a reply.
+ */
+function createLostDelegate(): PromiseDelegate<never> {
+  const delegate = new PromiseDelegate<never>();
+  delegate.promise.catch(() => undefined);
+  return delegate;
 }
 
 /**
@@ -253,11 +359,24 @@ export class IFrameRuntimeBackend extends AbstractRuntimeBackend {
   }
 
   /**
+   * Interrupt the running cell. The runtime shares the thread of the page:
+   * when the page handles the interrupt, the cell is waiting for a promise,
+   * so it stops at once. The loops that never yield are stopped by the loop
+   * timeout, as the page can not handle the interrupt during them.
+   */
+  async interrupt(): Promise<void> {
+    if (this._isReady && !this._isDisposed) {
+      await this._call(remote => remote.interrupt());
+    }
+  }
+
+  /**
    * Dispose iframe resources.
    */
   dispose(): void {
     this._isDisposed = true;
     this._ready.reject(new Error('IFrame runtime disposed'));
+    this._rejectPending(new Error('IFrame runtime disposed'));
 
     if (this._remote) {
       void this._remote.dispose().catch(() => undefined);
@@ -354,11 +473,20 @@ export class IFrameRuntimeBackend extends AbstractRuntimeBackend {
         exposedEndpoint
       );
 
-      const endpoint = Comlink.windowEndpoint(
-        this._iframe.contentWindow,
-        window,
-        '*'
-      );
+      // The postMessage of the iframe is read now: a cell declaring
+      // `function postMessage() {}` replaces it
+      const runtimeWindow = this._iframe.contentWindow;
+      const postToRuntime = runtimeWindow.postMessage.bind(runtimeWindow) as (
+        message: unknown,
+        targetOrigin: string,
+        transfer?: Transferable[]
+      ) => void;
+      const endpoint: Comlink.Endpoint = {
+        postMessage: (message, transfer) =>
+          postToRuntime(message, '*', transfer),
+        addEventListener: window.addEventListener.bind(window),
+        removeEventListener: window.removeEventListener.bind(window)
+      };
       const remote = Comlink.wrap<IRemoteRuntimeApi>(endpoint);
       const outputProxy = Comlink.proxy((message: RuntimeOutputMessage) => {
         this._publishOutput(message);
@@ -375,7 +503,10 @@ export class IFrameRuntimeBackend extends AbstractRuntimeBackend {
         remote.initialize(
           {
             baseUrl: resolveBaseUrl(this._options.baseUrl),
-            maxStreamOutput: this._options.maxStreamOutput
+            maxStreamOutput: this._options.maxStreamOutput,
+            loopTimeout:
+              this._options.loopTimeout ??
+              IFrameRuntimeBackend.DEFAULT_LOOP_TIMEOUT_MS
           },
           activeOutputProxy
         ),
@@ -397,6 +528,7 @@ export class IFrameRuntimeBackend extends AbstractRuntimeBackend {
           remote.unregisterCommTarget(targetName)
       });
 
+      this._isReady = true;
       this._ready.resolve();
     } catch (error) {
       if (this._remote) {
@@ -429,6 +561,11 @@ export class IFrameRuntimeBackend extends AbstractRuntimeBackend {
   private _executor: JavaScriptExecutor | null = null;
 
   static readonly STARTUP_TIMEOUT_MS = 10000;
+
+  /**
+   * The default time in milliseconds a loop can keep the page busy.
+   */
+  static readonly DEFAULT_LOOP_TIMEOUT_MS = 10000;
 }
 
 /**
@@ -481,11 +618,91 @@ export class WorkerRuntimeBackend extends AbstractRuntimeBackend {
       return;
     }
 
+    // A shared flag interrupts the loops of the worker at once, without
+    // restarting it. SharedArrayBuffer needs a cross-origin isolated page.
+    if (
+      (globalThis as { crossOriginIsolated?: boolean }).crossOriginIsolated ===
+        true &&
+      typeof SharedArrayBuffer === 'function'
+    ) {
+      this._interruptBuffer = new SharedArrayBuffer(4);
+    }
+
+    this._start();
+  }
+
+  /**
+   * Interrupt the running cell.
+   *
+   * The worker stops the cell waiting for a promise, and with the shared
+   * flag of a cross-origin isolated page, its loops. When the code does not
+   * stop within INTERRUPT_GRACE_MS, or on a second interrupt, the worker is
+   * terminated and started again: the state of the cells is lost.
+   */
+  async interrupt(): Promise<void> {
+    const remote = this._remote;
+    if (!remote || !this._isReady || this._isDisposed) {
+      return;
+    }
+    if (this._interrupting) {
+      this._restart();
+      return;
+    }
+
+    const running = this._running;
+    if (running && this._interruptBuffer) {
+      Atomics.store(new Int32Array(this._interruptBuffer), 0, 1);
+    }
+    // Handled once the worker is not running any code
+    const interrupted = this._call(api => api.interrupt());
+    // Rejected when the worker is restarted before it handles the interrupt
+    interrupted.catch(() => undefined);
+    const settled = (running ?? interrupted).then(
+      () => true,
+      () => true
+    );
+    this._interrupting = true;
+    try {
+      const stopped = await Promise.race([
+        settled,
+        delay(WorkerRuntimeBackend.INTERRUPT_GRACE_MS).then(() => false)
+      ]);
+      if (!stopped && this._remote === remote) {
+        this._restart();
+      }
+    } finally {
+      if (this._remote === remote) {
+        this._interrupting = false;
+      }
+    }
+  }
+
+  /**
+   * Dispose worker resources.
+   */
+  dispose(): void {
+    this._isDisposed = true;
+    this._ready.reject(new Error('Worker runtime disposed'));
+    this._rejectPending(new Error('Worker runtime disposed'));
+
+    if (this._remote) {
+      void this._remote.dispose().catch(() => undefined);
+    }
+    this._terminate();
+  }
+
+  /**
+   * Start a worker, and initialize its runtime.
+   */
+  private _start(): void {
     const worker = new Worker(new URL('./worker-runtime.js', import.meta.url), {
       type: 'module'
     });
 
     worker.onerror = event => {
+      if (this._worker !== worker) {
+        return;
+      }
       if (this._isReady) {
         // The runtime prints the uncaught errors of the cells and cancels
         // them. Print the other ones too, and keep the worker running.
@@ -506,12 +723,35 @@ export class WorkerRuntimeBackend extends AbstractRuntimeBackend {
       this._handleWorkerFatal(new Error(details.join(' ')));
     };
     worker.onmessageerror = () => {
+      if (this._worker !== worker) {
+        return;
+      }
+      if (this._isReady) {
+        // The reply in the message is lost
+        this._stop(
+          new RuntimeStoppedError(
+            'the Web Worker sent a message that could not be read'
+          )
+        );
+        return;
+      }
       this._handleWorkerFatal(
         new Error(
           'Worker runtime sent a message that could not be deserialized'
         )
       );
     };
+    worker.addEventListener('message', event => {
+      if (
+        this._worker === worker &&
+        event.data?.type === RUNTIME_CLOSED_MESSAGE
+      ) {
+        this._stop(
+          new RuntimeStoppedError('the code closed the Web Worker with close()')
+        );
+        this._terminate();
+      }
+    });
 
     this._worker = worker;
     this._remote = Comlink.wrap<IRemoteRuntimeApi>(worker);
@@ -519,46 +759,26 @@ export class WorkerRuntimeBackend extends AbstractRuntimeBackend {
       this._publishOutput(message);
     });
 
-    void this._init();
-  }
-
-  /**
-   * Dispose worker resources.
-   */
-  dispose(): void {
-    this._isDisposed = true;
-    this._ready.reject(new Error('Worker runtime disposed'));
-
-    if (this._remote) {
-      void this._remote.dispose().catch(() => undefined);
-      this._remote[Comlink.releaseProxy]();
-      this._remote = null;
-    }
-
-    this._worker?.terminate();
-    this._worker = null;
-    this._outputProxy = null;
+    void this._init(worker, this._remote, this._outputProxy);
   }
 
   /**
    * Initialize remote worker API and execute optional initialization hook.
    */
-  private async _init(): Promise<void> {
-    const remote = this._remote;
-    const outputProxy = this._outputProxy;
-
-    if (!remote || !outputProxy) {
-      this._ready.reject(new Error('Worker runtime is not initialized'));
-      return;
-    }
-
+  private async _init(
+    worker: Worker,
+    remote: Comlink.Remote<IRemoteRuntimeApi>,
+    outputProxy: RuntimeOutputCallback
+  ): Promise<void> {
     try {
       await withTimeout(
         remote.initialize(
           {
             baseUrl: resolveBaseUrl(this._options.baseUrl),
             browsingContextId: this._options.browsingContextId,
-            maxStreamOutput: this._options.maxStreamOutput
+            maxStreamOutput: this._options.maxStreamOutput,
+            loopTimeout: this._options.loopTimeout ?? 0,
+            interruptBuffer: this._interruptBuffer ?? undefined
           },
           outputProxy
         ),
@@ -576,36 +796,69 @@ export class WorkerRuntimeBackend extends AbstractRuntimeBackend {
           remote.unregisterCommTarget(targetName)
       });
 
+      if (this._worker !== worker) {
+        return;
+      }
       this._isReady = true;
       this._ready.resolve();
     } catch (error) {
-      this._handleWorkerFatal(normalizeError(error));
+      if (this._worker === worker) {
+        this._handleWorkerFatal(normalizeError(error));
+      }
     }
+  }
+
+  /**
+   * Terminate the worker and start a new one: the requests sent to the
+   * terminated worker fail with a RuntimeRestartedError.
+   */
+  private _restart(): void {
+    const interrupted = this._running !== null;
+    this._interrupting = false;
+    this._isReady = false;
+    this._rejectPending(new RuntimeRestartedError());
+    this._terminate();
+    this._ready = new PromiseDelegate<void>();
+    this._options.onRestart?.({ interrupted });
+    this._start();
+  }
+
+  /**
+   * Terminate the worker, and release its proxy.
+   */
+  private _terminate(): void {
+    if (this._remote) {
+      this._remote[Comlink.releaseProxy]();
+      this._remote = null;
+    }
+    this._worker?.terminate();
+    this._worker = null;
+    this._outputProxy = null;
   }
 
   /**
    * Reject initialization with a fatal worker error.
    */
   private _handleWorkerFatal(error: Error): void {
-    if (this._remote) {
-      this._remote[Comlink.releaseProxy]();
-      this._remote = null;
-    }
-
-    this._worker?.terminate();
-    this._worker = null;
-    this._outputProxy = null;
+    this._terminate();
     this._ready.reject(error);
   }
 
   protected readonly _runtimeLabel = 'Worker';
   protected readonly _options: WorkerRuntimeBackend.IOptions;
 
-  private _isReady = false;
   private _worker: Worker | null = null;
   private _outputProxy: RuntimeOutputCallback | null = null;
+  private _interruptBuffer: SharedArrayBuffer | null = null;
+  private _interrupting = false;
 
   static readonly STARTUP_TIMEOUT_MS = 10000;
+
+  /**
+   * The time in milliseconds the code of a cell has to stop after an
+   * interrupt, before the worker is restarted.
+   */
+  static readonly INTERRUPT_GRACE_MS = 2000;
 }
 
 /**
@@ -630,16 +883,44 @@ export namespace WorkerRuntimeBackend {
   }
 
   /**
+   * What happened when the worker was restarted.
+   */
+  export interface IRestartInfo {
+    /**
+     * Whether a cell was running: its execution fails with a
+     * RuntimeRestartedError.
+     */
+    interrupted: boolean;
+  }
+
+  /**
    * The instantiation options for a worker runtime backend.
    */
   export interface IOptions extends IRuntimeBackendOptions {
+    /**
+     * Called once the runtime of a worker is initialized, also after a
+     * restart.
+     */
     onReady?: (context: IReadyContext) => void | Promise<void>;
+
+    /**
+     * Called when the worker is terminated after an interrupt, before a new
+     * one starts: the state of the runtime, like its comms, is lost.
+     */
+    onRestart?: (info: IRestartInfo) => void;
 
     /**
      * The id of the browsing context of the page, to ask for user input.
      */
     browsingContextId?: string;
   }
+}
+
+/**
+ * Resolve after some milliseconds.
+ */
+function delay(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 /**

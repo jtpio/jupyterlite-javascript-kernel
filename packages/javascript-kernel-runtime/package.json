@@ -40,6 +40,7 @@
     "@jupyterlab/nbformat": "^4.6.0",
     "@jupyterlab/services": "^7.6.0",
     "acorn": "^8.19.0",
+    "acorn-walk": "^8.3.5",
     "astring": "^1.9.0"
   },
   "devDependencies": {

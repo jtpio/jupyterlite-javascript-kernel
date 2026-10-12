@@ -2,6 +2,7 @@
 // Distributed under the terms of the Modified BSD License.
 
 export * from '@jupyterlite/javascript-kernel-runtime';
+export * from './interrupt';
 export * from './kernel';
 export * from './runtime_protocol';
 export * from './runtime_backends';

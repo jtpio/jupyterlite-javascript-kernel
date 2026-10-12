@@ -7,6 +7,7 @@ import { BaseKernel, type IKernel } from '@jupyterlite/services';
 
 import {
   ECMASCRIPT_EDITION,
+  KEYBOARD_INTERRUPT,
   normalizeError as normalizeUnknownError,
   stripAnsi,
   type JavaScriptExecutor,
@@ -16,6 +17,8 @@ import {
 import {
   IFrameRuntimeBackend,
   IRuntimeBackend,
+  RuntimeRestartedError,
+  RuntimeStoppedError,
   WorkerRuntimeBackend
 } from './runtime_backends';
 import type { RuntimeMode } from './runtime_protocol';
@@ -36,6 +39,7 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
     this._executorFactory = options.executorFactory;
     this._browsingContextId = options.browsingContextId;
     this._maxStreamOutput = options.maxStreamOutput;
+    this._loopTimeout = options.loopTimeout;
     this._startupExtensions = [...(options.startupExtensions ?? [])];
     this._backend = this.createBackend(this._runtimeMode);
   }
@@ -60,6 +64,16 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
    */
   get ready(): Promise<void> {
     return this._backend.ready;
+  }
+
+  /**
+   * Interrupt the running cell, if any, and clear the timers of the cells.
+   *
+   * JupyterLite cancels the queued cells on interrupt, but does not tell
+   * the kernel: installKernelInterrupts makes it call this method.
+   */
+  async interrupt(): Promise<void> {
+    await this._backend.interrupt();
   }
 
   /**
@@ -145,6 +159,27 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
         this.parentHeader
       );
     } catch (error) {
+      if (
+        error instanceof RuntimeRestartedError ||
+        error instanceof RuntimeStoppedError
+      ) {
+        // Errors of the kernel, without frames
+        const ename =
+          error instanceof RuntimeRestartedError
+            ? KEYBOARD_INTERRUPT
+            : error.name;
+        const content = {
+          ename,
+          evalue: error.message,
+          traceback: [`${ename}: ${error.message}`]
+        };
+        this.publishExecuteError(content);
+        return {
+          status: 'error',
+          execution_count: this.executionCount,
+          ...content
+        };
+      }
       const normalized = this.normalizeError(error);
       const traceback = [
         normalized.stack || normalized.message || String(error)
@@ -347,13 +382,17 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
       onOutput: (message: RuntimeOutputMessage) => {
         this.processRuntimeMessage(message);
       },
-      maxStreamOutput: this._maxStreamOutput
+      maxStreamOutput: this._maxStreamOutput,
+      loopTimeout: this._loopTimeout
     };
 
     if (runtimeMode === 'worker') {
       return new WorkerRuntimeBackend({
         ...options,
         browsingContextId: this._browsingContextId,
+        onRestart: info => {
+          this._onRuntimeRestart(info);
+        },
         onReady: async context => {
           await this.onRuntimeReady({
             runtime: 'worker',
@@ -483,6 +522,36 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
   }
 
   /**
+   * Forget the state of a Web Worker runtime restarted after an interrupt:
+   * close its comms in the frontend, and apply the startup extensions again
+   * to the new runtime.
+   */
+  private _onRuntimeRestart(info: WorkerRuntimeBackend.IRestartInfo): void {
+    for (const commId of [...this._comms.keys()]) {
+      this.handleComm(
+        'comm_close',
+        { comm_id: commId, data: {} },
+        {},
+        [],
+        this.parentHeader
+      );
+    }
+    this._comms.clear();
+    this._appliedStartupExtensions.clear();
+    this._runtimeReadyContext = null;
+    if (!info.interrupted) {
+      // The worker was busy outside of a cell, like in a timer
+      this.stream(
+        {
+          name: 'stderr',
+          text: 'The Web Worker did not stop after the interrupt, so it was restarted: the variables, functions and imports of the previous cells are lost.\n'
+        },
+        this.parentHeader
+      );
+    }
+  }
+
+  /**
    * Normalize an execute reply error into an Error instance.
    */
   private _createRuntimeInitializationError(
@@ -570,6 +639,7 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
   private _executorFactory?: JavaScriptKernel.IExecutorFactory;
   private _browsingContextId?: string;
   private _maxStreamOutput?: number;
+  private _loopTimeout?: number;
   private _startupExtensions: JavaScriptKernel.IStartupExtension[];
   private _appliedStartupExtensions = new Set<string>();
   private _runtimeReadyContext: JavaScriptKernel.IRuntimeReadyContext | null =
@@ -661,5 +731,14 @@ export namespace JavaScriptKernel {
      * limit.
      */
     maxStreamOutput?: number;
+
+    /**
+     * The time in milliseconds a loop of the cells can keep the runtime busy
+     * before it is stopped with a LoopTimeoutError, 0 for no limit. Defaults
+     * to 10 s in the iframe runtime, which runs on the thread of the page,
+     * and to no limit in the Web Worker runtime. The code of the cells
+     * changes it with `Jupyter.loopTimeout`.
+     */
+    loopTimeout?: number;
   }
 }

@@ -27,7 +27,26 @@ export interface IRuntimeInitializeOptions extends IWorkerKernel.IOptions {
    * no limit. Defaults to the limit of the runtime package.
    */
   maxStreamOutput?: number;
+
+  /**
+   * The time in milliseconds a loop of the cells can keep the runtime busy
+   * before it is stopped with a LoopTimeoutError, 0 for no limit.
+   */
+  loopTimeout?: number;
+
+  /**
+   * A flag shared with the page to interrupt the loops of a Web Worker,
+   * when the page is cross-origin isolated.
+   */
+  interruptBuffer?: SharedArrayBuffer;
 }
+
+/**
+ * The message a Web Worker runtime posts to the page when the code of a
+ * cell closes it with `close()`.
+ */
+export const RUNTIME_CLOSED_MESSAGE =
+  '@jupyterlite/javascript-kernel:runtime-closed';
 
 /**
  * Output callback passed across Comlink endpoints.
@@ -88,5 +107,9 @@ export interface IRemoteRuntimeApi {
     buffers?: ArrayBuffer[],
     parentMessageId?: string
   ): Promise<void>;
+  /**
+   * Interrupt the running cell, if any, and clear the timers of the cells.
+   */
+  interrupt(): Promise<void>;
   dispose(): Promise<void>;
 }
