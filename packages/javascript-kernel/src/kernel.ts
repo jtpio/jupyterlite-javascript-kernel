@@ -18,6 +18,7 @@ import {
 import {
   IFrameRuntimeBackend,
   IRuntimeBackend,
+  RuntimeReloadedError,
   RuntimeRestartedError,
   RuntimeStoppedError,
   WorkerRuntimeBackend
@@ -163,6 +164,7 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
     } catch (error) {
       if (
         error instanceof RuntimeRestartedError ||
+        error instanceof RuntimeReloadedError ||
         error instanceof RuntimeStoppedError
       ) {
         // Errors of the kernel, without frames
@@ -394,7 +396,12 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
         ...options,
         browsingContextId: this._browsingContextId,
         onRestart: info => {
-          this._onRuntimeRestart(info);
+          // When the worker was busy outside of a cell, like in a timer
+          this._onRuntimeRestart(
+            info.interrupted
+              ? undefined
+              : 'The Web Worker did not stop after the interrupt, so it was restarted: the variables, functions and imports of the previous cells are lost.'
+          );
         },
         onReady: async context => {
           await this.onRuntimeReady({
@@ -423,6 +430,15 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
     return new IFrameRuntimeBackend({
       ...options,
       executorFactory: this._executorFactory,
+      onRestart: info => {
+        // When the iframe was reloaded outside of a cell, like in a timer, or
+        // after the cell reloading it
+        this._onRuntimeRestart(
+          info.running
+            ? undefined
+            : 'The code reloaded or left the page of the iframe, so the runtime was restarted: the variables, functions and imports of the previous cells are lost.'
+        );
+      },
       onReady: async context => {
         await this.onRuntimeReady({
           runtime: 'iframe',
@@ -525,11 +541,15 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
   }
 
   /**
-   * Forget the state of a Web Worker runtime restarted after an interrupt:
-   * close its comms in the frontend, and apply the startup extensions again
-   * to the new runtime.
+   * Forget the state of a restarted runtime, a Web Worker which did not stop
+   * after an interrupt or an iframe reloaded by the code of a cell: close its
+   * comms in the frontend, and apply the startup extensions again to the new
+   * runtime.
+   *
+   * @param notice - The notice printed on stderr, when no cell shows the
+   * error of the restart.
    */
-  private _onRuntimeRestart(info: WorkerRuntimeBackend.IRestartInfo): void {
+  private _onRuntimeRestart(notice?: string): void {
     for (const commId of [...this._comms.keys()]) {
       this.handleComm(
         'comm_close',
@@ -542,15 +562,8 @@ export class JavaScriptKernel extends BaseKernel implements IKernel {
     this._comms.clear();
     this._appliedStartupExtensions.clear();
     this._runtimeReadyContext = null;
-    if (!info.interrupted) {
-      // The worker was busy outside of a cell, like in a timer
-      this.stream(
-        {
-          name: 'stderr',
-          text: 'The Web Worker did not stop after the interrupt, so it was restarted: the variables, functions and imports of the previous cells are lost.\n'
-        },
-        this.parentHeader
-      );
+    if (notice) {
+      this.stream({ name: 'stderr', text: `${notice}\n` }, this.parentHeader);
     }
   }
 

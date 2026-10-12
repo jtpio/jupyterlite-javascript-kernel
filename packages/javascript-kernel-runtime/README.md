@@ -125,6 +125,16 @@ The methods of the evaluator:
   the host instead.
 - `dispose()` removes the globals and the listeners of the evaluator.
 
+The evaluator can run outside of the realm of the cells, like in the page
+holding the iframe of the cells: the JupyterLite kernel calls the evaluator
+of its iframe kernel directly, and the one of its Web Worker kernel over
+Comlink. A host forwarding the requests over messages should not handle the
+messages any window can post, like the `message` events of a window, without
+checking their source: they would run code in the realm. The evaluator reads
+the globals of `globalScope` when it is created, so when the realm is
+replaced, like an iframe reloaded with `location.reload()`, dispose it and
+create a new one for the new realm.
+
 `onOutput` is called in order, during `execute()` and also later, for the
 outputs of callbacks, timers and widget handlers: the host attaches them to
 its current parent message. The consecutive writes to a stream (the

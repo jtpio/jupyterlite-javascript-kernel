@@ -1,9 +1,36 @@
 // Copyright (c) Jupyter Development Team.
 // Distributed under the terms of the Modified BSD License.
 
-import { expect, test } from '@jupyterlab/galata';
+import { expect, test, type IJupyterLabPageFixture } from '@jupyterlab/galata';
 
-import { KERNELS, createNotebook, getOutputs, runCode } from './utils';
+import {
+  IFRAME_KERNEL,
+  KERNELS,
+  createNotebook,
+  getOutputs,
+  runCode,
+  waitForKernelIdle
+} from './utils';
+
+/**
+ * Restart the kernel from the Kernel menu, and check that the variable
+ * `name`, defined before, is gone and that the kernel runs code.
+ */
+async function restartKernel(
+  page: IJupyterLabPageFixture,
+  name: string
+): Promise<void> {
+  await page.menu.clickMenuItem('Kernel>Restart Kernel…');
+  await page
+    .getByRole('dialog')
+    .getByRole('button', { name: 'Confirm Kernel Restart' })
+    .click();
+  await waitForKernelIdle(page, IFRAME_KERNEL);
+  let index = await runCode(page, `typeof ${name}`);
+  expect(await page.notebook.getCellTextOutput(index)).toEqual(["'undefined'"]);
+  index = await runCode(page, '1 + 1');
+  expect(await page.notebook.getCellTextOutput(index)).toEqual(['2']);
+}
 
 for (const kernel of KERNELS) {
   test.describe(`Execution (${kernel.displayName})`, () => {
@@ -131,3 +158,90 @@ for (const kernel of KERNELS) {
     });
   });
 }
+
+test.describe(`IFrame runtime (${IFRAME_KERNEL.displayName})`, () => {
+  test.beforeEach(async ({ page }) => {
+    await createNotebook(page, IFRAME_KERNEL);
+  });
+
+  test('Keep running after a cell writes the document', async ({ page }) => {
+    await runCode(page, 'let kept = "yes";');
+    // document.write() after the load opens the document again
+    await runCode(page, "document.write('<p>hi</p>')");
+    let index = await runCode(page, '1 + 1');
+    expect(await page.notebook.getCellTextOutput(index)).toEqual(['2']);
+
+    // The document is the one written, and the state of the cells is kept
+    index = await runCode(page, 'document.close();\ndocument.body.textContent');
+    expect(await page.notebook.getCellTextOutput(index)).toEqual(["'hi'"]);
+    index = await runCode(page, 'console.log(kept);\n1 + 2');
+    await expect(await getOutputs(page, index)).toHaveText(['yes\n', '3']);
+
+    await restartKernel(page, 'kept');
+  });
+
+  test('Restart the iframe reloaded by a cell', async ({ page }) => {
+    await runCode(page, 'let before = 1;');
+    let index = await runCode(page, 'location.reload()');
+    await expect(
+      await getOutputs(page, index, 'application/vnd.jupyter.stderr')
+    ).toHaveText(
+      'The code reloaded or left the page of the iframe, so the runtime was restarted: the variables, functions and imports of the previous cells are lost.\n'
+    );
+
+    index = await runCode(page, 'typeof before');
+    expect(await page.notebook.getCellTextOutput(index)).toEqual([
+      "'undefined'"
+    ]);
+    index = await runCode(page, 'typeof document');
+    expect(await page.notebook.getCellTextOutput(index)).toEqual(["'object'"]);
+
+    await runCode(page, 'let after = 2;');
+    await restartKernel(page, 'after');
+  });
+
+  test('Fail the cell running when the iframe is reloaded', async ({
+    page
+  }) => {
+    let index = await runCode(
+      page,
+      'setTimeout(() => location.reload(), 200);\nawait new Promise(() => {});'
+    );
+    await expect(
+      await getOutputs(page, index, 'application/vnd.jupyter.stderr')
+    ).toHaveText(
+      'RuntimeReloadedError: The code reloaded or left the page of the iframe, so the runtime was restarted: the variables, functions and imports of the previous cells are lost. Run those cells again.'
+    );
+
+    index = await runCode(page, '1 + 1');
+    expect(await page.notebook.getCellTextOutput(index)).toEqual(['2']);
+  });
+
+  test('Ignore the messages posted to the window of the iframe', async ({
+    page
+  }) => {
+    // A request to execute some code, as other windows could post it
+    let index = await runCode(
+      page,
+      [
+        'postMessage({',
+        "id: 'request',",
+        "type: 'APPLY',",
+        "path: ['execute'],",
+        'argumentList: [',
+        "{ type: 'RAW', value: 'globalThis.posted = true' },",
+        "{ type: 'RAW', value: 0 }",
+        ']',
+        "}, '*');",
+        'await new Promise(resolve => setTimeout(resolve, 500));',
+        "'posted'"
+      ].join('\n')
+    );
+    // The message was posted without an error
+    expect(await page.notebook.getCellTextOutput(index)).toEqual(["'posted'"]);
+    index = await runCode(page, 'typeof posted');
+    expect(await page.notebook.getCellTextOutput(index)).toEqual([
+      "'undefined'"
+    ]);
+  });
+});

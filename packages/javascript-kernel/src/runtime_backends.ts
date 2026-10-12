@@ -65,6 +65,19 @@ export class RuntimeRestartedError extends Error {
 }
 
 /**
+ * The error of a request to an iframe runtime restarted because the code of
+ * a cell reloaded the iframe or navigated it away.
+ */
+export class RuntimeReloadedError extends Error {
+  constructor() {
+    super(
+      'The code reloaded or left the page of the iframe, so the runtime was restarted: the variables, functions and imports of the previous cells are lost. Run those cells again.'
+    );
+    this.name = 'RuntimeReloadedError';
+  }
+}
+
+/**
  * The error of the requests to a runtime which stopped, for example a Web
  * Worker closed by the code of a cell.
  */
@@ -126,12 +139,15 @@ export interface IRuntimeBackend {
 }
 
 /**
- * Base class providing shared Comlink proxy logic for runtime backends.
+ * Base class providing the shared request logic of the runtime backends,
+ * whether the runtime API is called directly or through a Comlink proxy.
  *
  * Subclasses must set `_remote` during initialization and call
  * `_ready.resolve()` / `_ready.reject()` to signal readiness.
  */
-abstract class AbstractRuntimeBackend implements IRuntimeBackend {
+abstract class AbstractRuntimeBackend<
+  TRemote extends IRemoteRuntimeApi
+> implements IRuntimeBackend {
   /**
    * A promise that resolves when the runtime is initialized.
    */
@@ -254,10 +270,10 @@ abstract class AbstractRuntimeBackend implements IRuntimeBackend {
 
   /**
    * Send a request to the remote runtime. The request fails when the runtime
-   * stops or restarts before replying: Comlink would wait forever.
+   * stops or restarts before replying, which would never come.
    */
   protected async _call<T>(
-    request: (remote: Comlink.Remote<IRemoteRuntimeApi>) => Promise<T>
+    request: (remote: TRemote) => Promise<T>
   ): Promise<T> {
     if (this._stopped) {
       throw this._stopped;
@@ -273,7 +289,7 @@ abstract class AbstractRuntimeBackend implements IRuntimeBackend {
    * or stopped: the comms of a stopped runtime are gone.
    */
   private async _callComm(
-    request: (remote: Comlink.Remote<IRemoteRuntimeApi>) => Promise<void>
+    request: (remote: TRemote) => Promise<void>
   ): Promise<void> {
     if (!this._remote || this._stopped) {
       return;
@@ -283,7 +299,8 @@ abstract class AbstractRuntimeBackend implements IRuntimeBackend {
     } catch (error) {
       if (
         !(error instanceof RuntimeStoppedError) &&
-        !(error instanceof RuntimeRestartedError)
+        !(error instanceof RuntimeRestartedError) &&
+        !(error instanceof RuntimeReloadedError)
       ) {
         throw error;
       }
@@ -325,7 +342,7 @@ abstract class AbstractRuntimeBackend implements IRuntimeBackend {
   protected _isDisposed = false;
   protected _isReady = false;
   protected _ready = new PromiseDelegate<void>();
-  protected _remote: Comlink.Remote<IRemoteRuntimeApi> | null = null;
+  protected _remote: TRemote | null = null;
 
   /**
    * The request executing a cell, if any.
@@ -346,20 +363,26 @@ function createLostDelegate(): PromiseDelegate<never> {
 }
 
 /**
- * Runtime backend that executes code in a hidden iframe through Comlink.
+ * Runtime backend that executes code in a hidden iframe.
+ *
+ * The runtime API lives in the page, next to the kernel, and runs the code of
+ * the cells in the realm of the iframe: the backend calls it directly. No
+ * message goes through the window of the iframe, which any other window
+ * holding a reference to it could post to.
  */
-export class IFrameRuntimeBackend extends AbstractRuntimeBackend {
+export class IFrameRuntimeBackend extends AbstractRuntimeBackend<IRemoteRuntimeApi> {
   /**
    * Instantiate a new iframe runtime backend.
    */
   constructor(options: IFrameRuntimeBackend.IOptions) {
     super();
     this._options = options;
-    void this._init();
+    void this._start();
   }
 
   /**
-   * The iframe used by the runtime backend.
+   * The iframe used by the runtime backend. A new iframe replaces it when
+   * the code of a cell reloads the iframe.
    */
   get iframe(): HTMLIFrameElement | null {
     return this._iframe;
@@ -381,41 +404,33 @@ export class IFrameRuntimeBackend extends AbstractRuntimeBackend {
    * Dispose iframe resources.
    */
   dispose(): void {
+    if (this._isDisposed) {
+      return;
+    }
     this._isDisposed = true;
     this._ready.reject(new Error('IFrame runtime disposed'));
     this._rejectPending(new Error('IFrame runtime disposed'));
+    this._teardown();
 
-    if (this._remote) {
-      void this._remote.dispose().catch(() => undefined);
-      this._remote[Comlink.releaseProxy]();
-      this._remote = null;
-    }
-
-    this._iframe?.remove();
-    this._iframe = null;
-
-    if (this._container) {
-      this._container.remove();
-      this._container = null;
-    }
-
-    this._outputProxy = null;
-    this._globalScope = null;
-    this._executor = null;
+    this._container?.remove();
+    this._container = null;
   }
 
   /**
-   * Initialize iframe and remote runtime API.
+   * Create an iframe, and initialize the runtime API in its realm.
    */
-  private async _init(): Promise<void> {
+  private async _start(): Promise<void> {
+    const iframe = document.createElement('iframe');
     try {
-      this._container = document.createElement('div');
-      this._container.style.display = 'none';
-      document.body.appendChild(this._container);
+      if (!this._container) {
+        this._container = document.createElement('div');
+        this._container.style.display = 'none';
+        document.body.appendChild(this._container);
+      }
+      const container = this._container;
 
-      this._iframe = document.createElement('iframe');
-      this._iframe.style.border = 'none';
-      this._iframe.srcdoc = `<!DOCTYPE html>
+      iframe.style.border = 'none';
+      iframe.srcdoc = `<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8">
@@ -423,8 +438,8 @@ export class IFrameRuntimeBackend extends AbstractRuntimeBackend {
 </head>
 <body></body>
 </html>`;
+      this._iframe = iframe;
 
-      const iframe = this._iframe;
       const iframeLoad = new Promise<void>((resolve, reject) => {
         let settled = false;
 
@@ -451,60 +466,31 @@ export class IFrameRuntimeBackend extends AbstractRuntimeBackend {
         };
       });
 
-      this._container.appendChild(iframe);
+      container.appendChild(iframe);
 
       await withTimeout(
         iframeLoad,
         IFrameRuntimeBackend.STARTUP_TIMEOUT_MS,
         'IFrame runtime failed to load'
       );
-
-      if (!this._iframe?.contentWindow) {
+      if (this._iframe !== iframe) {
+        // Disposed while loading
+        return;
+      }
+      if (!iframe.contentWindow || !iframe.contentDocument) {
         throw new Error('IFrame window not available');
       }
 
-      this._globalScope = this._iframe.contentWindow as Record<string, any>;
-      this._executor =
-        this._options.executorFactory?.(this._globalScope) ??
-        new JavaScriptExecutor(this._globalScope);
+      // The later loads of the iframe come from the code of the cells
+      this._document = iframe.contentDocument;
+      iframe.addEventListener('load', this._onLoad);
 
-      // Bind expose/listen on the iframe window context so RPC still flows
-      // through postMessage without requiring an inline iframe bootstrap script.
-      const exposedEndpoint = Comlink.windowEndpoint(
-        window,
-        this._iframe.contentWindow,
-        '*'
-      );
-      Comlink.expose(
-        createRemoteRuntimeApi(this._globalScope, this._executor),
-        exposedEndpoint
-      );
-
-      // The postMessage of the iframe is read now: a cell declaring
-      // `function postMessage() {}` replaces it
-      const runtimeWindow = this._iframe.contentWindow;
-      const postToRuntime = runtimeWindow.postMessage.bind(runtimeWindow) as (
-        message: unknown,
-        targetOrigin: string,
-        transfer?: Transferable[]
-      ) => void;
-      const endpoint: Comlink.Endpoint = {
-        postMessage: (message, transfer) =>
-          postToRuntime(message, '*', transfer),
-        addEventListener: window.addEventListener.bind(window),
-        removeEventListener: window.removeEventListener.bind(window)
-      };
-      const remote = Comlink.wrap<IRemoteRuntimeApi>(endpoint);
-      const outputProxy = Comlink.proxy((message: RuntimeOutputMessage) => {
-        this._publishOutput(message);
-      });
-
+      const globalScope = iframe.contentWindow as Record<string, any>;
+      const executor =
+        this._options.executorFactory?.(globalScope) ??
+        new JavaScriptExecutor(globalScope);
+      const remote = createRemoteRuntimeApi(globalScope, executor);
       this._remote = remote;
-      this._outputProxy = outputProxy;
-      const activeOutputProxy = this._outputProxy;
-      if (!activeOutputProxy) {
-        throw new Error('IFrame runtime output handler is not initialized');
-      }
 
       await withTimeout(
         remote.initialize(
@@ -516,17 +502,21 @@ export class IFrameRuntimeBackend extends AbstractRuntimeBackend {
               this._options.loopTimeout ??
               IFrameRuntimeBackend.DEFAULT_LOOP_TIMEOUT_MS
           },
-          activeOutputProxy
+          message => {
+            if (this._remote === remote) {
+              this._publishOutput(message);
+            }
+          }
         ),
         IFrameRuntimeBackend.STARTUP_TIMEOUT_MS,
         'IFrame runtime failed to initialize'
       );
 
       await this._options.onReady?.({
-        iframe: this._iframe,
-        container: this._container,
-        globalScope: this._globalScope,
-        executor: this._executor,
+        iframe,
+        container,
+        globalScope,
+        executor,
         execute: (code, executionCount = 0) =>
           remote.execute(code, executionCount),
         preloadModule: moduleName => remote.preloadModule(moduleName),
@@ -536,37 +526,81 @@ export class IFrameRuntimeBackend extends AbstractRuntimeBackend {
           remote.unregisterCommTarget(targetName)
       });
 
+      if (this._remote !== remote) {
+        // Disposed, or restarted, during the initialization
+        return;
+      }
       this._isReady = true;
       this._ready.resolve();
     } catch (error) {
-      if (this._remote) {
-        void this._remote.dispose().catch(() => undefined);
-        this._remote[Comlink.releaseProxy]();
-        this._remote = null;
+      if (this._iframe === iframe) {
+        this._teardown();
+        this._ready.reject(error);
       }
-
-      this._iframe?.remove();
-      this._iframe = null;
-      if (this._container) {
-        this._container.remove();
-        this._container = null;
-      }
-
-      this._outputProxy = null;
-      this._globalScope = null;
-      this._executor = null;
-      this._ready.reject(error);
     }
+  }
+
+  /**
+   * Handle a load of the iframe after its initialization.
+   *
+   * `document.write()` after the load opens the document again, but keeps it
+   * with the window and the state of the cells, so nothing changes. A new
+   * document means that the code reloaded the iframe or navigated it away,
+   * like with `location.reload()`: the realm of the cells is gone, and a new
+   * iframe replaces it.
+   */
+  private _onLoad = (): void => {
+    const iframe = this._iframe;
+    if (
+      this._isDisposed ||
+      !iframe ||
+      iframe.contentDocument === this._document
+    ) {
+      return;
+    }
+    this._restart();
+  };
+
+  /**
+   * Start a new iframe after the code of a cell reloaded the current one:
+   * the requests sent to the previous one fail with a RuntimeReloadedError.
+   */
+  private _restart(): void {
+    const running = this._running !== null;
+    this._rejectPending(new RuntimeReloadedError());
+    this._teardown();
+    if (this._isReady) {
+      this._isReady = false;
+      this._ready = new PromiseDelegate<void>();
+    }
+    this._options.onRestart?.({ running });
+    void this._start();
+  }
+
+  /**
+   * Dispose the runtime API, then remove the iframe: the evaluator removes
+   * its listeners and restores the globals of the iframe before it goes.
+   */
+  private _teardown(): void {
+    const remote = this._remote;
+    this._remote = null;
+    if (remote) {
+      // The evaluator is disposed before the promise is returned
+      void remote.dispose().catch(() => undefined);
+    }
+
+    this._iframe?.removeEventListener('load', this._onLoad);
+    this._iframe?.remove();
+    this._iframe = null;
+    this._document = null;
   }
 
   protected readonly _runtimeLabel = 'IFrame';
   protected readonly _options: IFrameRuntimeBackend.IOptions;
 
   private _iframe: HTMLIFrameElement | null = null;
+  private _document: Document | null = null;
   private _container: HTMLDivElement | null = null;
-  private _outputProxy: RuntimeOutputCallback | null = null;
-  private _globalScope: Record<string, any> | null = null;
-  private _executor: JavaScriptExecutor | null = null;
 
   static readonly STARTUP_TIMEOUT_MS = 10000;
 
@@ -602,18 +636,47 @@ export namespace IFrameRuntimeBackend {
   }
 
   /**
+   * What happened when the iframe was restarted.
+   */
+  export interface IRestartInfo {
+    /**
+     * Whether a cell was running: its execution fails with a
+     * RuntimeReloadedError.
+     */
+    running: boolean;
+  }
+
+  /**
    * The instantiation options for an iframe runtime backend.
    */
   export interface IOptions extends IRuntimeBackendOptions {
+    /**
+     * Create the executor of the realm of an iframe, also of the new iframe
+     * started when the code of a cell reloaded the previous one.
+     */
     executorFactory?: (globalScope: Record<string, any>) => JavaScriptExecutor;
+
+    /**
+     * Called once the runtime of an iframe is initialized, also after a
+     * restart.
+     */
     onReady?: (context: IReadyContext) => void | Promise<void>;
+
+    /**
+     * Called when the code of a cell reloaded the iframe or navigated it
+     * away, before a new iframe starts: the state of the runtime, like its
+     * comms, is lost.
+     */
+    onRestart?: (info: IRestartInfo) => void;
   }
 }
 
 /**
  * Runtime backend that executes code in a dedicated web worker.
  */
-export class WorkerRuntimeBackend extends AbstractRuntimeBackend {
+export class WorkerRuntimeBackend extends AbstractRuntimeBackend<
+  Comlink.Remote<IRemoteRuntimeApi>
+> {
   /**
    * Instantiate a new worker runtime backend.
    */

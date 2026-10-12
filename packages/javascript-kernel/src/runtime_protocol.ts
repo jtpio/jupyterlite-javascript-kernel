@@ -57,14 +57,16 @@ export const RUNTIME_CLOSED_MESSAGE =
   '@jupyterlite/javascript-kernel:runtime-closed';
 
 /**
- * Output callback passed across Comlink endpoints.
+ * Output callback of the runtime API, called directly in the iframe backend
+ * and through a Comlink proxy from a Web Worker.
  */
 export type RuntimeOutputCallback = (
   message: RuntimeOutputMessage
 ) => void | Promise<void>;
 
 /**
- * Runtime API exposed from iframe and worker contexts over Comlink.
+ * Runtime API running next to the code of the cells. The iframe backend
+ * calls it directly, from the page, and the Web Worker backend over Comlink.
  */
 export interface IRemoteRuntimeApi {
   initialize(

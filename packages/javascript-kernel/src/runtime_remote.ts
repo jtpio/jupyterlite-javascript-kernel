@@ -58,7 +58,8 @@ function createInputRequester(
 }
 
 /**
- * Create a Comlink runtime API bound to the provided global scope.
+ * Create a runtime API bound to the provided global scope, called directly
+ * in the page for an iframe, and exposed with Comlink in a Web Worker.
  */
 export function createRemoteRuntimeApi(
   globalScope: Record<string, any>,
@@ -73,9 +74,10 @@ export function createRemoteRuntimeApi(
     return evaluator;
   };
 
-  // The outputs not yet handled by the kernel. They go through the port of
-  // the output callback, and the replies through another port, so a reply
-  // could arrive before the outputs of its cell, which would be lost.
+  // The outputs not yet handled by the kernel. In a Web Worker, they go
+  // through the port of the output callback, and the replies through another
+  // port, so a reply could arrive before the outputs of its cell, which would
+  // be lost.
   const pendingOutputs = new Set<Promise<unknown>>();
 
   const emitOutput = (
@@ -229,7 +231,8 @@ export function createRemoteRuntimeApi(
 }
 
 /**
- * Make outbound payload clone-safe for Comlink transport.
+ * Make outbound payload clone-safe for Comlink transport. The kernel in the
+ * page gets plain data too, without references to the objects of the cells.
  */
 function makeCloneSafe<T>(value: T): T {
   if (typeof structuredClone === 'function') {
