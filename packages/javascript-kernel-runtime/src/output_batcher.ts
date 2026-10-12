@@ -9,17 +9,26 @@ import type { RuntimeOutputHandler, RuntimeOutputMessage } from './protocol';
 type StreamMessage = Extract<RuntimeOutputMessage, { type: 'stream' }>;
 
 /**
+ * The number of characters printed for a parent message.
+ */
+interface IStreamCount {
+  count: number;
+  isTruncated: boolean;
+}
+
+/**
  * Merges the consecutive writes to a stream into one output message, and
- * limits the volume of the stream outputs of a cell.
+ * limits the volume of the stream outputs of each parent message, like a
+ * cell: an interval printing in its cell does not silence the other cells.
  *
  * The text written to stdout or stderr is kept until another output, a write
  * to the other stream or for another parent message (another `parentHeader`
- * object), a call to flush(), or
- * flushInterval after the first write. It is also sent on a write when
- * flushInterval elapsed, so a long synchronous loop shows its output while
- * it runs, without timers. The frontend merges the consecutive stream
- * outputs anyway, so the notebook shows the same text, with one message
- * instead of one per console.log().
+ * object), a call to flush(), or flushInterval after the first write. It
+ * is also sent on a write, or by flushIfDue(), when flushInterval elapsed,
+ * so a long synchronous loop shows its output while it runs, without
+ * timers. The frontend merges the consecutive stream outputs anyway, so the
+ * notebook shows the same text, with one message instead of one per
+ * console.log().
  */
 export class OutputBatcher {
   /**
@@ -52,7 +61,7 @@ export class OutputBatcher {
       return;
     }
     if (message.type === 'clear_output') {
-      this.resetStreamOutput();
+      this.resetStreamOutput(message.parentHeader);
       // The pending text of the cell would be shown and cleared at once
       if (
         !message.bundle.wait &&
@@ -68,10 +77,13 @@ export class OutputBatcher {
 
   /**
    * Send the pending text, if any.
+   *
+   * @param filter - Send it only when its parent header passes the filter,
+   * like the ones of an Output widget.
    */
-  flush(): void {
+  flush(filter?: (parentHeader: unknown) => boolean): void {
     const first = this._first;
-    if (!first) {
+    if (!first || (filter && !filter(first.parentHeader))) {
       return;
     }
     const text =
@@ -82,19 +94,39 @@ export class OutputBatcher {
   }
 
   /**
-   * Whether the cell reached the limit of its stream outputs: the next
-   * stream messages are dropped until resetStreamOutput().
+   * Send the pending text if it was kept for flushInterval, for the hosts
+   * whose timers can not fire while the code runs, like a Web Worker busy
+   * with a long synchronous loop: the loop guard calls it when it checks
+   * the clock.
    */
-  get isTruncated(): boolean {
-    return this._isTruncated;
+  flushIfDue(): void {
+    if (this._first && this._now() - this._start >= this._flushInterval) {
+      this.flush();
+    }
   }
 
   /**
-   * Start counting the stream outputs from zero, for a new cell.
+   * Whether a parent message, like a cell, reached the limit of its stream
+   * outputs: its next stream messages are dropped until
+   * resetStreamOutput().
+   *
+   * @param parentHeader - The parent header of the messages, the same
+   * object.
    */
-  resetStreamOutput(): void {
-    this._streamOutput = 0;
-    this._isTruncated = false;
+  isTruncated(parentHeader?: unknown): boolean {
+    return this._countOf(parentHeader)?.isTruncated ?? false;
+  }
+
+  /**
+   * Start counting the stream outputs of a parent message from zero, like
+   * for a new cell. The counts of the other parent messages are kept.
+   */
+  resetStreamOutput(parentHeader?: unknown): void {
+    if (isObject(parentHeader)) {
+      this._counts.delete(parentHeader);
+    } else {
+      this._count = null;
+    }
   }
 
   /**
@@ -113,7 +145,8 @@ export class OutputBatcher {
   }
 
   /**
-   * Keep the text of a stream message, within the limit of the cell.
+   * Keep the text of a stream message, within the limit of its parent
+   * message.
    */
   private _pushStream(message: StreamMessage): void {
     const limit = this._maxStreamOutput;
@@ -121,18 +154,28 @@ export class OutputBatcher {
       this._write(message);
       return;
     }
-    if (this._isTruncated) {
+    const parent = message.parentHeader;
+    let counted = this._countOf(parent);
+    if (!counted) {
+      counted = { count: 0, isTruncated: false };
+      if (isObject(parent)) {
+        this._counts.set(parent, counted);
+      } else {
+        this._count = counted;
+      }
+    }
+    if (counted.isTruncated) {
       return;
     }
     const { text } = message.bundle;
-    const remaining = limit - this._streamOutput;
+    const remaining = limit - counted.count;
     if (text.length <= remaining) {
-      this._streamOutput += text.length;
+      counted.count += text.length;
       this._write(message);
       return;
     }
-    this._isTruncated = true;
-    this._streamOutput = limit;
+    counted.isTruncated = true;
+    counted.count = limit;
     const kept = truncate(text, remaining);
     if (kept) {
       this._write({ ...message, bundle: { ...message.bundle, text: kept } });
@@ -192,6 +235,15 @@ export class OutputBatcher {
   }
 
   /**
+   * The count of the stream outputs of a parent message, if it printed.
+   */
+  private _countOf(parentHeader: unknown): IStreamCount | undefined {
+    return isObject(parentHeader)
+      ? this._counts.get(parentHeader)
+      : (this._count ?? undefined);
+  }
+
+  /**
    * Drop the pending text, and cancel the timer.
    */
   private _discard(): void {
@@ -230,8 +282,10 @@ export class OutputBatcher {
   private _size = 0;
   private _start = 0;
   private _timer: unknown = null;
-  private _streamOutput = 0;
-  private _isTruncated = false;
+  // The counts of the parent headers, forgotten with them, and the count of
+  // the messages without one
+  private _counts = new WeakMap<object, IStreamCount>();
+  private _count: IStreamCount | null = null;
   private _isDisposed = false;
 }
 
@@ -288,10 +342,11 @@ export namespace OutputBatcher {
     maxBufferSize?: number;
 
     /**
-     * The number of characters (UTF-16 code units) a cell can print on
-     * stdout and stderr, until resetStreamOutput() or a clear_output
-     * message: the rest is not sent, and a notice is printed on stderr.
-     * 5,000,000 by default, 0 for no limit.
+     * The number of characters (UTF-16 code units) a parent message, like a
+     * cell, can print on stdout and stderr, until resetStreamOutput() or a
+     * clear_output message of the same parent: the rest is not sent, and a
+     * notice is printed on stderr. The messages without a parent header
+     * share one count. 5,000,000 by default, 0 for no limit.
      */
     maxStreamOutput?: number;
   }
@@ -317,6 +372,15 @@ export namespace OutputBatcher {
    * page and a notebook file growing without bounds.
    */
   export const DEFAULT_MAX_STREAM_OUTPUT = 5_000_000;
+}
+
+/**
+ * Whether a value is an object, which can be the key of a WeakMap.
+ */
+function isObject(value: unknown): value is object {
+  return (
+    (typeof value === 'object' && value !== null) || typeof value === 'function'
+  );
 }
 
 /**

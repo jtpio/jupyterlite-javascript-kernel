@@ -750,11 +750,13 @@ export class IFrameRuntimeBackend extends AbstractRuntimeBackend<IRemoteRuntimeA
    */
   private _teardown(): void {
     const remote = this._remote;
-    this._remote = null;
     if (remote) {
-      // The evaluator is disposed before the promise is returned
+      // The evaluator is disposed before the promise is returned, and sends
+      // the text printed last, like before a reload, while it is still the
+      // current runtime
       void remote.dispose().catch(() => undefined);
     }
+    this._remote = null;
 
     this._iframe?.removeEventListener('load', this._onLoad);
     this._iframe?.remove();

@@ -196,6 +196,37 @@ for (const kernel of KERNELS) {
       expect(await page.notebook.getCellTextOutput(cell)).toEqual(['42']);
     });
 
+    test('Run the loops of the widget callbacks after an interrupt', async ({
+      page
+    }) => {
+      const index = await runCode(
+        page,
+        [
+          'const sum = new Jupyter.widgets.Button({ description: "Sum" });',
+          'sum.onClick(() => {',
+          'let total = 0;',
+          'for (const value of [1, 2, 3]) total += value;',
+          'console.log(`total ${total}`);',
+          '});',
+          'sum'
+        ].join('\n')
+      );
+      const waiting = await runCode(page, 'await new Promise(() => {})', {
+        wait: false
+      });
+      await waitForRunning(page, waiting);
+      await interruptFromMenu(page);
+      await waitForError(page, waiting, 'KeyboardInterrupt');
+
+      await (await getOutputs(page, index))
+        .getByRole('button', { name: 'Sum' })
+        .click();
+      await expect(
+        await getOutputs(page, index, 'application/vnd.jupyter.stdout')
+      ).toHaveText('total 6\n');
+      await expect(await getOutputs(page, index, STDERR)).toHaveCount(0);
+    });
+
     test('Interrupt an async loop from the toolbar', async ({ page }) => {
       const index = await runCode(
         page,

@@ -71,8 +71,17 @@ export class JavaScriptRuntimeEvaluator {
         ? undefined
         : (options.scheduler ?? defaultScheduler(this._globalScope));
     const now = options.now ?? defaultClock(this._globalScope);
+    // The outputs an Output widget adds to its own outputs go to the widget
+    const onOutput = options.onOutput;
     this._outputs = new OutputBatcher({
-      onOutput: options.onOutput,
+      onOutput: message => {
+        const sink = this._router.sinkOf(message.parentHeader);
+        if (sink) {
+          sink.append({ ...message, parentHeader: undefined });
+        } else {
+          onOutput(message);
+        }
+      },
       scheduler: this._scheduler,
       now,
       flushInterval: options.flushInterval,
@@ -101,7 +110,10 @@ export class JavaScriptRuntimeEvaluator {
       globalScope: this._globalScope,
       timeout: options.loopTimeout,
       interruptBuffer: options.interruptBuffer,
-      now
+      now,
+      // The timers can not send the pending text while a loop runs, like in
+      // a Web Worker, which could also be terminated before
+      onCheck: () => this._outputs.flushIfDue()
     });
     this._executor.loopGuard = this._guard;
 
@@ -116,6 +128,8 @@ export class JavaScriptRuntimeEvaluator {
       reportError: (error, inPromise) => this.reportUncaught(error, inPromise),
       mimeBundle: value => this._mimeBundle(value),
       router: this._router,
+      flushOutputs: sink =>
+        this._outputs.flush(header => this._router.sinkOf(header) === sink),
       globalScope: this._globalScope
     });
     registerWidgetControlTarget(this._commManager);
@@ -203,7 +217,8 @@ export class JavaScriptRuntimeEvaluator {
    * The consecutive writes to a stream are sent together, at most
    * flushInterval after the first one, or before any other output. The
    * evaluator flushes them at the end of execute() and of the comm handlers,
-   * and before prompt() blocks. A host without timers calls it when the
+   * before prompt() blocks, and from the loops of the cells once
+   * flushInterval elapsed. A host without timers calls it when the
    * cell, its timers and its jobs are done, and after a comm handler and its
    * jobs: it ends the comm request.
    */
@@ -238,13 +253,16 @@ export class JavaScriptRuntimeEvaluator {
    * The cell stops waiting for its promise and fails with a
    * KeyboardInterrupt: this only stops a cell waiting for a promise, as the
    * host can only call it while the code of the cell is not running. Its
-   * loops throw the error too, until the next execution. To stop a loop
-   * which never yields, the host runs the evaluator in another thread and
-   * sets the `interruptBuffer`.
+   * loops throw the error too, until the next execution or the next comm
+   * message, like a click on a button. To stop a loop which never yields,
+   * the host runs the evaluator in another thread and sets the
+   * `interruptBuffer`. The async callbacks captured by the Output widgets
+   * stop capturing the outputs.
    */
   interrupt(): void {
     this._guard.interrupt();
     this._timers.clearAll();
+    this._router.endHeld();
   }
 
   /**
@@ -280,7 +298,10 @@ export class JavaScriptRuntimeEvaluator {
     const cell = this._router.cell;
     if (!silent) {
       // A silent execution keeps the output limit of the cell before it
-      this._outputs.resetStreamOutput();
+      this._outputs.resetStreamOutput(cell.header);
+      // The async callbacks the cells before captured in Output widgets
+      // would take the outputs of this cell after an await
+      this._router.endHeld(false);
     }
     if (executionCount > 0) {
       // The timers of the startup code, run without execution count, are
@@ -288,9 +309,11 @@ export class JavaScriptRuntimeEvaluator {
       this._timers.enable();
     }
     this._guard.beginExecution();
+    this._router.beginExecution();
     try {
       return await this._execute(code, executionCount, options);
     } finally {
+      this._router.endExecution();
       this._guard.endExecution();
       if (silent && this._router.cell === cell) {
         this._router.cell = previous;
@@ -445,9 +468,10 @@ export class JavaScriptRuntimeEvaluator {
    * listener or a widget callback, on stderr: `Uncaught Error: ...` with its
    * location in the cells. The error goes to the cell which created the timer
    * or registered the callback which threw it, when the evaluator knows it,
-   * or else to the cell that ran last. Once that cell reached its
-   * output limit, the error goes to the console of the host instead, as
-   * the notebook does not show the rest of the cell outputs.
+   * or else to the cell that ran last. Once that cell, or the message the
+   * error goes to, reached its output limit, the error goes to the console
+   * of the host instead, as the notebook does not show the rest of its
+   * outputs.
    *
    * The evaluator calls it for the `error` and `unhandledrejection` events
    * of globalScope, when it has addEventListener. Hosts without these events
@@ -464,11 +488,21 @@ export class JavaScriptRuntimeEvaluator {
       if (!this._router.current.silent) {
         this._setLastValue('_error', error);
       }
-      if (!this._outputs.isTruncated) {
+      // The parent of the error, before it is formatted
+      const routed = this._router.route({
+        type: 'stream',
+        bundle: { name: 'stderr', text: '' }
+      });
+      if (!routed) {
+        return;
+      }
+      const { parentHeader } = routed;
+      if (!this._outputs.isTruncated(parentHeader)) {
         try {
           const { traceback } = this._executor.formatError(error, { prefix });
-          this._onOutput({
+          this._outputs.push({
             type: 'stream',
+            parentHeader,
             bundle: { name: 'stderr', text: `${traceback.join('\n')}\n` }
           });
           return;
@@ -638,6 +672,8 @@ export class JavaScriptRuntimeEvaluator {
     callback: () => void
   ): Promise<void> {
     const request = toParent(parentMessageId, parentHeader);
+    // The interrupt of the last cell does not stop the loops of the handler
+    this._guard.clearInterrupt();
     this._router.runRequest(request, () => {
       try {
         callback();
@@ -1306,7 +1342,8 @@ export namespace JavaScriptRuntimeEvaluator {
      * The number of characters (UTF-16 code units) a cell can print on
      * stdout and stderr, counted from the start of the cell or from its last
      * clear_output: the rest is not shown, and a notice is printed on
-     * stderr. 5,000,000 by default, 0 for no limit.
+     * stderr. Each parent message, like a cell, a comm message or an Output
+     * widget, has its own count. 5,000,000 by default, 0 for no limit.
      */
     maxStreamOutput?: number;
 

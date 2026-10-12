@@ -148,8 +148,8 @@ interface IGuardState {
  * the next task. So it measures how long the page could not render or handle
  * the input of the user, through the microtasks too (`while (true) { await
  * null }`). The errors are sticky: the loops keep throwing them until the
- * next execution (interrupted) or the next task (timed out), even if the
- * code of the cell catches them.
+ * next execution or clearInterrupt() (interrupted) or the next task (timed
+ * out), even if the code of the cell catches them.
  *
  * The guard only checks the clock every few milliseconds, with a number of
  * iterations adapted to the speed of each loop: a fast loop does not delay
@@ -165,6 +165,7 @@ export class LoopGuard {
     this._timeout = sanitizeTimeout(options.timeout);
     this._interruptBuffer = options.interruptBuffer ?? null;
     this._now = options.now ?? defaultClock(scope);
+    this._onCheck = options.onCheck ?? null;
 
     // The guard is created in the realm of the cells, so that the engine can
     // inline it in their loops
@@ -302,6 +303,17 @@ export class LoopGuard {
   }
 
   /**
+   * Clear the interruption of the last execution before other code runs
+   * while no execution is running, like a widget callback: its loops do not
+   * throw the KeyboardInterrupt meant for the interrupted cell.
+   */
+  clearInterrupt(): void {
+    if (!this._interrupt && this._state.flag === INTERRUPTED) {
+      this._state.flag = RUNNING;
+    }
+  }
+
+  /**
    * End the current execution.
    */
   endExecution(): void {
@@ -371,6 +383,13 @@ export class LoopGuard {
       throw this._tripped;
     }
 
+    if (this._onCheck) {
+      try {
+        this._onCheck();
+      } catch {
+        // Keep the errors of the host out of the loop
+      }
+    }
     const now = this._now();
     if (this._taskStart < 0) {
       this._taskStart = now;
@@ -446,6 +465,7 @@ export class LoopGuard {
   private _timeout: number;
   private _interruptBuffer: Int32Array | null;
   private _now: () => number;
+  private _onCheck: (() => void) | null;
   private _postTask: ITaskPoster;
   private _taskStart = -1;
   private _tripped: Error | null = null;
@@ -485,6 +505,13 @@ export namespace LoopGuard {
      * globalScope, or else Date.now.
      */
     now?: () => number;
+
+    /**
+     * Called when the guard checks the clock, about every few milliseconds
+     * while a loop runs, like to send the outputs the timers can not send
+     * while the loop keeps the thread busy. Its errors are ignored.
+     */
+    onCheck?: () => void;
   }
 }
 

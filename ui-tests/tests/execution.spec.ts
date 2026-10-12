@@ -478,6 +478,22 @@ test.describe(`IFrame runtime (${IFRAME_KERNEL.displayName})`, () => {
     expect(await page.notebook.getCellTextOutput(index)).toEqual(['2']);
   });
 
+  test('Show the text printed while the iframe is reloaded', async ({
+    page
+  }) => {
+    const index = await runCode(
+      page,
+      [
+        'addEventListener("pagehide", () => console.log("leaving"));',
+        'location.reload();',
+        'await new Promise(() => {});'
+      ].join('\n')
+    );
+    const outputs = await getOutputs(page, index);
+    await expect(outputs.last()).toContainText('RuntimeReloadedError');
+    await expect(outputs.first()).toHaveText('leaving\n');
+  });
+
   test('Refuse to redeclare the globals which can not be replaced', async ({
     page
   }) => {

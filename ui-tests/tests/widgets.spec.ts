@@ -204,6 +204,116 @@ for (const kernel of KERNELS) {
       await expect(await getOutputs(page, later)).toHaveText(['later\n']);
     });
 
+    test('Show the outputs of overlapping clicks in an Output widget', async ({
+      page
+    }) => {
+      const index = await runCode(
+        page,
+        [
+          'const { Button, Output } = Jupyter.widgets;',
+          'const out = new Output();',
+          'const slow = new Button({ description: "Slow" });',
+          'let clicks = 0;',
+          'slow.onClick(out.capture(async () => {',
+          'const click = ++clicks;',
+          'console.log(`start ${click}`);',
+          'await new Promise(resolve => setTimeout(resolve, 1000));',
+          'console.log(`end ${click}`);',
+          '}));',
+          'display(slow);',
+          'out'
+        ].join('\n')
+      );
+      const outputs = await getOutputs(page, index);
+      const button = outputs.getByRole('button', { name: 'Slow' });
+
+      // The second click starts while the first one waits
+      await button.click();
+      await button.click();
+      const widget = outputs.locator('.widget-output');
+      await expect(widget).toHaveText(/^start 1\s+start 2\s+end 1\s+end 2\s*$/);
+    });
+
+    test('Keep the order of the printed and appended outputs of a click after an await', async ({
+      page
+    }) => {
+      const index = await runCode(
+        page,
+        [
+          'const { Button, Output } = Jupyter.widgets;',
+          'const out = new Output();',
+          'const load = new Button({ description: "Load" });',
+          'load.onClick(out.capture(async () => {',
+          'await new Promise(resolve => setTimeout(resolve, 100));',
+          'console.log("fetched");',
+          'out.appendDisplayData({ "text/html": "<b>table</b>" });',
+          'console.log("logged");',
+          'out.appendStdout("appended\\n");',
+          '}));',
+          'display(load);',
+          'out'
+        ].join('\n')
+      );
+      const outputs = await getOutputs(page, index);
+      await outputs.getByRole('button', { name: 'Load' }).click();
+      const widget = outputs.locator('.widget-output');
+      await expect(widget).toHaveText(
+        /^fetched\s+table\s*logged\s+appended\s*$/
+      );
+    });
+
+    test('Print the outputs of the next cells in their cell while an async capture runs', async ({
+      page
+    }) => {
+      const index = await runCode(
+        page,
+        [
+          'const { Button, Output } = Jupyter.widgets;',
+          'const out = new Output();',
+          'const wait = new Button({ description: "Wait" });',
+          'wait.onClick(out.capture(async () => {',
+          'console.log("waiting");',
+          'await new Promise(() => {});',
+          '}));',
+          'display(wait);',
+          'display(out);',
+          'out.capture(async () => {',
+          'console.log("polling");',
+          'await new Promise(() => {});',
+          '})();'
+        ].join('\n')
+      );
+      const outputs = await getOutputs(page, index);
+      const widget = outputs.locator('.widget-output');
+      await outputs.getByRole('button', { name: 'Wait' }).click();
+      await expect(widget).toHaveText(/^polling\s+waiting\s*$/);
+
+      // The code of the next cell after an await
+      const next = await runCode(
+        page,
+        [
+          'await new Promise(resolve => setTimeout(resolve, 100));',
+          'console.log("done");'
+        ].join('\n')
+      );
+      await expect(await getOutputs(page, next)).toHaveText(['done\n']);
+
+      // The interrupt ends the capture of the click: the code running after
+      // a cell prints in the cell
+      await page.menu.clickMenuItem('Kernel>Interrupt Kernel');
+      const later = await runCode(
+        page,
+        [
+          '(async () => {',
+          'await new Promise(resolve => setTimeout(resolve, 200));',
+          'console.log("later");',
+          '})();'
+        ].join('\n')
+      );
+      await expect(await getOutputs(page, later)).toHaveText(['later\n']);
+      await expect(widget).toHaveText(/^polling\s+waiting\s*$/);
+    });
+
     test('Print the outputs of the widget callbacks in their cell', async ({
       page
     }) => {

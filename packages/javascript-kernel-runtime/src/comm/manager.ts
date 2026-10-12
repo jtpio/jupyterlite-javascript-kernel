@@ -4,7 +4,11 @@
 import type { IMimeBundle } from '@jupyterlab/nbformat';
 
 import { hostConsole, uuid } from '../env';
-import { OutputRouter, type IParentMessage } from '../output_router';
+import {
+  OutputRouter,
+  type IOutputSink,
+  type IParentMessage
+} from '../output_router';
 import type { RuntimeOutputHandler, RuntimeOutputMessage } from '../protocol';
 import { isThenable, safe } from '../utils';
 
@@ -61,6 +65,7 @@ export class CommManager {
     this._onTargetRegistered = options.onTargetRegistered;
     this._reportError = options.reportError;
     this._mimeBundle = options.mimeBundle;
+    this._flushOutputs = options.flushOutputs;
     this._globalScope = options.globalScope ?? null;
     this.router = options.router ?? new OutputRouter();
   }
@@ -191,6 +196,16 @@ export class CommManager {
    */
   publish(message: RuntimeOutputMessage): void {
     this._onOutput(message);
+  }
+
+  /**
+   * Send the pending outputs of an Output widget, which it adds to its own
+   * outputs, before it changes them.
+   *
+   * @internal
+   */
+  flushOutputs(sink: IOutputSink): void {
+    this._flushOutputs?.(sink);
   }
 
   /**
@@ -432,6 +447,7 @@ export class CommManager {
   private _onTargetRegistered?: (targetName: string) => void;
   private _reportError?: (error: unknown, inPromise: boolean) => void;
   private _mimeBundle?: (value: unknown) => IMimeBundle;
+  private _flushOutputs?: (sink: IOutputSink) => void;
   private _globalScope: Record<string, any> | null;
   private _comms = new Map<string, IComm>();
   private _targets = new Map<string, CommTargetHandler>();
@@ -470,6 +486,14 @@ export namespace CommManager {
      * Defaults to a new one.
      */
     router?: OutputRouter;
+
+    /**
+     * Send the pending outputs of an Output widget, kept by a batcher like
+     * the text of the console, which the widget adds to its own outputs
+     * once the host replied to the comm message of its capture: called
+     * before the widget changes its outputs, so that they keep their order.
+     */
+    flushOutputs?: (sink: IOutputSink) => void;
 
     /**
      * The global object of the realm running the cells, whose constructors

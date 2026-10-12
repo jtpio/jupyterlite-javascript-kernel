@@ -132,12 +132,14 @@ export function createRemoteRuntimeApi(
   };
 
   /**
-   * Wait until the kernel handled all the outputs sent so far.
+   * Wait until the kernel handled the outputs sent so far, and the ones
+   * sent by the jobs queued until then. Not the outputs sent while waiting
+   * for them, like the ones of an interval updating a display: the reply
+   * would wait for them forever.
    */
   const flushOutputs = async (): Promise<void> => {
-    while (pendingOutputs.size > 0) {
-      await Promise.all([...pendingOutputs]);
-    }
+    await Promise.all([...pendingOutputs]);
+    await Promise.all([...pendingOutputs]);
   };
 
   return {

@@ -8,7 +8,9 @@ import {
   WORKER_KERNEL,
   createNotebook,
   getOutputs,
-  runCode
+  openKernelSettings,
+  runCode,
+  setKernelSetting
 } from './utils';
 
 const STDOUT = 'application/vnd.jupyter.stdout';
@@ -171,10 +173,175 @@ for (const kernel of KERNELS) {
   });
 }
 
-test.describe(`Output (${WORKER_KERNEL.displayName})`, () => {
-  test('Show the output of a long loop while it runs', async ({ page }) => {
-    await createNotebook(page, WORKER_KERNEL);
+for (const kernel of KERNELS) {
+  test.describe(`Output limit (${kernel.displayName})`, () => {
+    test.beforeEach(async ({ page }) => {
+      await page.goto('lab/index.html');
+      const form = await openKernelSettings(page);
+      await setKernelSetting(page, form, 'Output limit (characters)', '1000');
+      await createNotebook(page, kernel, { open: false });
+    });
 
+    test('Limit each cell, not the cells printing at the same time', async ({
+      page
+    }) => {
+      const interval = await runCode(
+        page,
+        "const timer = setInterval(() => console.log('x'.repeat(99)), 20);"
+      );
+      const intervalStdout = await getOutputs(page, interval, STDOUT);
+      await expect(await getOutputs(page, interval, STDERR)).toContainText(
+        'Output limit reached'
+      );
+
+      // Another cell prints while the interval runs, also after an await,
+      // and shows its errors
+      const index = await runCode(
+        page,
+        [
+          "console.log('start');",
+          'await new Promise(resolve => setTimeout(resolve, 300));',
+          "console.log('end');",
+          "setTimeout(() => { throw new Error('late'); });"
+        ].join('\n')
+      );
+      await expect(await getOutputs(page, index, STDOUT)).toHaveText(
+        'start\nend\n'
+      );
+      await expect(await getOutputs(page, index, STDERR)).toContainText(
+        'Uncaught Error: late'
+      );
+
+      // Running a cell does not let the interval print more
+      const printed = await intervalStdout.textContent();
+      await runCode(page, '1 + 1');
+      await page.waitForTimeout(300);
+      expect(await intervalStdout.textContent()).toBe(printed);
+      await runCode(page, 'clearInterval(timer);');
+    });
+
+    test('Print the outputs of a button after another cell reached its limit', async ({
+      page
+    }) => {
+      const index = await runCode(
+        page,
+        [
+          'const { Button } = Jupyter.widgets;',
+          "const save = new Button({ description: 'Save' });",
+          "save.onClick(() => console.log('saved'));",
+          "const fail = new Button({ description: 'Fail' });",
+          "fail.onClick(() => { throw new Error('not saved'); });",
+          'display(save);',
+          'display(fail);'
+        ].join('\n')
+      );
+      const full = await runCode(page, "console.log('x'.repeat(2000));");
+      await expect(await getOutputs(page, full, STDERR)).toContainText(
+        'Output limit reached'
+      );
+
+      const outputs = await getOutputs(page, index);
+      await outputs.getByRole('button', { name: 'Save' }).click();
+      await expect(await getOutputs(page, index, STDOUT)).toHaveText('saved\n');
+      await outputs.getByRole('button', { name: 'Fail' }).click();
+      await expect(await getOutputs(page, index, STDERR)).toContainText(
+        'Uncaught Error: not saved'
+      );
+    });
+
+    test('Limit the outputs added to an Output widget after an await', async ({
+      page
+    }) => {
+      const index = await runCode(
+        page,
+        [
+          'const { Button, Output } = Jupyter.widgets;',
+          'const out = new Output();',
+          "const print = new Button({ description: 'Print' });",
+          'let clicks = 0;',
+          'print.onClick(out.capture(async () => {',
+          'const click = ++clicks;',
+          'await new Promise(resolve => setTimeout(resolve, 100));',
+          'console.log(`click ${click}`);',
+          "for (let i = 0; i < 100; i++) console.log('x'.repeat(99));",
+          "console.log('hidden');",
+          '}, { clearOutput: true }));',
+          'display(print);',
+          'out'
+        ].join('\n')
+      );
+      const outputs = await getOutputs(page, index);
+      const button = outputs.getByRole('button', { name: 'Print' });
+      await button.click();
+
+      const widget = outputs.locator('.widget-output');
+      await expect(widget).toContainText(
+        'Output limit reached: the cell printed more than 1,000 characters'
+      );
+      await expect(widget).toContainText('click 1');
+      await expect(widget).not.toContainText('hidden');
+
+      // Each click has its own limit
+      await button.click();
+      await expect(widget).toContainText('click 2');
+      await expect(widget).toContainText('Output limit reached');
+      await expect(widget).not.toContainText('click 1');
+      await expect(widget).not.toContainText('hidden');
+    });
+  });
+}
+
+test.describe(`Output (${WORKER_KERNEL.displayName})`, () => {
+  test.beforeEach(async ({ page }) => {
+    await createNotebook(page, WORKER_KERNEL);
+  });
+
+  test('Show the output printed before a long step while it runs', async ({
+    page
+  }) => {
+    const index = await runCode(
+      page,
+      [
+        "console.log('computing');",
+        'const end = Date.now() + 3000;',
+        'while (Date.now() < end) {}',
+        "console.log('done');"
+      ].join('\n'),
+      { wait: false }
+    );
+
+    const stdout = await getOutputs(page, index, STDOUT);
+    const prompt = (await page.notebook.getCellLocator(index))!.locator(
+      '.jp-InputPrompt'
+    );
+    await expect(stdout).toHaveText('computing\n', { timeout: 2000 });
+    await expect(prompt).toHaveText('[*]:', { timeout: 100 });
+
+    await page.notebook.waitForRun(index);
+    await expect(stdout).toHaveText('computing\ndone\n');
+  });
+
+  test('Show the output printed before a loop stopped by a restart', async ({
+    page
+  }) => {
+    const index = await runCode(
+      page,
+      "console.log('starting');\nwhile (true) {}",
+      { wait: false }
+    );
+    const cell = (await page.notebook.getCellLocator(index))!;
+    await expect(cell.locator('.jp-InputPrompt')).toHaveText('[*]:');
+
+    await page.menu.clickMenuItem('Kernel>Interrupt Kernel');
+    await expect(await getOutputs(page, index, STDERR)).toContainText(
+      'the Web Worker was restarted'
+    );
+    await expect(await getOutputs(page, index, STDOUT)).toHaveText(
+      'starting\n'
+    );
+  });
+
+  test('Show the output of a long loop while it runs', async ({ page }) => {
     const index = await runCode(
       page,
       [

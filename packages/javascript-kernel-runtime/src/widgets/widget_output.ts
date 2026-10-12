@@ -41,6 +41,7 @@ export class Output extends DOMWidget {
     return [...((this.get('outputs') as Array<Record<string, unknown>>) ?? [])];
   }
   set outputs(v: Array<Record<string, unknown>>) {
+    this._flushPending();
     this.set('outputs', [...v]);
   }
 
@@ -54,9 +55,11 @@ export class Output extends DOMWidget {
    */
   clearOutput(options: { wait?: boolean } = {}): void {
     const wait = Boolean(options.wait);
-    const capture = wait ? this._manager.router.captureOf(this._sink) : null;
-    if (capture && !capture.direct) {
-      // The frontend clears the widget when the next captured output arrives
+    const capture = this._manager.router.captureOf(this._sink);
+    if (capture && (wait || capture.direct)) {
+      // The frontend clears the widget when the next captured output
+      // arrives, and the widget clears its own outputs after the ones
+      // printed before
       this._manager.publish({
         type: 'clear_output',
         bundle: { wait },
@@ -124,11 +127,11 @@ export class Output extends DOMWidget {
     if (!capture) {
       return null;
     }
-    if (this._captureDepth === 0) {
-      // The frontend shows the outputs of the message in the widget
-      this.msg_id = capture.messageId;
-    }
-    this._captureDepth += 1;
+    // The frontend shows the outputs of the message in the widget, like
+    // the outputs of a click while the async callback of the click before
+    // still runs
+    this._captures.push(capture);
+    this.msg_id = capture.messageId;
     if (this._clearPending) {
       // The frontend clears the widget when the first captured output
       // arrives, like after clearOutput({ wait: true }) in the capture
@@ -152,16 +155,22 @@ export class Output extends DOMWidget {
       return;
     }
     capture.end();
-    this._captureDepth = Math.max(0, this._captureDepth - 1);
-    if (this._captureDepth === 0 && this.msg_id === capture.messageId) {
-      this.msg_id = '';
+    const index = this._captures.indexOf(capture);
+    if (index < 0) {
+      // Already ended, like by a new cell
+      return;
     }
+    this._captures.splice(index, 1);
+    // The frontend shows the outputs of the captures still running
+    const last = this._captures[this._captures.length - 1];
+    this.msg_id = last?.messageId ?? '';
   }
 
   /**
    * Remove the outputs, now or when the next one arrives.
    */
   private _clear(wait: boolean): void {
+    this._flushPending();
     if (wait) {
       this._clearPending = true;
       return;
@@ -171,6 +180,7 @@ export class Output extends DOMWidget {
   }
 
   private _appendOutput(output: Record<string, unknown>): void {
+    this._flushPending();
     const outputs = this._clearPending ? [] : this.outputs;
     this._clearPending = false;
     const last = outputs[outputs.length - 1];
@@ -189,6 +199,25 @@ export class Output extends DOMWidget {
       outputs.push(output);
     }
     this.outputs = outputs;
+  }
+
+  /**
+   * Send the state with the outputs printed before, like when the frontend
+   * requests it.
+   */
+  protected override _sendState(state: Record<string, unknown>): void {
+    this._flushPending();
+    super._sendState(state);
+  }
+
+  /**
+   * Add the outputs printed before, which the batcher keeps, like the text
+   * of console.log() after an `await` in an async callback captured by a
+   * comm handler: before the widget changes its outputs, so that they keep
+   * their order, and the state the frontend receives last has all of them.
+   */
+  private _flushPending(): void {
+    this._manager.flushOutputs(this._sink);
   }
 
   /**
@@ -223,10 +252,11 @@ export class Output extends DOMWidget {
     return _wrapCapturedOutputCallback(this, callback, options);
   }
 
-  _captureDepth = 0;
+  private _captures: IOutputCapture[] = [];
   private _clearPending = false;
   private _sink: IOutputSink = {
-    append: message => this._appendMessage(message)
+    append: message => this._appendMessage(message),
+    ended: capture => this._endCapture(capture)
   };
 }
 

@@ -39,6 +39,13 @@ export interface IOutputSink {
    * @returns Whether the widget took the message.
    */
   append(message: RuntimeOutputMessage): boolean;
+
+  /**
+   * Called when the router ends a capture of the widget before its callback
+   * settled, like when the next cell starts or on interrupt: the widget
+   * stops showing the outputs of its message.
+   */
+  ended?(capture: IOutputCapture): void;
 }
 
 /**
@@ -78,10 +85,19 @@ const NO_PARENT: IParentMessage = { id: null };
 interface ICaptureRecord {
   parent: IParentMessage;
   sink: IOutputSink;
+  capture: IOutputCapture;
   // Whether a comm handler started the capture
   inRequest: boolean;
   held: boolean;
+  // The parent of the outputs the widget adds to its own outputs, once the
+  // host replied to the comm message
+  direct?: IParentMessage;
 }
+
+/**
+ * The types of the output messages an Output widget adds to its outputs.
+ */
+const WIDGET_OUTPUTS = new Set(['stream', 'display_data', 'clear_output']);
 
 /**
  * Attaches the outputs of the runtime to the message which caused them,
@@ -95,7 +111,11 @@ interface ICaptureRecord {
  *   to the cell which registered the callback,
  * - the outputs captured by an Output widget go to the comm message the
  *   frontend handles in the widget, and the comm messages sent while the
- *   runtime handles a comm message go to that message.
+ *   runtime handles a comm message go to that message,
+ * - the outputs of an async callback captured by an Output widget, after an
+ *   `await`, go to the widget until its promise settles, unless a cell runs
+ *   or ran after the cell which started the capture: they then go to the
+ *   cell, as they could come from its code after an `await` too.
  */
 export class OutputRouter {
   /**
@@ -109,6 +129,43 @@ export class OutputRouter {
     this._cell = parent;
     this._openRequest = null;
     this._errorParent = null;
+  }
+
+  /**
+   * Start running a cell: until endExecution(), the outputs sent outside of
+   * the handlers and the callbacks, like after an `await`, go to the cell,
+   * and not to the async callbacks captured in an Output widget by the comm
+   * handlers or by the cells before it.
+   */
+  beginExecution(): void {
+    this._executions += 1;
+  }
+
+  /**
+   * End running a cell.
+   */
+  endExecution(): void {
+    this._executions = Math.max(0, this._executions - 1);
+  }
+
+  /**
+   * End the captures of the async callbacks still running, which take the
+   * outputs sent outside of the handlers and the callbacks, like after an
+   * `await`: the Output widgets stop showing them. A new cell ends the
+   * captures started by the cells before it, so that they do not take the
+   * outputs of the next cells, and an interrupt ends all of them, as it
+   * clears the timers they could be waiting for.
+   *
+   * @param all - Whether to end the captures started by the comm handlers
+   * too, like the click handler of a button.
+   */
+  endHeld(all = true): void {
+    for (const record of [...this._captures]) {
+      if (record.held && (all || !record.inRequest)) {
+        record.capture.end();
+        record.sink.ended?.(record.capture);
+      }
+    }
   }
 
   /**
@@ -239,15 +296,8 @@ export class OutputRouter {
     if (id === null) {
       return null;
     }
-    const record: ICaptureRecord = {
-      parent,
-      sink,
-      inRequest: parent === this._request,
-      held: false
-    };
-    this._captures.push(record);
     let ended = false;
-    return {
+    const capture: IOutputCapture = {
       messageId: id,
       parent,
       hold: () => {
@@ -266,13 +316,23 @@ export class OutputRouter {
         }
       }
     };
+    const record: ICaptureRecord = {
+      parent,
+      sink,
+      capture,
+      inRequest: parent === this._request,
+      held: false
+    };
+    this._captures.push(record);
+    return capture;
   }
 
   /**
    * Where an output message sent now for an Output widget goes, when the
    * widget captures outputs: to the parent message of the capture, or
    * `direct` to the widget once the host replied to the comm message which
-   * started the capture, as the frontend forgot the message.
+   * started the capture, as the frontend forgot the message. The parent of
+   * a direct capture is the one of sinkOf().
    */
   captureOf(
     sink: IOutputSink
@@ -280,13 +340,28 @@ export class OutputRouter {
     for (let i = this._captures.length - 1; i >= 0; i--) {
       const record = this._captures[i];
       if (record.sink === sink) {
+        const direct = record.inRequest && !this._isOpen(record.parent);
         return {
-          parent: record.parent,
-          direct: record.inRequest && !this._isOpen(record.parent)
+          parent: direct ? this._directParent(record) : record.parent,
+          direct
         };
       }
     }
     return null;
+  }
+
+  /**
+   * The Output widget which adds an output message to its own outputs, from
+   * the parent header of the message: the outputs of an async callback
+   * captured in a comm handler, sent after the host replied, like after an
+   * `await`. They go through the batcher like the other outputs, which
+   * merges the writes and limits their volume, with a parent header of the
+   * widget, and the evaluator then gives them to the widget.
+   */
+  sinkOf(parentHeader: unknown): IOutputSink | undefined {
+    return typeof parentHeader === 'object' && parentHeader !== null
+      ? this._directSinks.get(parentHeader)
+      : undefined;
   }
 
   /**
@@ -343,11 +418,26 @@ export class OutputRouter {
       }
       // The outputs the frontend showed in the widget are in its state once
       // the host replied, unless the frontend is slow to send them
-      if (held.sink.append(message)) {
-        return null;
+      if (WIDGET_OUTPUTS.has(message.type)) {
+        return this._directParent(held);
       }
     }
     return this._cell;
+  }
+
+  /**
+   * The parent message of the outputs an Output widget adds to its own
+   * outputs, with a header of its own, for sinkOf(): one for each capture,
+   * whose stream outputs are limited like the ones of a comm message, so
+   * that each click of a button can print again.
+   */
+  private _directParent(record: ICaptureRecord): IParentMessage {
+    if (!record.direct) {
+      const header = {} as KernelMessage.IHeader;
+      this._directSinks.set(header, record.sink);
+      record.direct = { id: null, header };
+    }
+    return record.direct;
   }
 
   /**
@@ -359,12 +449,21 @@ export class OutputRouter {
   }
 
   /**
-   * The last capture of an async callback still running.
+   * The last capture of an async callback still running which takes the
+   * outputs sent outside of the handlers and the callbacks: while a cell
+   * runs, only the ones started by the cell, and the ones of the comm
+   * handlers which the host did not reply to yet, as their jobs run first.
    */
   private _lastHeld(): ICaptureRecord | undefined {
     for (let i = this._captures.length - 1; i >= 0; i--) {
-      if (this._captures[i].held) {
-        return this._captures[i];
+      const record = this._captures[i];
+      if (
+        record.held &&
+        (this._executions === 0 ||
+          record.parent.id === this._cell.id ||
+          (record.inRequest && this._isOpen(record.parent)))
+      ) {
+        return record;
       }
     }
     return undefined;
@@ -376,6 +475,10 @@ export class OutputRouter {
   private _scope: IParentMessage | null = null;
   private _errorParent: IParentMessage | null = null;
   private _captures: ICaptureRecord[] = [];
+  private _executions = 0;
+  // The Output widgets of the parent headers of the outputs they add
+  // themselves
+  private _directSinks = new WeakMap<object, IOutputSink>();
 }
 
 /**

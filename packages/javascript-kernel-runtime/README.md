@@ -82,23 +82,23 @@ const evaluator = new runtime.JavaScriptRuntimeEvaluator({
 const reply = await evaluator.execute('1 + 1', 1);
 ```
 
-| Option                   | Description                                                                                                                                                                                                                                                                                                                        |
-| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `globalScope`            | The global object of the realm running the cells. The evaluator installs `display`, `clearOutput`, `Jupyter` (and `prompt` with `requestInput`) on it, `_` and `_error` for the last result and the last error, when it has none, and a `require()` throwing a `ReferenceError` which suggests `import`, when it has no `require`. |
-| `onOutput`               | Called with the output messages, see below.                                                                                                                                                                                                                                                                                        |
-| `requestInput`           | `(prompt, password, parentHeader?) => string \| null`: asks the user for some input, synchronously, for `prompt()`. Returns null when the user cancels. Throws a `StdinNotImplementedError` when the input can not be asked, for example when the request does not allow stdin.                                                    |
-| `now`                    | `() => number`: the current time in milliseconds, for `console.time()` and the batching of the outputs. Defaults to `performance.now()`, or `Date.now()`.                                                                                                                                                                          |
-| `readFile`               | `(path) => Uint8Array`: reads a file, for `display.image(path)`, which is only available with it.                                                                                                                                                                                                                                  |
-| `promiseState`           | `(promise) => [state, value] \| null`: the state of a promise (0 pending, 1 fulfilled, 2 rejected), for engines which can tell it: the outputs then show it.                                                                                                                                                                       |
-| `onCommTargetRegistered` | `(targetName) => void`: called when a comm target is registered, for kernels that must register it before the frontend can open comms on it.                                                                                                                                                                                       |
-| `scheduler`              | `{ setTimeout(callback, ms), clearTimeout(handle) }`: the timers of the host, for the work the runtime defers, like sending the pending text of the streams. Defaults to the timers of `globalScope`, if any, read when the evaluator is created. `null` for none, see below.                                                      |
-| `flushInterval`          | The longest time in milliseconds the text written to stdout or stderr is kept, to send the consecutive writes together. 50 by default, 0 sends one message per write.                                                                                                                                                              |
-| `maxStreamBufferSize`    | The size of the pending text of a stream, in UTF-16 code units, from which it is sent. 1,000,000 by default.                                                                                                                                                                                                                       |
-| `maxStreamOutput`        | The number of characters a cell can print on stdout and stderr, counted from the start of the cell or its last `clear_output`: the rest is dropped, with a notice on stderr. 5,000,000 by default, 0 for no limit.                                                                                                                 |
-| `executor`               | A `JavaScriptExecutor`, to configure it, for example to customize the compilation of the cells.                                                                                                                                                                                                                                    |
-| `executorOptions`        | `IExecutorOptions`, plain data: the configuration of the magic imports, see below. Also applied to `executor`.                                                                                                                                                                                                                     |
-| `loopTimeout`            | The time in milliseconds a loop of the cells can keep the page busy before it is stopped with a `LoopTimeoutError`, 0 (the default) for no limit. See [Interrupts and loop timeout](#interrupts-and-loop-timeout).                                                                                                                 |
-| `interruptBuffer`        | An `Int32Array` view of a `SharedArrayBuffer`, to interrupt the loops from another thread: the host sets its first element to 1 with `Atomics.store()`.                                                                                                                                                                            |
+| Option                   | Description                                                                                                                                                                                                                                                                                                                                                           |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `globalScope`            | The global object of the realm running the cells. The evaluator installs `display`, `clearOutput`, `Jupyter` (and `prompt` with `requestInput`) on it, `_` and `_error` for the last result and the last error, when it has none, and a `require()` throwing a `ReferenceError` which suggests `import`, when it has no `require`.                                    |
+| `onOutput`               | Called with the output messages, see below.                                                                                                                                                                                                                                                                                                                           |
+| `requestInput`           | `(prompt, password, parentHeader?) => string \| null`: asks the user for some input, synchronously, for `prompt()`. Returns null when the user cancels. Throws a `StdinNotImplementedError` when the input can not be asked, for example when the request does not allow stdin.                                                                                       |
+| `now`                    | `() => number`: the current time in milliseconds, for `console.time()` and the batching of the outputs. Defaults to `performance.now()`, or `Date.now()`.                                                                                                                                                                                                             |
+| `readFile`               | `(path) => Uint8Array`: reads a file, for `display.image(path)`, which is only available with it.                                                                                                                                                                                                                                                                     |
+| `promiseState`           | `(promise) => [state, value] \| null`: the state of a promise (0 pending, 1 fulfilled, 2 rejected), for engines which can tell it: the outputs then show it.                                                                                                                                                                                                          |
+| `onCommTargetRegistered` | `(targetName) => void`: called when a comm target is registered, for kernels that must register it before the frontend can open comms on it.                                                                                                                                                                                                                          |
+| `scheduler`              | `{ setTimeout(callback, ms), clearTimeout(handle) }`: the timers of the host, for the work the runtime defers, like sending the pending text of the streams. Defaults to the timers of `globalScope`, if any, read when the evaluator is created. `null` for none, see below.                                                                                         |
+| `flushInterval`          | The longest time in milliseconds the text written to stdout or stderr is kept, to send the consecutive writes together. 50 by default, 0 sends one message per write.                                                                                                                                                                                                 |
+| `maxStreamBufferSize`    | The size of the pending text of a stream, in UTF-16 code units, from which it is sent. 1,000,000 by default.                                                                                                                                                                                                                                                          |
+| `maxStreamOutput`        | The number of characters a cell can print on stdout and stderr, counted from the start of the cell or its last `clear_output`: the rest is dropped, with a notice on stderr. Each parent message (`parentHeader` object) has its own count, so the cells, the comm messages and the `Output` widgets do not silence each other. 5,000,000 by default, 0 for no limit. |
+| `executor`               | A `JavaScriptExecutor`, to configure it, for example to customize the compilation of the cells.                                                                                                                                                                                                                                                                       |
+| `executorOptions`        | `IExecutorOptions`, plain data: the configuration of the magic imports, see below. Also applied to `executor`.                                                                                                                                                                                                                                                        |
+| `loopTimeout`            | The time in milliseconds a loop of the cells can keep the page busy before it is stopped with a `LoopTimeoutError`, 0 (the default) for no limit. See [Interrupts and loop timeout](#interrupts-and-loop-timeout).                                                                                                                                                    |
+| `interruptBuffer`        | An `Int32Array` view of a `SharedArrayBuffer`, to interrupt the loops from another thread: the host sets its first element to 1 with `Atomics.store()`.                                                                                                                                                                                                               |
 
 The `require()` installed by the evaluator is a global function of the
 realm, so `typeof require` is `'function'` for the cells and for the
@@ -171,13 +171,15 @@ The methods of the evaluator:
 - `flushOutputs()` sends the text written to stdout and stderr and not sent
   yet, see below.
 - `interrupt()` stops the running cell, if any, with a `KeyboardInterrupt`,
-  and clears the timers of the cells. `loopTimeout` gets and sets the loop
+  clears the timers of the cells, and ends the captures of the async
+  callbacks of the `Output` widgets. `loopTimeout` gets and sets the loop
   timeout. See [Interrupts and loop timeout](#interrupts-and-loop-timeout).
 - `reportUncaught(error, inPromise?)` prints an error thrown outside of an
   execution on stderr, as `Uncaught Error: ...`, or
   `Uncaught (in promise) Error: ...` for the reason of a rejected promise.
-  Once the cell reached `maxStreamOutput`, the error goes to the console of
-  the host instead. The error becomes `_error`, unless it belongs to a silent
+  Once the parent message of the error, like the cell which created the
+  timer, reached `maxStreamOutput`, the error goes to the console of the host
+  instead. The error becomes `_error`, unless it belongs to a silent
   execution.
 - `dispose()` removes the globals and the listeners of the evaluator.
 
@@ -253,7 +255,13 @@ publishes it with:
   it queued, until the promise of the comm method resolves. Once the host
   replied, the frontend forgets the comm message: the later outputs of an
   async callback captured in a comm handler, like after an `await` of a
-  `fetch()`, are added to the `outputs` of the `Output` widget instead.
+  `fetch()`, are added to the `outputs` of the `Output` widget instead,
+  merged and limited like the stream outputs of a cell, with a limit for
+  each capture, and in their order with the outputs of `appendStdout()`,
+  `appendStderr()` and `appendDisplayData()`. They go to the cell
+  while a cell runs, as they could come from its code after an `await`. A
+  new cell ends the captures of the async callbacks started by the cells
+  before it, and `interrupt()` all of them.
 
 A message without `parentHeader`, when the evaluator got no header, goes to
 the current parent of the host, usually its last `execute_request`. The
@@ -265,8 +273,10 @@ into one `stream` message, sent:
   asks for input,
 - when the stream or the parent message (the `parentHeader` object) changes,
 - at most `flushInterval` after the first write, with the timers of the
-  `scheduler`, or on the next write after `flushInterval`: a long synchronous
-  loop then shows its output while it runs, even without timers,
+  `scheduler`, on the next write after `flushInterval`, or when the loop
+  guard checks the clock after `flushInterval`: a long synchronous loop then
+  shows its output while it runs, even without timers, like the text printed
+  before it in a Web Worker,
 - when the pending text reaches `maxStreamBufferSize`.
 
 A `clear_output` without `wait` drops the pending text of the cell, which
@@ -491,7 +501,9 @@ and the inspection show the source of the functions as written in the cell.
   the cell are kept.
 - Until the next execution, the loops throw the `KeyboardInterrupt`: a
   continuation of the interrupted cell, like a `fetch()` which resolves
-  later, stops at its next loop.
+  later, stops at its next loop. A comm message of the frontend, like the
+  click of a button, clears it first: the loops of the widget callbacks run
+  as usual.
 - The timers created by the cells with `setTimeout()` and `setInterval()`
   are cleared, even when no cell is running: this stops the background
   intervals. The timers of the startup code, run before the first execution
@@ -521,7 +533,8 @@ when the engine handles a message. To stop a loop which never yields:
   engine throws.
 
 The errors of the guard can be caught, but they are sticky: the loops throw
-them again until the next execution (`KeyboardInterrupt`) or the next task
+them again until the next execution or comm message (`KeyboardInterrupt`) or
+the next task
 (`LoopTimeoutError`), and the cell fails with them even when its code caught
 them, like `try { while (true) {} } catch {}`.
 
@@ -536,7 +549,9 @@ not delay the checks of a slow loop running after it.
 The runtime exports the parts, for the kernels which compile the cells
 themselves: `LoopGuard` (`fn`, the guard passed to the compiled code,
 `registerSite()`, `beginExecution()`, `race(promise)`, `interrupt()`,
-`endExecution()`, `tripped`, `clearTimedOut()`, `timeout`, `resetClock()`),
+`clearInterrupt()`, `endExecution()`, `tripped`, `clearTimedOut()`,
+`timeout`, `resetClock()`, and the `onCheck` option, called when it checks
+the clock),
 `TimerRegistry` (`install(scope, context?)`, `enable()`, `clearAll()`, `restore()`), the error
 names `KEYBOARD_INTERRUPT` and `LOOP_TIMEOUT`, and `createRuntimeError(scope,
 name, message)`. The executor instruments the loops when its `loopGuard` is
@@ -567,9 +582,15 @@ and `silent` for a silent `execute_request`, whose outputs are dropped:
   when the frontend triggered it,
 - `runUncaught(callback)` reports an uncaught error in the parent of the
   callback which threw it,
+- `beginExecution()` and `endExecution()` surround a cell: while it runs, its
+  outputs after an `await` are not taken by the async callbacks captured in
+  an `Output` widget by others, and `endHeld(all?)` ends these captures,
+  only the ones started by the cells with `all` false,
 - `route(message)` returns the message with the `parentHeader` of its parent,
-  or `null` when an `Output` widget took it, or when its parent is `silent`
-  and the message is not a comm message.
+  or `null` when its parent is `silent` and the message is not a comm
+  message. The outputs an `Output` widget adds to its own outputs get a
+  `parentHeader` of the widget, and `sinkOf(parentHeader)` returns the widget
+  (an `IOutputSink`), which the evaluator gives them to once batched.
 
 ## Tracebacks
 
